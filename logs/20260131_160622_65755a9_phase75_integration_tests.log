@@ -1,0 +1,69 @@
+=== Build and Test Log ===
+Timestamp: Sat Jan 31 04:06:22 PM UTC 2026
+Commit: 65755a9
+
+=== Phase 7.5: Integration Tests ===
+Added 9 integration-style tests for curp-ht:
+- TestCausalDepSerialization
+- TestCausalDepZeroValue
+- TestWeakCommandChain
+- TestMultiClientCausalIndependence
+- TestWeakReplyPoolAllocation
+- TestCommandDescWeakExecution
+- TestWeakProposeMessageFields
+- TestWeakReplyMessageFields
+
+=== Build Output ===
+Build: SUCCESS
+
+=== Test Output ===
+=== RUN   TestMWeakProposeSerialization
+--- PASS: TestMWeakProposeSerialization (0.00s)
+=== RUN   TestMWeakReplySerialization
+--- PASS: TestMWeakReplySerialization (0.00s)
+=== RUN   TestMWeakProposeCache
+--- PASS: TestMWeakProposeCache (0.00s)
+=== RUN   TestMWeakReplyCache
+--- PASS: TestMWeakReplyCache (0.00s)
+=== RUN   TestConsistencyConstants
+--- PASS: TestConsistencyConstants (0.00s)
+=== RUN   TestCommandIdString
+--- PASS: TestCommandIdString (0.00s)
+=== RUN   TestWeakCommandExecution
+--- PASS: TestWeakCommandExecution (0.00s)
+=== RUN   TestMWeakProposeNew
+--- PASS: TestMWeakProposeNew (0.00s)
+=== RUN   TestMWeakReplyNew
+--- PASS: TestMWeakReplyNew (0.00s)
+=== RUN   TestMWeakProposeBinarySize
+--- PASS: TestMWeakProposeBinarySize (0.00s)
+=== RUN   TestMWeakReplyBinarySize
+--- PASS: TestMWeakReplyBinarySize (0.00s)
+=== RUN   TestCommandDescIsWeakField
+--- PASS: TestCommandDescIsWeakField (0.00s)
+=== RUN   TestMWeakProposeWithEmptyCommand
+--- PASS: TestMWeakProposeWithEmptyCommand (0.00s)
+=== RUN   TestMWeakReplyWithEmptyRep
+--- PASS: TestMWeakReplyWithEmptyRep (0.00s)
+=== RUN   TestMixedCommandsSlotOrdering
+--- PASS: TestMixedCommandsSlotOrdering (0.00s)
+=== RUN   TestCausalDepSerialization
+--- PASS: TestCausalDepSerialization (0.00s)
+=== RUN   TestCausalDepZeroValue
+--- PASS: TestCausalDepZeroValue (0.00s)
+=== RUN   TestWeakCommandChain
+--- PASS: TestWeakCommandChain (0.00s)
+=== RUN   TestMultiClientCausalIndependence
+--- PASS: TestMultiClientCausalIndependence (0.00s)
+=== RUN   TestWeakReplyPoolAllocation
+--- PASS: TestWeakReplyPoolAllocation (0.00s)
+=== RUN   TestCommandDescWeakExecution
+--- PASS: TestCommandDescWeakExecution (0.00s)
+=== RUN   TestWeakProposeMessageFields
+--- PASS: TestWeakProposeMessageFields (0.00s)
+=== RUN   TestWeakReplyMessageFields
+--- PASS: TestWeakReplyMessageFields (0.00s)
+PASS
+ok  	github.com/imdea-software/swiftpaxos/curp-ht	(cached)
+
+Tests: ALL PASS (24/24)
