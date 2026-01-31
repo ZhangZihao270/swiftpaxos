@@ -13,3 +13,4 @@ swiftpaxos
 .idea/
 .vscode/
 *.iml
+results/

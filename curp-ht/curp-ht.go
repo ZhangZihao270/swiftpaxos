@@ -184,6 +184,14 @@ func New(alias string, rid int, addrs []string, exec bool, pl, f int,
 	return r
 }
 
+// BeTheLeader always returns 0 as the leader for CURP-HT.
+// In CURP-HT, the leader is determined by the ballot (ballot=0 means replica 0 is leader).
+func (r *Replica) BeTheLeader(args *defs.BeTheLeaderArgs, reply *defs.BeTheLeaderReply) error {
+	reply.Leader = 0
+	reply.NextLeader = 0
+	return nil
+}
+
 func (r *Replica) run() {
 	r.ConnectToPeers()
 	latencies := r.ComputeClosestPeers()

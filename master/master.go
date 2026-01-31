@@ -3,7 +3,6 @@ package master
 import (
 	"errors"
 	"fmt"
-	"math"
 	"net"
 	"net/http"
 	"net/rpc"
@@ -220,15 +219,9 @@ func (master *Master) Register(args *defs.RegisterArgs, reply *defs.RegisterRepl
 		reply.NodeList = master.nodeList
 		reply.IsLeader = false
 
-		minLatency := math.MaxFloat64
+		// Always use replica 0 as the initial leader.
+		// Leader election is handled by the protocol (e.g., ballot-based in CURP-HT).
 		leader := 0
-
-		for i := 0; i < len(master.leader); i++ {
-			if master.latencies[i] < minLatency {
-				minLatency = master.latencies[i]
-				leader = i
-			}
-		}
 
 		if leader == index {
 			master.Printf("replica %d is the new leader", index)
