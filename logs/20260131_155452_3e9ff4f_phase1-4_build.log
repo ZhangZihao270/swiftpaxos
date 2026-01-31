@@ -1,0 +1,35 @@
+Build Log for Phase 1-4 Completion
+Date: Sat Jan 31 03:54:52 PM UTC 2026
+Commit: 3e9ff4f
+
+=== Build all packages ===
+Build: SUCCESS
+
+=== Test all packages ===
+?   	github.com/imdea-software/swiftpaxos	[no test files]
+?   	github.com/imdea-software/swiftpaxos/client	[no test files]
+?   	github.com/imdea-software/swiftpaxos/config	[no test files]
+?   	github.com/imdea-software/swiftpaxos/curp	[no test files]
+?   	github.com/imdea-software/swiftpaxos/curp-ht	[no test files]
+?   	github.com/imdea-software/swiftpaxos/dlog	[no test files]
+?   	github.com/imdea-software/swiftpaxos/epaxos	[no test files]
+?   	github.com/imdea-software/swiftpaxos/fastpaxos	[no test files]
+?   	github.com/imdea-software/swiftpaxos/hook	[no test files]
+?   	github.com/imdea-software/swiftpaxos/master	[no test files]
+?   	github.com/imdea-software/swiftpaxos/n2paxos	[no test files]
+?   	github.com/imdea-software/swiftpaxos/paxos	[no test files]
+?   	github.com/imdea-software/swiftpaxos/replica	[no test files]
+?   	github.com/imdea-software/swiftpaxos/replica/defs	[no test files]
+?   	github.com/imdea-software/swiftpaxos/rpc	[no test files]
+?   	github.com/imdea-software/swiftpaxos/state	[no test files]
+?   	github.com/imdea-software/swiftpaxos/swift	[no test files]
+
+=== curp-ht files ===
+total 100
+drwxrwxrwx  2 zihao sudo-users     7 Jan 31 15:54 .
+drwxrwxrwx 21 zihao sudo-users    33 Jan 31 15:54 ..
+-rwxrwxrwx  1 zihao sudo-users  1366 Jan 31 15:48 batcher.go
+-rwxrwxrwx  1 zihao sudo-users  6667 Jan 31 15:52 client.go
+-rwxrwxrwx  1 zihao sudo-users 16920 Jan 31 15:54 curp-ht.go
+-rwxrwxrwx  1 zihao sudo-users 27589 Jan 31 15:51 defs.go
+-rwxrwxrwx  1 zihao sudo-users   771 Jan 31 15:48 timer.go

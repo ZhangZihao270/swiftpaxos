@@ -1,0 +1,15 @@
+# Binaries
+swiftpaxos
+*.exe
+*.out
+
+# System files
+.apas
+.DS_Store
+*.swp
+*.swo
+
+# IDE files
+.idea/
+.vscode/
+*.iml
