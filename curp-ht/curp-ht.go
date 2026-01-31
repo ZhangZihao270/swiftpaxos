@@ -82,7 +82,8 @@ type commandDesc struct {
 	accepted    bool
 	pendingCall func()
 
-	isWeak bool // Mark if this is a weak command
+	isWeak  bool // Mark if this is a weak command
+	applied bool // Track if command has been applied to state machine
 }
 
 type commandStaticDesc struct {
@@ -511,12 +512,10 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 			r.sync(desc.cmdId, desc.cmd)
 		}
 
-		if desc.val == nil {
-			desc.val = desc.cmd.Execute(r.State)
-			r.executed.Set(slotStr, struct{}{})
-			go func(nextSlot int) {
-				r.deliverChan <- nextSlot
-			}(slot + 1)
+		// Speculative execution: compute result WITHOUT modifying state
+		if desc.val == nil && desc.phase != COMMIT {
+			// Before commit: use ComputeResult (read-only)
+			desc.val = desc.cmd.ComputeResult(r.State)
 		}
 
 		if r.isLeader && desc.phase != COMMIT {
@@ -537,6 +536,16 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 				// gets committed and executed
 				r.sender.SendToClient(desc.propose.ClientId, rep, r.cs.replyRPC)
 			}
+		}
+
+		// After commit: actually execute and modify state
+		if desc.phase == COMMIT && !desc.applied {
+			desc.val = desc.cmd.Execute(r.State)
+			desc.applied = true
+			r.executed.Set(slotStr, struct{}{})
+			go func(nextSlot int) {
+				r.deliverChan <- nextSlot
+			}(slot + 1)
 		}
 
 		if desc.phase == COMMIT {
@@ -743,14 +752,12 @@ func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
 	// 3. Create weak command descriptor
 	desc := r.getWeakCmdDesc(slot, propose, dep)
 
-	// 4. Speculative execution (execute immediately)
-	desc.val = propose.Command.Execute(r.State)
-	r.executed.Set(strconv.Itoa(slot), struct{}{})
+	// 4. Speculative execution: compute result WITHOUT modifying state
+	// State modification happens after commit in slot order (see asyncReplicateWeak)
+	desc.val = propose.Command.ComputeResult(r.State)
+	// Note: Do NOT mark as executed yet - that happens after commit
 
-	// 5. Mark this weak command as executed for causal ordering
-	r.markWeakExecuted(propose.ClientId, propose.CommandId)
-
-	// 6. Reply to client immediately (don't wait for replication)
+	// 5. Reply to client immediately (don't wait for replication)
 	// Use object pool to reduce allocations
 	rep := r.weakReplyPool.Get().(*MWeakReply)
 	rep.Replica = r.Id
@@ -761,8 +768,9 @@ func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
 	// Note: We don't return to pool immediately since sender may still use it
 	// In a production system, we'd need to track send completion for proper recycling
 
-	// 7. Async replication (background, non-blocking)
-	go r.asyncReplicateWeak(desc, slot)
+	// 6. Async replication (background, non-blocking)
+	// Actual state modification and marking as executed happens after commit
+	go r.asyncReplicateWeak(desc, slot, propose.ClientId, propose.CommandId)
 }
 
 // getWeakCmdDesc creates a command descriptor for weak commands
@@ -792,7 +800,8 @@ func (r *Replica) getWeakCmdDesc(slot int, propose *MWeakPropose, dep int) *comm
 }
 
 // asyncReplicateWeak replicates weak command to other replicas asynchronously
-func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int) {
+// After replication completes (commit), it executes the command in slot order
+func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32, seqNum int32) {
 	// Send Accept to other replicas
 	acc := &MAccept{
 		Replica: r.Id,
@@ -807,6 +816,44 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int) {
 
 	// The accept/commit flow will continue through normal message handling
 	// Once majority acks are received, the command will be committed
+	// The actual execution happens through the deliver() mechanism which
+	// ensures slot ordering is maintained
+
+	// After commit is complete (tracked via committed map), execute in slot order
+	// Wait for commit
+	slotStr := strconv.Itoa(slot)
+	for i := 0; i < 10000; i++ { // Max ~1s wait
+		if r.committed.Has(slotStr) {
+			break
+		}
+		time.Sleep(100 * time.Microsecond)
+	}
+
+	// Wait for slot-1 to be executed (slot ordering)
+	if slot > 0 {
+		prevSlotStr := strconv.Itoa(slot - 1)
+		for i := 0; i < 10000; i++ { // Max ~1s wait
+			if r.executed.Has(prevSlotStr) {
+				break
+			}
+			time.Sleep(100 * time.Microsecond)
+		}
+	}
+
+	// Now execute and mark as executed (state modification happens here)
+	if !desc.applied {
+		desc.val = desc.cmd.Execute(r.State)
+		desc.applied = true
+		r.executed.Set(slotStr, struct{}{})
+
+		// Mark this weak command as executed for causal ordering
+		r.markWeakExecuted(clientId, seqNum)
+
+		// Trigger next slot
+		go func(nextSlot int) {
+			r.deliverChan <- nextSlot
+		}(slot + 1)
+	}
 }
 
 // waitForWeakDep waits for a causal dependency to be executed

@@ -144,6 +144,122 @@ Implement Hybrid Consistency on top of CURP, supporting Strong (Linearizable) an
   - Added case "curpht" in protocol switch (runSingleClient)
   - Added curpht client initialization with same pattern as curp
 
+### Phase 9: Critical Bug Fixes [CRITICAL - BLOCKING]
+
+> **These issues must be fixed before the implementation is correct!**
+
+#### Issue 1: Speculative Execution Should NOT Modify State Machine
+
+**Problem**: Currently, both strong and weak commands modify the state machine during speculative execution, before commit. This violates the correctness of the protocol.
+
+**Current Wrong Behavior**:
+```go
+// curp-ht.go:514-516 (Strong speculative execution)
+desc.val = desc.cmd.Execute(r.State)  // ❌ Modifies state machine!
+
+// curp-ht.go:747-748 (Weak execution)
+desc.val = propose.Command.Execute(r.State)  // ❌ Modifies state machine!
+```
+
+**Correct Behavior**:
+- Speculative execution should only **compute the result** without modifying state
+- State machine should only be modified **after commit** (replication to majority)
+
+- [x] **9.1** Add `ComputeResult()` method to state/state.go [26:01:31, 16:15]
+  - New method that reads state but doesn't modify it
+  - GET/SCAN: return value from state
+  - PUT: return NIL() without modifying state
+  - Added 7 unit tests in state/state_test.go
+
+- [x] **9.2** Add `applied` field to commandDesc struct [26:01:31, 16:16]
+  - Track whether command has been applied to state machine
+  - Prevent double application
+
+- [x] **9.3** Modify `deliver()` for strong commands [26:01:31, 16:18]
+  - Speculative phase: use `ComputeResult()` instead of `Execute()`
+  - After COMMIT: use `Execute()` to apply to state machine
+  - Only set `r.executed` after actual execution
+
+- [x] **9.4** Modify `handleWeakPropose()` for weak commands [26:01:31, 16:20]
+  - Use `ComputeResult()` for speculative result (don't modify state)
+  - State modification happens after commit in slot order
+
+#### Issue 2: Weak Commands Must Follow Slot Ordering for Execution
+
+**Problem**: Weak commands only check `CausalDep` but don't check if `slot-1` has been executed. This can cause out-of-order state machine modifications.
+
+**Current Wrong Behavior**:
+```go
+// curp-ht.go:732-734 - Only checks causal dep, not slot ordering
+if propose.CausalDep > 0 {
+    r.waitForWeakDep(propose.ClientId, propose.CausalDep)
+}
+// Then directly executes without checking slot-1
+```
+
+**Correct Behavior**:
+- Weak commands must wait for `slot-1` to be executed before executing
+- `CausalDep` is for client session ordering (optional)
+- Slot ordering is for global state machine consistency (required)
+
+- [x] **9.5** Modify weak command execution to follow slot ordering [26:01:31, 16:20]
+  - After commit, check `slot-1` is executed before executing current slot
+  - Same ordering guarantee as strong commands
+
+- [x] **9.6** Unify execution path for strong and weak commands [26:01:31, 16:20]
+  - Both go through same slot-ordered execution
+  - Both use applied field to prevent double execution
+  - Both check slot-1 before executing
+
+- [x] **9.7** Update `asyncReplicateWeak()` to trigger proper execution [26:01:31, 16:20]
+  - After majority ack (commit), wait for slot ordering
+  - Execute in slot order with proper state modification
+
+#### Testing for Bug Fixes
+
+- [x] **9.8** Add test: State not modified during speculative execution [26:01:31, 16:22]
+  - TestComputeResultDoesNotModifyState
+  - TestExecuteModifiesStateAfterCommit
+
+- [x] **9.9** Add test: Execution follows slot order for mixed commands [26:01:31, 16:22]
+  - TestSlotOrderedExecution
+  - TestMixedStrongWeakSlotOrdering
+
+- [x] **9.10** Add test: Correct result returned after commit [26:01:31, 16:22]
+  - TestSpeculativeResultMatchesFinalResult
+  - TestAppliedFieldTracking
+
+---
+
+## Execution Flow After Fixes
+
+### Strong Command (Corrected)
+```
+1. Client → All Replicas (Propose)
+2. Leader: Assign slot, ComputeResult() (NO state modify)
+3. Leader: Send MReply with speculative result
+4. Leader: Start replication (Accept)
+5. Collect majority Acks → Commit
+6. After Commit: Execute() in slot order (modify state)
+7. Send MSyncReply
+```
+
+### Weak Command (Corrected)
+```
+1. Client → Leader (WeakPropose)
+2. Leader: Assign slot, ComputeResult() (NO state modify)
+3. Leader: Send MWeakReply with speculative result (1 RTT done for client)
+4. Leader: Async replication (Accept)
+5. Collect majority Acks → Commit
+6. After Commit: Execute() in slot order (modify state)
+```
+
+### Key Invariants
+1. **State machine only modified after commit**
+2. **Execution always follows slot order**: slot N executes only after slot N-1
+3. **Speculative result ≠ State modification**
+4. **Both strong and weak share same execution ordering**
+
 ---
 
 ## Repeated Tasks

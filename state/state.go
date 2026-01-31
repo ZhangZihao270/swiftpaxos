@@ -145,6 +145,44 @@ func (c *Command) Execute(st *State) Value {
 	return NIL()
 }
 
+// ComputeResult returns the speculative result of a command without modifying state.
+// This is used for speculative execution before commit.
+// - GET/SCAN: Returns the value(s) from state (read-only)
+// - PUT: Returns NIL() without modifying state
+// - NONE: Returns NIL()
+func (c *Command) ComputeResult(st *State) Value {
+	st.mutex.Lock()
+	defer st.mutex.Unlock()
+
+	switch c.Op {
+	case GET:
+		if value, present := st.Store.Get(c.K); present {
+			valAsserted := value.(Value)
+			return valAsserted
+		}
+
+	case SCAN:
+		found := make([]Value, 0)
+		count := binary.LittleEndian.Uint64(c.V)
+		it := st.Store.Select(func(index interface{}, value interface{}) bool {
+			keyAsserted := index.(Key)
+			return keyAsserted >= c.K && keyAsserted <= c.K+Key(count)
+		}).Iterator()
+		for it.Next() {
+			valAsserted := it.Value().(Value)
+			found = append(found, valAsserted)
+		}
+		return concat(found)
+
+	case PUT:
+		// For PUT, return NIL during speculation
+		// The actual state modification happens on commit via Execute()
+		return NIL()
+	}
+
+	return NIL()
+}
+
 func (t *Value) String() string {
 	if t == nil || len(*t) == 0 {
 		return "(void)"
