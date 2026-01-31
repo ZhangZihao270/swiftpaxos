@@ -386,8 +386,9 @@ func (r *Replica) waitForPeerConnections(done chan bool) {
 	var b [4]byte
 	bs := b[:4]
 
-	port := strings.Split(r.PeerAddrList[r.Id], ":")[1]
-	l, err := net.Listen("tcp", "0.0.0.0:"+port)
+	// Bind to specific IP to allow multiple replicas on same machine
+	addr := r.PeerAddrList[r.Id]
+	l, err := net.Listen("tcp", addr)
 	if err != nil {
 		r.Fatal(r.PeerAddrList[r.Id], err)
 	}

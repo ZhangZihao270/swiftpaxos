@@ -229,6 +229,13 @@ func (c *Client) SendRead(key int64) int32 {
 	return c.seqnum
 }
 
+// GetNextSeqnum increments and returns the next sequence number.
+// This allows external packages to use the same seqnum space as SendWrite/SendRead.
+func (c *Client) GetNextSeqnum() int32 {
+	c.seqnum++
+	return c.seqnum
+}
+
 func (c *Client) SendScan(key, count int64) int32 {
 	c.seqnum++
 	p := defs.Propose{

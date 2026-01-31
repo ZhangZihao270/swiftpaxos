@@ -69,7 +69,8 @@ func runReplica(c *config.Config, logger *dlog.Logger) {
 	}
 
 	rpc.HandleHTTP()
-	l, err := net.Listen("tcp", fmt.Sprintf(":%d", port+1000))
+	// Bind RPC listener to specific IP to allow multiple replicas on same machine
+	l, err := net.Listen("tcp", fmt.Sprintf("%s:%d", addr, port+1000))
 	if err != nil {
 		log.Fatal("listen error:", err)
 	}

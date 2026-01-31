@@ -506,7 +506,9 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 			return
 		}
 
-		if slot > 0 && !r.executed.Has(strconv.Itoa(slot-1)) {
+		// For COMMIT phase, check slot ordering before execution
+		// For speculative replies (leader, phase != COMMIT), skip this check
+		if desc.phase == COMMIT && slot > 0 && !r.executed.Has(strconv.Itoa(slot-1)) {
 			return
 		}
 

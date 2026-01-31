@@ -60,7 +60,7 @@ func NewClient(b *client.BufferClient, repNum, reqNum, pclients int) *Client {
 		num: num,
 		val: nil,
 
-		leader:    -1,
+		leader:    0, // Default to replica 0 (leader when no quorum file, since ballot=0=Id)
 		ballot:    -1,
 		delivered: make(map[int32]struct{}),
 
@@ -303,13 +303,15 @@ func (c *Client) SendWeakRead(key int64) int32 {
 	return seqnum
 }
 
-// getNextSeqnum returns the next sequence number
-// Note: This accesses the embedded Client's seqnum field
+// getNextSeqnum returns the next sequence number from the base client.
+// This ensures weak commands use the same seqnum space as strong commands,
+// preventing conflicts when mixing strong and weak commands in HybridLoop.
 func (c *Client) getNextSeqnum() int32 {
-	// Access the base client's seqnum through SendWrite which increments it
-	// For now, we track our own seqnum for weak commands
-	c.lastCmdId.SeqNum++
-	return c.lastCmdId.SeqNum
+	// Use the base client's seqnum to share the same sequence space
+	// GetNextSeqnum is promoted through BufferClient -> Client embedding
+	seqnum := c.BufferClient.GetNextSeqnum()
+	c.lastCmdId.SeqNum = seqnum
+	return seqnum
 }
 
 // HybridClient interface implementation
