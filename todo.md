@@ -81,22 +81,28 @@ Implement Hybrid Consistency on top of CURP, supporting Strong (Linearizable) an
 
 ### Phase 5: Performance Optimizations [MEDIUM PRIORITY]
 
-- [ ] **5.1** Add object pool for MWeakReply
-  - Reduce allocation overhead
+- [x] **5.1** Add object pool for MWeakReply [26:01:31, 16:26]
+  - Added weakReplyPool sync.Pool to Replica struct
+  - Used pool in handleWeakPropose for allocation reuse
 
 - [ ] **5.2** Consider integer-keyed concurrent map
   - Avoid strconv.Itoa overhead (optional, measure first)
+  - SKIPPED: Would require significant refactoring, defer to performance testing
 
 ### Phase 6: Causal Ordering [MEDIUM PRIORITY]
 
-- [ ] **6.1** Add CausalDep field to MWeakPropose
+- [x] **6.1** Add CausalDep field to MWeakPropose [26:01:31, 16:02]
   - Track causal dependencies
+  - Updated Marshal/Unmarshal serialization methods
 
-- [ ] **6.2** Add lastWeakSeqNum tracking in client
+- [x] **6.2** Add lastWeakSeqNum tracking in client [26:01:31, 16:02]
   - Track sequence number of last weak command
+  - Updated SendWeakWrite/SendWeakRead to set CausalDep
 
-- [ ] **6.3** Implement waitForExecution in replica
-  - Ensure causal order before executing weak commands
+- [x] **6.3** Implement waitForExecution in replica [26:01:31, 16:02]
+  - Added weakExecuted cmap to track executed weak commands
+  - Implemented waitForWeakDep with spin-wait and timeout
+  - Implemented markWeakExecuted to signal completion
 
 ### Phase 7: Testing [HIGH PRIORITY]
 

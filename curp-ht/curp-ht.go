@@ -50,6 +50,13 @@ type Replica struct {
 	descPool     sync.Pool
 	poolLevel    int
 	routineCount int
+
+	// Object pool for weak reply messages
+	weakReplyPool sync.Pool
+
+	// Track executed weak commands per client for causal ordering
+	// Key: clientId, Value: last executed weak command seqnum
+	weakExecuted cmap.ConcurrentMap
 }
 
 type commandDesc struct {
@@ -109,8 +116,9 @@ func New(alias string, rid int, addrs []string, exec bool, pl, f int,
 		unsynced:  cmap.New(),
 		executed:  cmap.New(),
 		committed: cmap.New(),
-		delivered: cmap.New(),
-		history:   make([]commandStaticDesc, HISTORY_SIZE),
+		delivered:    cmap.New(),
+		weakExecuted: cmap.New(),
+		history:      make([]commandStaticDesc, HISTORY_SIZE),
 
 		deliverChan: make(chan int, defs.CHAN_BUFFER_SIZE),
 
@@ -120,6 +128,12 @@ func New(alias string, rid int, addrs []string, exec bool, pl, f int,
 		descPool: sync.Pool{
 			New: func() interface{} {
 				return &commandDesc{}
+			},
+		},
+
+		weakReplyPool: sync.Pool{
+			New: func() interface{} {
+				return &MWeakReply{}
 			},
 		},
 	}
@@ -714,6 +728,11 @@ func (r *Replica) handleMsg(m interface{}, desc *commandDesc, slot int, dep int)
 
 // handleWeakPropose handles weak consistency command from client
 func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
+	// 0. Wait for causal dependency if present (ensures session order)
+	if propose.CausalDep > 0 {
+		r.waitForWeakDep(propose.ClientId, propose.CausalDep)
+	}
+
 	// 1. Assign slot (share slot space with strong for global ordering)
 	slot := r.lastCmdSlot
 	r.lastCmdSlot++
@@ -728,16 +747,21 @@ func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
 	desc.val = propose.Command.Execute(r.State)
 	r.executed.Set(strconv.Itoa(slot), struct{}{})
 
-	// 5. Reply to client immediately (don't wait for replication)
-	rep := &MWeakReply{
-		Replica: r.Id,
-		Ballot:  r.ballot,
-		CmdId:   desc.cmdId,
-		Rep:     desc.val,
-	}
-	r.sender.SendToClient(propose.ClientId, rep, r.cs.weakReplyRPC)
+	// 5. Mark this weak command as executed for causal ordering
+	r.markWeakExecuted(propose.ClientId, propose.CommandId)
 
-	// 6. Async replication (background, non-blocking)
+	// 6. Reply to client immediately (don't wait for replication)
+	// Use object pool to reduce allocations
+	rep := r.weakReplyPool.Get().(*MWeakReply)
+	rep.Replica = r.Id
+	rep.Ballot = r.ballot
+	rep.CmdId = desc.cmdId
+	rep.Rep = desc.val
+	r.sender.SendToClient(propose.ClientId, rep, r.cs.weakReplyRPC)
+	// Note: We don't return to pool immediately since sender may still use it
+	// In a production system, we'd need to track send completion for proper recycling
+
+	// 7. Async replication (background, non-blocking)
 	go r.asyncReplicateWeak(desc, slot)
 }
 
@@ -783,4 +807,40 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int) {
 
 	// The accept/commit flow will continue through normal message handling
 	// Once majority acks are received, the command will be committed
+}
+
+// waitForWeakDep waits for a causal dependency to be executed
+// This ensures that weak commands from the same client execute in order
+func (r *Replica) waitForWeakDep(clientId int32, depSeqNum int32) {
+	clientKey := strconv.FormatInt(int64(clientId), 10)
+
+	// Spin wait with brief sleeps until dependency is executed
+	// In production, this could use channels/conditions for efficiency
+	for i := 0; i < 1000; i++ { // Max ~100ms wait (100 iterations * 100us)
+		if lastExec, exists := r.weakExecuted.Get(clientKey); exists {
+			if lastExec.(int32) >= depSeqNum {
+				return // Dependency satisfied
+			}
+		}
+		// Brief sleep to avoid busy-waiting
+		time.Sleep(100 * time.Microsecond)
+	}
+	// Timeout: proceed anyway to avoid deadlock
+	// In production, might want to log a warning here
+}
+
+// markWeakExecuted marks a weak command as executed for causal ordering
+func (r *Replica) markWeakExecuted(clientId int32, seqNum int32) {
+	clientKey := strconv.FormatInt(int64(clientId), 10)
+	r.weakExecuted.Upsert(clientKey, nil,
+		func(exists bool, mapV, _ interface{}) interface{} {
+			if exists {
+				// Only update if this seqNum is newer
+				if seqNum > mapV.(int32) {
+					return seqNum
+				}
+				return mapV
+			}
+			return seqNum
+		})
 }

@@ -33,7 +33,8 @@ type Client struct {
 	alreadySlow map[CommandId]struct{}
 
 	// Weak command tracking
-	weakPending map[int32]struct{}
+	weakPending    map[int32]struct{}
+	lastWeakSeqNum int32 // Track sequence number of last weak command for causal ordering
 }
 
 var (
@@ -262,10 +263,12 @@ func (c *Client) SendWeakWrite(key int64, value []byte) int32 {
 			V:  value,
 		},
 		Timestamp: 0,
+		CausalDep: c.lastWeakSeqNum, // Depend on previous weak command
 	}
 
-	// Track as pending
+	// Track as pending and update lastWeakSeqNum for causal ordering
 	c.weakPending[seqnum] = struct{}{}
+	c.lastWeakSeqNum = seqnum
 
 	// Send only to leader
 	if c.leader != -1 {
@@ -286,10 +289,12 @@ func (c *Client) SendWeakRead(key int64) int32 {
 			V:  state.NIL(),
 		},
 		Timestamp: 0,
+		CausalDep: c.lastWeakSeqNum, // Depend on previous weak command
 	}
 
-	// Track as pending
+	// Track as pending and update lastWeakSeqNum for causal ordering
 	c.weakPending[seqnum] = struct{}{}
+	c.lastWeakSeqNum = seqnum
 
 	// Send only to leader
 	if c.leader != -1 {

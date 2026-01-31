@@ -107,6 +107,7 @@ type MWeakPropose struct {
 	ClientId  int32
 	Command   state.Command
 	Timestamp int64
+	CausalDep int32 // Sequence number of the previous weak command from this client (0 if none)
 }
 
 // MWeakReply - Weak command reply (Leader replies immediately)
@@ -1035,7 +1036,7 @@ func (t *MWeakPropose) Marshal(wire io.Writer) {
 	bs[7] = byte(tmp32 >> 24)
 	wire.Write(bs)
 	t.Command.Marshal(wire)
-	bs = b[:8]
+	bs = b[:12]
 	tmp64 := t.Timestamp
 	bs[0] = byte(tmp64)
 	bs[1] = byte(tmp64 >> 8)
@@ -1045,6 +1046,11 @@ func (t *MWeakPropose) Marshal(wire io.Writer) {
 	bs[5] = byte(tmp64 >> 40)
 	bs[6] = byte(tmp64 >> 48)
 	bs[7] = byte(tmp64 >> 56)
+	tmp32 = t.CausalDep
+	bs[8] = byte(tmp32)
+	bs[9] = byte(tmp32 >> 8)
+	bs[10] = byte(tmp32 >> 16)
+	bs[11] = byte(tmp32 >> 24)
 	wire.Write(bs)
 }
 
@@ -1058,11 +1064,12 @@ func (t *MWeakPropose) Unmarshal(wire io.Reader) error {
 	t.CommandId = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
 	t.ClientId = int32((uint32(bs[4]) | (uint32(bs[5]) << 8) | (uint32(bs[6]) << 16) | (uint32(bs[7]) << 24)))
 	t.Command.Unmarshal(wire)
-	bs = b[:8]
-	if _, err := io.ReadAtLeast(wire, bs, 8); err != nil {
+	bs = b[:12]
+	if _, err := io.ReadAtLeast(wire, bs, 12); err != nil {
 		return err
 	}
 	t.Timestamp = int64((uint64(bs[0]) | (uint64(bs[1]) << 8) | (uint64(bs[2]) << 16) | (uint64(bs[3]) << 24) | (uint64(bs[4]) << 32) | (uint64(bs[5]) << 40) | (uint64(bs[6]) << 48) | (uint64(bs[7]) << 56)))
+	t.CausalDep = int32((uint32(bs[8]) | (uint32(bs[9]) << 8) | (uint32(bs[10]) << 16) | (uint32(bs[11]) << 24)))
 	return nil
 }
 
