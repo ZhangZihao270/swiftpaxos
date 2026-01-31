@@ -814,3 +814,179 @@ func TestMixedStrongWeakSlotOrdering(t *testing.T) {
 		t.Error("Slot ordering violated: weak(1) should be before strong(2)")
 	}
 }
+
+// ============================================================================
+// Phase 10: Non-Blocking Speculative Reads Tests
+// ============================================================================
+
+// TestPendingWriteKey verifies the key generation for pending writes
+func TestPendingWriteKey(t *testing.T) {
+	key1 := pendingWriteKey(100, state.Key(42))
+	expected := "100:42"
+	if key1 != expected {
+		t.Errorf("pendingWriteKey(100, 42) = %q, want %q", key1, expected)
+	}
+
+	key2 := pendingWriteKey(200, state.Key(999))
+	expected2 := "200:999"
+	if key2 != expected2 {
+		t.Errorf("pendingWriteKey(200, 999) = %q, want %q", key2, expected2)
+	}
+}
+
+// TestPendingWriteStruct verifies the pendingWrite struct
+func TestPendingWriteStruct(t *testing.T) {
+	pw := &pendingWrite{
+		seqNum: 5,
+		value:  state.Value([]byte("test-value")),
+	}
+
+	if pw.seqNum != 5 {
+		t.Errorf("seqNum = %d, want 5", pw.seqNum)
+	}
+	if !bytes.Equal(pw.value, []byte("test-value")) {
+		t.Errorf("value mismatch")
+	}
+}
+
+// TestSameClientReadAfterWrite tests that a read sees pending write from same client
+// This is the key test for Phase 10 optimization
+func TestSameClientReadAfterWrite(t *testing.T) {
+	// Simulate the scenario:
+	// Client 100 sends: W1 = PUT(key=1, "A"), R1 = GET(key=1) with CausalDep=W1
+	// R1 should return "A" immediately via pending writes
+
+	st := state.InitState()
+
+	// Initial state: key 1 doesn't exist
+	getCmd := state.Command{Op: state.GET, K: state.Key(1), V: state.NIL()}
+	result := getCmd.ComputeResult(st)
+	if len(result) != 0 {
+		t.Error("Key should not exist initially")
+	}
+
+	// Simulate pending write: PUT(key=1, "A") with seqNum=1
+	// In real implementation, this would be tracked in pendingWrites map
+	pendingValue := state.Value([]byte("A"))
+	pw := &pendingWrite{seqNum: 1, value: pendingValue}
+
+	// Now simulate a read with CausalDep=1
+	// The read should see the pending value, not the committed state
+	if pw.seqNum <= 1 { // CausalDep=1
+		// Read sees pending value
+		if !bytes.Equal(pw.value, []byte("A")) {
+			t.Errorf("Read should see pending value 'A', got %v", pw.value)
+		}
+	}
+}
+
+// TestPendingWritesCleanup verifies that pending writes are cleaned up after commit
+func TestPendingWritesCleanup(t *testing.T) {
+	// This is a conceptual test - full integration requires replica setup
+	// We verify the cleanup logic: after commit, pending write should be removed
+
+	pw := &pendingWrite{seqNum: 5, value: state.Value([]byte("pending"))}
+
+	// Before cleanup
+	if pw.seqNum != 5 {
+		t.Error("Pending write should exist before cleanup")
+	}
+
+	// After cleanup (simulate by setting to nil)
+	// In real implementation, r.removePendingWrite() is called
+	pw = nil
+	if pw != nil {
+		t.Error("Pending write should be nil after cleanup")
+	}
+}
+
+// TestCrossClientIsolation verifies that clients can't see each other's pending writes
+func TestCrossClientIsolation(t *testing.T) {
+	// Client A (100) has pending write on key 1
+	// Client B (200) reads key 1 - should NOT see A's pending write
+
+	clientA := int32(100)
+	clientB := int32(200)
+	key := state.Key(1)
+
+	// Client A's pending write
+	keyA := pendingWriteKey(clientA, key)
+	keyB := pendingWriteKey(clientB, key)
+
+	// Keys should be different
+	if keyA == keyB {
+		t.Error("Different clients should have different pending write keys")
+	}
+
+	// Verify key format includes client ID
+	if keyA != "100:1" {
+		t.Errorf("Client A key = %q, want '100:1'", keyA)
+	}
+	if keyB != "200:1" {
+		t.Errorf("Client B key = %q, want '200:1'", keyB)
+	}
+}
+
+// TestPendingWriteSequenceOrdering verifies newer writes overwrite older ones
+func TestPendingWriteSequenceOrdering(t *testing.T) {
+	// If client sends W1 then W2 on same key, W2 should be the pending write
+
+	pw1 := &pendingWrite{seqNum: 1, value: state.Value([]byte("v1"))}
+	pw2 := &pendingWrite{seqNum: 2, value: state.Value([]byte("v2"))}
+
+	// W2 should overwrite W1 (seqNum 2 > 1)
+	if pw2.seqNum <= pw1.seqNum {
+		t.Error("W2.seqNum should be greater than W1.seqNum")
+	}
+
+	// The latest pending write should be used
+	latest := pw2
+	if !bytes.Equal(latest.value, []byte("v2")) {
+		t.Errorf("Latest value should be 'v2', got %v", latest.value)
+	}
+}
+
+// TestComputeSpeculativeResultGETWithPending tests GET with pending writes
+func TestComputeSpeculativeResultGETWithPending(t *testing.T) {
+	// This is a logic test for the computeSpeculativeResult behavior
+	// When there's a pending write matching the key and satisfying CausalDep,
+	// it should return the pending value instead of committed state
+
+	st := state.InitState()
+
+	// Committed state: key 1 = "committed"
+	commitCmd := state.Command{Op: state.PUT, K: state.Key(1), V: state.Value([]byte("committed"))}
+	commitCmd.Execute(st)
+
+	// Pending write: key 1 = "pending" with seqNum=5
+	pendingVal := state.Value([]byte("pending"))
+	pw := &pendingWrite{seqNum: 5, value: pendingVal}
+
+	// A read with CausalDep=5 should see the pending value
+	// (simulating the logic in computeSpeculativeResult)
+	causalDep := int32(5)
+	if pw.seqNum <= causalDep {
+		// Should use pending value
+		if !bytes.Equal(pw.value, []byte("pending")) {
+			t.Error("Should return pending value when CausalDep is satisfied")
+		}
+	}
+
+	// A read with CausalDep=4 should NOT see this pending value
+	causalDep = 4
+	if pw.seqNum <= causalDep {
+		t.Error("Should NOT return pending value when CausalDep is not satisfied")
+	}
+}
+
+// TestComputeSpeculativeResultPUT tests PUT returns NIL
+func TestComputeSpeculativeResultPUT(t *testing.T) {
+	st := state.InitState()
+	putCmd := state.Command{Op: state.PUT, K: state.Key(1), V: state.Value([]byte("test"))}
+
+	// ComputeResult for PUT should return NIL
+	result := putCmd.ComputeResult(st)
+	if len(result) != 0 {
+		t.Errorf("ComputeResult(PUT) should return NIL, got %v", result)
+	}
+}

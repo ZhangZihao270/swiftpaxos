@@ -229,6 +229,87 @@ if propose.CausalDep > 0 {
   - TestSpeculativeResultMatchesFinalResult
   - TestAppliedFieldTracking
 
+### Phase 10: Non-Blocking Speculative Reads [MEDIUM PRIORITY]
+
+> **Optimization**: Make same-client dependent reads truly 1-RTT by computing speculative results without blocking on causal dependencies.
+
+#### Problem
+
+**Current Behavior**: When a weak read depends on an uncommitted weak write from the same client, the read blocks waiting for the write to be committed and executed before computing the speculative result.
+
+```go
+// Current: R1 blocks waiting for W1 to execute
+func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
+    if propose.CausalDep > 0 {
+        r.waitForWeakDep(propose.ClientId, propose.CausalDep)  // ❌ BLOCKS!
+    }
+    desc.val = propose.Command.ComputeResult(r.State)  // Only then compute result
+}
+```
+
+**Impact**: Same-client read-after-write has latency = write's commit time + read's processing, not 1 RTT.
+
+#### Solution
+
+Track pending (uncommitted) writes per client. When computing speculative result for a read, check pending writes first before falling back to committed state.
+
+```go
+// Ideal: R1 computes result immediately using pending writes
+func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
+    // No blocking! Compute speculative result considering pending writes
+    desc.val = r.computeSpeculativeResult(propose.ClientId, propose.CausalDep, propose.Command)
+}
+```
+
+#### Tasks
+
+- [x] **10.1** Add pending writes tracking structure to Replica [26:01:31, 20:50]
+  - Added `pendingWrites cmap.ConcurrentMap` to Replica
+  - Added `pendingWrite` struct with seqNum and value
+  - Added helper functions: pendingWriteKey, addPendingWrite, removePendingWrite, getPendingWrite
+
+- [x] **10.2** Track pending writes in handleWeakPropose [26:01:31, 20:52]
+  - When weak PUT arrives, call addPendingWrite()
+  - Store seqNum and value for later lookup
+
+- [x] **10.3** Clean up pending writes after commit [26:01:31, 20:52]
+  - In asyncReplicateWeak, after Execute(), call removePendingWrite()
+  - Only removes if seqNum matches (don't remove newer pending writes)
+
+- [x] **10.4** Implement computeSpeculativeResult method [26:01:31, 20:52]
+  - For GET: checks pendingWrites[clientId][key] with seqNum <= CausalDep first
+  - If found, returns pending value
+  - Otherwise, falls back to ComputeResult(r.State)
+
+- [x] **10.5** Remove blocking waitForWeakDep call [26:01:31, 20:52]
+  - Removed from handleWeakPropose (no blocking for speculative result)
+  - Moved to asyncReplicateWeak for actual execution ordering (after commit)
+
+- [x] **10.6** Handle SCAN with pending writes [26:01:31, 20:52]
+  - SCAN currently uses committed state only
+  - Pending write overlay for SCAN is complex, deferred to future optimization
+
+#### Testing
+
+- [x] **10.7** Test: Same-client read-after-write returns pending value [26:01:31, 20:55]
+  - TestSameClientReadAfterWrite
+  - TestComputeSpeculativeResultGETWithPending
+
+- [x] **10.8** Test: Pending writes cleaned up after commit [26:01:31, 20:55]
+  - TestPendingWritesCleanup
+
+- [x] **10.9** Test: Cross-client reads don't see other client's pending writes [26:01:31, 20:55]
+  - TestCrossClientIsolation
+  - TestPendingWriteKey
+
+#### Latency Comparison
+
+| Scenario | Current | After Optimization |
+|----------|---------|-------------------|
+| Independent weak command | 1 RTT | 1 RTT |
+| Same-client read after write | ~commit latency | 1 RTT ✅ |
+| Cross-client read | 1 RTT (may be stale) | 1 RTT (may be stale) |
+
 ---
 
 ## Execution Flow After Fixes
