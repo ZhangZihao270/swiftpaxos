@@ -102,6 +102,12 @@ type Config struct {
 	// Hot key for this set of clients
 	Key int
 
+	// Hybrid consistency benchmark parameters
+	// Percentage of commands that use weak consistency (0-100), default 0 (all strong)
+	WeakRatio int
+	// Percentage of weak commands that are writes (0-100), default 50
+	WeakWrites int
+
 	// quorum config file
 	Quorum string
 
@@ -226,6 +232,12 @@ func Read(filename, alias string) (*Config, error) {
 				ok = true
 			case "commandsize":
 				c.CommandSize, err = expectInt(words)
+				ok = true
+			case "weakratio":
+				c.WeakRatio, err = expectInt(words)
+				ok = true
+			case "weakwrites":
+				c.WeakWrites, err = expectInt(words)
 				ok = true
 			}
 			if ok {

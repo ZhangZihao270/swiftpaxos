@@ -343,6 +343,148 @@ func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
 
 ---
 
+### Phase 11: Hybrid Consistency Benchmark [HIGH PRIORITY]
+
+> **Goal**: Implement a general benchmark framework that supports both strong and weak consistency commands, enabling evaluation of curp-ht and future hybrid consistency protocols.
+
+#### Background
+
+**Current Limitation**: The existing benchmark in `client/buffer.go` (Loop() method) only supports strong commands via `SendWrite()`/`SendRead()`. The curp-ht client has `SendWeakWrite()`/`SendWeakRead()` methods but they are not integrated into any benchmark.
+
+**Key Reference Files**:
+- `client/buffer.go`: Original benchmark implementation (Loop method, lines ~150-250)
+- `curp-ht/client.go`: Weak command methods (SendWeakWrite, SendWeakRead)
+- `config/config.go`: Configuration parsing (Writes ratio, Reqs, etc.)
+- `main.go`: Client initialization and benchmark invocation (lines 166-184)
+
+#### Design Principles
+
+1. **General Interface**: Define a benchmark interface that any hybrid consistency protocol can implement
+2. **Backward Compatible**: Existing protocols should work without modification
+3. **Configurable Workload**: Support configurable ratios for reads/writes and strong/weak commands
+4. **Metrics Collection**: Track latency, throughput, and consistency level statistics
+
+#### Tasks
+
+##### 11.1 Define Hybrid Benchmark Interface
+
+- [x] **11.1.1** Create `client/hybrid.go` with HybridClient interface [26:01:31, 21:15]
+  - Methods: `SendStrongWrite()`, `SendStrongRead()`, `SendWeakWrite()`, `SendWeakRead()`
+  - Allow protocols to implement only what they support
+  - Reference: curp-ht/client.go for weak command signatures
+
+- [x] **11.1.2** Define ConsistencyLevel enum (Strong, Weak) [26:01:31, 21:15]
+  - Created in client/hybrid.go with String() method
+
+##### 11.2 Extend Configuration
+
+- [x] **11.2.1** Add `weakRatio` configuration parameter in config/config.go [26:01:31, 21:18]
+  - Percentage of commands that use weak consistency (0-100)
+  - Default: 0 (all strong, backward compatible)
+
+- [x] **11.2.2** Add `weakWrites` configuration parameter [26:01:31, 21:18]
+  - Percentage of weak commands that are writes (0-100)
+  - Mirrors existing `writes` parameter for strong commands
+
+- [x] **11.2.3** Update config parser to read new parameters [26:01:31, 21:18]
+  - Added cases in config/config.go Read() function
+  - Follow pattern of existing parameters
+
+##### 11.3 Implement Hybrid Benchmark Loop
+
+- [x] **11.3.1** Create `HybridLoop()` method in client/hybrid.go [26:01:31, 21:22]
+  - Reference existing `Loop()` method structure
+  - Use `weakRatio` to decide strong vs weak for each operation
+  - Use `writes` and `weakWrites` for read/write distribution
+
+- [x] **11.3.2** Implement command generation logic [26:01:31, 21:22]
+  - DecideCommandType() method determines strong/weak and read/write
+  - GetCommandType() returns appropriate CommandType enum
+
+- [x] **11.3.3** Handle reply processing for mixed workloads [26:01:31, 21:22]
+  - Track command types in cmdTypes slice
+  - Record latency by command type
+
+##### 11.4 Metrics Collection
+
+- [x] **11.4.1** Add per-consistency-level latency tracking [26:01:31, 21:25]
+  - HybridMetrics struct with StrongWriteLatency, StrongReadLatency, etc.
+  - recordLatency() method for tracking
+
+- [x] **11.4.2** Add throughput metrics [26:01:31, 21:25]
+  - Operations per second calculated in PrintMetrics()
+  - Track separately for strong and weak operations
+
+- [x] **11.4.3** Add summary statistics output [26:01:31, 21:25]
+  - computePercentiles() for Median, P99, P99.9 latencies
+  - PrintMetrics() outputs formatted results
+
+##### 11.5 Protocol Integration
+
+- [x] **11.5.1** Implement HybridClient interface for curp-ht [26:01:31, 21:28]
+  - Added SendStrongWrite(), SendStrongRead(), SupportsWeak() to curp-ht/client.go
+  - Maps to existing SendWrite/SendRead for strong, SendWeakWrite/SendWeakRead for weak
+
+- [x] **11.5.2** Update main.go to use HybridLoop for curpht [26:01:31, 21:28]
+  - Uses HybridLoop when weakRatio > 0
+  - Falls back to Loop() when weakRatio = 0
+
+- [x] **11.5.3** Hybrid benchmark activated by weakRatio config [26:01:31, 21:28]
+  - weakRatio > 0 enables HybridLoop automatically
+  - No separate command-line flag needed
+
+##### 11.6 Testing
+
+- [x] **11.6.1** Unit test: Configuration parsing for new parameters [26:01:31, 21:35]
+  - config/config_test.go: TestWeakRatioConfig, TestWeakRatioDefault, etc.
+  - Tests weakRatio and weakWrites parsing and defaults
+
+- [x] **11.6.2** Unit test: Command generation distribution [26:01:31, 21:35]
+  - client/hybrid_test.go: TestDecideCommandTypeAllStrong, TestDecideCommandTypeAllWeak
+  - Verifies weakRatio correctly distributes commands
+
+- [x] **11.6.3** Unit test: Metrics and interface tests [26:01:31, 21:35]
+  - client/hybrid_test.go: TestRecordLatency, TestMetricsString, TestSupportsHybrid
+  - Full coverage of hybrid benchmark components
+
+##### 11.7 Documentation
+
+- [ ] **11.7.1** Update README.md with hybrid benchmark usage
+  - New configuration parameters
+  - Example configurations for different workloads
+
+- [ ] **11.7.2** Add sample configuration in aws.conf
+  - Example: weakRatio: 50, weakWrites: 50
+
+#### Example Workload Configurations
+
+| Workload | weakRatio | writes | weakWrites | Description |
+|----------|-----------|--------|------------|-------------|
+| All Strong | 0 | 100 | - | Traditional benchmark (default) |
+| All Weak | 100 | - | 50 | Weak consistency only |
+| Hybrid 50/50 | 50 | 100 | 50 | Half strong, half weak |
+| Read Heavy | 0 | 10 | - | 10% writes, all strong |
+| Weak Reads | 80 | 100 | 0 | Strong writes, weak reads |
+
+#### Expected Outputs
+
+```
+=== Hybrid Benchmark Results ===
+Total operations: 10000
+Duration: 30.5s
+Throughput: 327.87 ops/sec
+
+Strong Operations: 5000 (50%)
+  Writes: 2500 | Reads: 2500
+  Median latency: 45.2ms | P99: 89.3ms
+
+Weak Operations: 5000 (50%)
+  Writes: 2500 | Reads: 2500
+  Median latency: 12.1ms | P99: 28.7ms
+```
+
+---
+
 ## Repeated Tasks
 
 (None currently)

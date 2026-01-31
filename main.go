@@ -181,7 +181,19 @@ func runSingleClient(c *config.Config, i int, verbose bool) {
 		if cl == nil {
 			return
 		}
-		cl.Loop()
+		// Use HybridLoop if weakRatio > 0, otherwise use standard Loop
+		if c.WeakRatio > 0 {
+			// Default weakWrites to 50 if not specified
+			weakWrites := c.WeakWrites
+			if weakWrites == 0 && c.WeakRatio > 0 {
+				weakWrites = 50
+			}
+			hbc := client.NewHybridBufferClient(b, c.WeakRatio, weakWrites)
+			hbc.SetHybridClient(cl)
+			hbc.HybridLoop()
+		} else {
+			cl.Loop()
+		}
 	} else {
 		waitFrom := b.LeaderId
 		if b.Fast || b.Leaderless || c.WaitClosest {

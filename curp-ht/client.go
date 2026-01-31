@@ -311,3 +311,20 @@ func (c *Client) getNextSeqnum() int32 {
 	c.lastCmdId.SeqNum++
 	return c.lastCmdId.SeqNum
 }
+
+// HybridClient interface implementation
+
+// SendStrongWrite sends a linearizable write command (delegates to base SendWrite).
+func (c *Client) SendStrongWrite(key int64, value []byte) int32 {
+	return c.SendWrite(key, value)
+}
+
+// SendStrongRead sends a linearizable read command (delegates to base SendRead).
+func (c *Client) SendStrongRead(key int64) int32 {
+	return c.SendRead(key)
+}
+
+// SupportsWeak returns true since curp-ht supports weak consistency commands.
+func (c *Client) SupportsWeak() bool {
+	return true
+}
