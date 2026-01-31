@@ -449,12 +449,14 @@ func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
 
 ##### 11.7 Documentation
 
-- [ ] **11.7.1** Update README.md with hybrid benchmark usage
-  - New configuration parameters
-  - Example configurations for different workloads
+- [x] **11.7.1** Update README.md with hybrid benchmark usage [26:01:31, 21:45]
+  - Added CURP-HT to protocol table
+  - Added Hybrid Consistency Benchmark section with config parameters
+  - Added example workload configurations table
 
-- [ ] **11.7.2** Add sample configuration in aws.conf
-  - Example: weakRatio: 50, weakWrites: 50
+- [x] **11.7.2** Add sample configuration in aws.conf [26:01:31, 21:45]
+  - Added commented weakRatio and weakWrites parameters
+  - Example: weakRatio: 0, weakWrites: 50
 
 #### Example Workload Configurations
 

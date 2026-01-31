@@ -23,6 +23,7 @@ Implemented protocols
 | Paxos                   | The classic Paxos protocol.                       |
 | N<sup>2</sup>Paxos      | All-to-all variant of Paxos.                      |
 | CURP                    | CURP implemented over N<sup>2</sup>Paxos.         |
+| CURP-HT                 | Hybrid consistency CURP with strong/weak commands.|
 | Fast Paxos              | Fast Paxos with uncoordinated collision recovery. |
 | EPaxos                  | A [corrected][epaxos_correct] version of EPaxos.  |
 
@@ -71,6 +72,42 @@ Client:
         Run a participant
 
 See [quorum.conf][quorum] and [latency.conf][latency] for an example of quorum and latency configuration files.
+
+Hybrid Consistency Benchmark (CURP-HT)
+--------------------------------------
+
+CURP-HT supports hybrid consistency workloads with both strong (linearizable) and weak (causal) commands.
+To run a hybrid benchmark, use the `curpht` protocol and configure the following parameters:
+
+| Parameter   | Description                                              | Default |
+|-------------|----------------------------------------------------------|---------|
+| weakRatio   | Percentage of commands using weak consistency (0-100)    | 0       |
+| weakWrites  | Percentage of weak commands that are writes (0-100)      | 50      |
+
+Example configuration:
+```
+protocol curpht
+reqs 10000
+writes 100
+weakRatio 50
+weakWrites 50
+```
+
+This configuration runs 50% strong writes and 50% weak commands (half writes, half reads).
+
+Example workload configurations:
+
+| Workload     | weakRatio | writes | weakWrites | Description                    |
+|--------------|-----------|--------|------------|--------------------------------|
+| All Strong   | 0         | 100    | -          | Traditional benchmark (default)|
+| All Weak     | 100       | -      | 50         | Weak consistency only          |
+| Hybrid 50/50 | 50        | 100    | 50         | Half strong, half weak         |
+| Weak Reads   | 80        | 100    | 0          | Strong writes, weak reads      |
+
+The benchmark outputs per-consistency-level metrics:
+- Latency statistics (median, P99, P99.9) for strong and weak operations
+- Throughput breakdown by consistency level
+- Total operations and duration
 
 Flint
 -----
