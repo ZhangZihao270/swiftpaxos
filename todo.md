@@ -127,11 +127,15 @@ Implement Hybrid Consistency on top of CURP, supporting Strong (Linearizable) an
 
 ### Phase 8: Integration with Main Application [LOW PRIORITY]
 
-- [ ] **8.1** Update run.go to support curpht protocol
-  - Add case for "curpht" in protocol selection
+- [x] **8.1** Update run.go to support curpht protocol [26:01:31, 16:04]
+  - Added import for curp-ht package
+  - Added case "curpht" in protocol switch
+  - Uses same parameters as curp
 
-- [ ] **8.2** Update main.go if needed
-  - Ensure curpht is a valid protocol option
+- [x] **8.2** Update main.go for curpht protocol [26:01:31, 16:04]
+  - Added import for curp-ht package
+  - Added case "curpht" in protocol switch (runSingleClient)
+  - Added curpht client initialization with same pattern as curp
 
 ---
 

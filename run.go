@@ -11,6 +11,7 @@ import (
 
 	"github.com/imdea-software/swiftpaxos/config"
 	"github.com/imdea-software/swiftpaxos/curp"
+	curpht "github.com/imdea-software/swiftpaxos/curp-ht"
 	"github.com/imdea-software/swiftpaxos/dlog"
 	"github.com/imdea-software/swiftpaxos/epaxos"
 	"github.com/imdea-software/swiftpaxos/fastpaxos"
@@ -41,6 +42,12 @@ func runReplica(c *config.Config, logger *dlog.Logger) {
 		log.Println("Starting optimized CURP replica...")
 		curp.MaxDescRoutines = 100
 		rep := curp.New(c.Alias, replicaId, nodeList, !c.Noop,
+			1, f, true, c, logger)
+		rpc.Register(rep)
+	case "curpht":
+		log.Println("Starting CURP-HT (Hybrid Transparency) replica...")
+		curpht.MaxDescRoutines = 100
+		rep := curpht.New(c.Alias, replicaId, nodeList, !c.Noop,
 			1, f, true, c, logger)
 		rpc.Register(rep)
 	case "fastpaxos":

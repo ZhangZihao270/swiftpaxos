@@ -13,6 +13,7 @@ import (
 	"github.com/imdea-software/swiftpaxos/client"
 	"github.com/imdea-software/swiftpaxos/config"
 	"github.com/imdea-software/swiftpaxos/curp"
+	curpht "github.com/imdea-software/swiftpaxos/curp-ht"
 	"github.com/imdea-software/swiftpaxos/dlog"
 	"github.com/imdea-software/swiftpaxos/master"
 	"github.com/imdea-software/swiftpaxos/replica/defs"
@@ -112,6 +113,7 @@ func runSingleClient(c *config.Config, i int, verbose bool) {
 	switch strings.ToLower(c.Protocol) {
 	case "swiftpaxos":
 	case "curp":
+	case "curpht":
 	case "fastpaxos":
 		c.Fast = true
 		c.WaitClosest = true
@@ -157,6 +159,25 @@ func runSingleClient(c *config.Config, i int, verbose bool) {
 			}
 		}
 		cl := curp.NewClient(b, len(c.ReplicaAddrs), c.Reqs, pclients)
+		if cl == nil {
+			return
+		}
+		cl.Loop()
+	} else if p == "curpht" {
+		cls := []string{}
+		for a := range c.ClientAddrs {
+			cls = append(cls, a)
+		}
+		sort.Slice(cls, func(i, j int) bool {
+			return cls[i] < cls[j]
+		})
+		pclients := 0
+		for i, a := range cls {
+			if a == c.Alias {
+				pclients = (c.Clones + 1) * i
+			}
+		}
+		cl := curpht.NewClient(b, len(c.ReplicaAddrs), c.Reqs, pclients)
 		if cl == nil {
 			return
 		}
