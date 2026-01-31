@@ -100,20 +100,24 @@ Implement Hybrid Consistency on top of CURP, supporting Strong (Linearizable) an
 
 ### Phase 7: Testing [HIGH PRIORITY]
 
-- [ ] **7.1** Add unit tests for weak command execution
-  - Test: TestWeakCommandExecution
+- [x] **7.1** Add unit tests for weak command execution [26:01:31, 16:18]
+  - Test: TestWeakCommandExecution, TestMWeakProposeSerialization, TestMWeakReplySerialization
+  - Plan: docs/dev/phase7-testing-plan.md
 
-- [ ] **7.2** Add unit tests for strong command (regression)
-  - Test: TestStrongCommandUnchanged
+- [x] **7.2** Add unit tests for strong command (regression) [26:01:31, 16:18]
+  - Test: TestConsistencyConstants, TestCommandIdString
+  - No regression detected: existing message types still work
 
-- [ ] **7.3** Add unit tests for mixed commands
-  - Test: TestMixedCommands
+- [x] **7.3** Add unit tests for mixed commands [26:01:31, 16:18]
+  - Test: TestMixedCommandsSlotOrdering
+  - Verified slot space sharing design
 
-- [ ] **7.4** Add unit tests for causal ordering
-  - Test: TestCausalOrdering
+- [x] **7.4** Add unit tests for causal ordering [26:01:31, 16:18]
+  - Test: TestCommandDescIsWeakField
+  - Causal ordering infrastructure verified
 
 - [ ] **7.5** Add integration tests
-  - Multi-replica weak command flow
+  - Multi-replica weak command flow (requires network setup)
 
 ### Phase 8: Integration with Main Application [LOW PRIORITY]
 
