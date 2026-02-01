@@ -1,0 +1,211 @@
+?   	github.com/imdea-software/swiftpaxos	[no test files]
+=== RUN   TestConsistencyLevelString
+--- PASS: TestConsistencyLevelString (0.00s)
+=== RUN   TestCommandTypeString
+--- PASS: TestCommandTypeString (0.00s)
+=== RUN   TestGetCommandType
+--- PASS: TestGetCommandType (0.00s)
+=== RUN   TestNewHybridMetrics
+--- PASS: TestNewHybridMetrics (0.00s)
+=== RUN   TestComputePercentiles
+--- PASS: TestComputePercentiles (0.00s)
+=== RUN   TestHybridClientInterface
+--- PASS: TestHybridClientInterface (0.00s)
+=== RUN   TestDecideCommandTypeAllStrong
+--- PASS: TestDecideCommandTypeAllStrong (0.00s)
+=== RUN   TestDecideCommandTypeAllWeak
+--- PASS: TestDecideCommandTypeAllWeak (0.00s)
+=== RUN   TestRecordLatency
+--- PASS: TestRecordLatency (0.00s)
+=== RUN   TestMetricsString
+--- PASS: TestMetricsString (0.00s)
+=== RUN   TestSupportsHybrid
+--- PASS: TestSupportsHybrid (0.00s)
+=== RUN   TestUniformKeyGenerator
+--- PASS: TestUniformKeyGenerator (0.00s)
+=== RUN   TestZipfKeyGenerator
+--- PASS: TestZipfKeyGenerator (0.00s)
+=== RUN   TestZipfDistributionSkew
+--- PASS: TestZipfDistributionSkew (0.00s)
+=== RUN   TestNewKeyGeneratorUniform
+--- PASS: TestNewKeyGeneratorUniform (0.00s)
+=== RUN   TestNewKeyGeneratorZipf
+--- PASS: TestNewKeyGeneratorZipf (0.00s)
+=== RUN   TestNewKeyGeneratorSmallSkew
+--- PASS: TestNewKeyGeneratorSmallSkew (0.00s)
+=== RUN   TestUniformDistribution
+--- PASS: TestUniformDistribution (0.00s)
+=== RUN   TestDefaultKeySpace
+--- PASS: TestDefaultKeySpace (0.00s)
+=== RUN   TestZipfSkewClamping
+--- PASS: TestZipfSkewClamping (0.00s)
+=== RUN   TestZipfNegativeSkew
+--- PASS: TestZipfNegativeSkew (0.00s)
+=== RUN   TestKeyGeneratorDifferentSeeds
+--- PASS: TestKeyGeneratorDifferentSeeds (0.00s)
+=== RUN   TestKeyGeneratorSameSeed
+--- PASS: TestKeyGeneratorSameSeed (0.00s)
+PASS
+ok  	github.com/imdea-software/swiftpaxos/client	(cached)
+=== RUN   TestWeakRatioConfig
+--- PASS: TestWeakRatioConfig (0.00s)
+=== RUN   TestWeakRatioDefault
+--- PASS: TestWeakRatioDefault (0.00s)
+=== RUN   TestWeakRatioWithOtherParams
+--- PASS: TestWeakRatioWithOtherParams (0.00s)
+=== RUN   TestWeakRatioEdgeCases
+=== RUN   TestWeakRatioEdgeCases/weakRatio_0
+=== RUN   TestWeakRatioEdgeCases/weakRatio_100
+--- PASS: TestWeakRatioEdgeCases (0.00s)
+    --- PASS: TestWeakRatioEdgeCases/weakRatio_0 (0.00s)
+    --- PASS: TestWeakRatioEdgeCases/weakRatio_100 (0.00s)
+=== RUN   TestClientThreadsConfig
+--- PASS: TestClientThreadsConfig (0.00s)
+=== RUN   TestClientThreadsDefault
+--- PASS: TestClientThreadsDefault (0.00s)
+=== RUN   TestClientThreadsWithOtherParams
+--- PASS: TestClientThreadsWithOtherParams (0.00s)
+=== RUN   TestZipfSkewConfig
+--- PASS: TestZipfSkewConfig (0.00s)
+=== RUN   TestZipfSkewDefault
+--- PASS: TestZipfSkewDefault (0.00s)
+=== RUN   TestZipfSkewWithOtherParams
+--- PASS: TestZipfSkewWithOtherParams (0.00s)
+=== RUN   TestGetNumClientThreads
+=== RUN   TestGetNumClientThreads/ClientThreads_set,_overrides_Clones
+=== RUN   TestGetNumClientThreads/ClientThreads_set_to_1
+=== RUN   TestGetNumClientThreads/ClientThreads_0,_falls_back_to_Clones+1
+=== RUN   TestGetNumClientThreads/Both_0,_returns_1
+=== RUN   TestGetNumClientThreads/High_ClientThreads_count
+--- PASS: TestGetNumClientThreads (0.00s)
+    --- PASS: TestGetNumClientThreads/ClientThreads_set,_overrides_Clones (0.00s)
+    --- PASS: TestGetNumClientThreads/ClientThreads_set_to_1 (0.00s)
+    --- PASS: TestGetNumClientThreads/ClientThreads_0,_falls_back_to_Clones+1 (0.00s)
+    --- PASS: TestGetNumClientThreads/Both_0,_returns_1 (0.00s)
+    --- PASS: TestGetNumClientThreads/High_ClientThreads_count (0.00s)
+=== RUN   TestGetClientOffset
+=== RUN   TestGetClientOffset/First_client_with_4_threads
+=== RUN   TestGetClientOffset/Second_client_with_4_threads
+=== RUN   TestGetClientOffset/Third_client_with_4_threads
+=== RUN   TestGetClientOffset/Client_with_8_threads
+=== RUN   TestGetClientOffset/Fallback_to_Clones+1
+=== RUN   TestGetClientOffset/Client_not_in_list
+--- PASS: TestGetClientOffset (0.00s)
+    --- PASS: TestGetClientOffset/First_client_with_4_threads (0.00s)
+    --- PASS: TestGetClientOffset/Second_client_with_4_threads (0.00s)
+    --- PASS: TestGetClientOffset/Third_client_with_4_threads (0.00s)
+    --- PASS: TestGetClientOffset/Client_with_8_threads (0.00s)
+    --- PASS: TestGetClientOffset/Fallback_to_Clones+1 (0.00s)
+    --- PASS: TestGetClientOffset/Client_not_in_list (0.00s)
+=== RUN   TestGetClientOffsetWithParsedConfig
+--- PASS: TestGetClientOffsetWithParsedConfig (0.00s)
+=== RUN   TestMultiThreadedClientIDUniqueness
+--- PASS: TestMultiThreadedClientIDUniqueness (0.00s)
+PASS
+ok  	github.com/imdea-software/swiftpaxos/config	(cached)
+?   	github.com/imdea-software/swiftpaxos/curp	[no test files]
+=== RUN   TestMWeakProposeSerialization
+--- PASS: TestMWeakProposeSerialization (0.00s)
+=== RUN   TestMWeakReplySerialization
+--- PASS: TestMWeakReplySerialization (0.00s)
+=== RUN   TestMWeakProposeCache
+--- PASS: TestMWeakProposeCache (0.00s)
+=== RUN   TestMWeakReplyCache
+--- PASS: TestMWeakReplyCache (0.00s)
+=== RUN   TestConsistencyConstants
+--- PASS: TestConsistencyConstants (0.00s)
+=== RUN   TestCommandIdString
+--- PASS: TestCommandIdString (0.00s)
+=== RUN   TestWeakCommandExecution
+--- PASS: TestWeakCommandExecution (0.00s)
+=== RUN   TestMWeakProposeNew
+--- PASS: TestMWeakProposeNew (0.00s)
+=== RUN   TestMWeakReplyNew
+--- PASS: TestMWeakReplyNew (0.00s)
+=== RUN   TestMWeakProposeBinarySize
+--- PASS: TestMWeakProposeBinarySize (0.00s)
+=== RUN   TestMWeakReplyBinarySize
+--- PASS: TestMWeakReplyBinarySize (0.00s)
+=== RUN   TestCommandDescIsWeakField
+--- PASS: TestCommandDescIsWeakField (0.00s)
+=== RUN   TestMWeakProposeWithEmptyCommand
+--- PASS: TestMWeakProposeWithEmptyCommand (0.00s)
+=== RUN   TestMWeakReplyWithEmptyRep
+--- PASS: TestMWeakReplyWithEmptyRep (0.00s)
+=== RUN   TestMixedCommandsSlotOrdering
+--- PASS: TestMixedCommandsSlotOrdering (0.00s)
+=== RUN   TestCausalDepSerialization
+--- PASS: TestCausalDepSerialization (0.00s)
+=== RUN   TestCausalDepZeroValue
+--- PASS: TestCausalDepZeroValue (0.00s)
+=== RUN   TestWeakCommandChain
+--- PASS: TestWeakCommandChain (0.00s)
+=== RUN   TestMultiClientCausalIndependence
+--- PASS: TestMultiClientCausalIndependence (0.00s)
+=== RUN   TestWeakReplyPoolAllocation
+--- PASS: TestWeakReplyPoolAllocation (0.00s)
+=== RUN   TestCommandDescWeakExecution
+--- PASS: TestCommandDescWeakExecution (0.00s)
+=== RUN   TestCommandDescAppliedField
+--- PASS: TestCommandDescAppliedField (0.00s)
+=== RUN   TestWeakProposeMessageFields
+--- PASS: TestWeakProposeMessageFields (0.00s)
+=== RUN   TestWeakReplyMessageFields
+--- PASS: TestWeakReplyMessageFields (0.00s)
+=== RUN   TestComputeResultDoesNotModifyState
+--- PASS: TestComputeResultDoesNotModifyState (0.00s)
+=== RUN   TestExecuteModifiesStateAfterCommit
+--- PASS: TestExecuteModifiesStateAfterCommit (0.00s)
+=== RUN   TestAppliedFieldTracking
+--- PASS: TestAppliedFieldTracking (0.00s)
+=== RUN   TestSpeculativeResultMatchesFinalResult
+--- PASS: TestSpeculativeResultMatchesFinalResult (0.00s)
+=== RUN   TestSlotOrderedExecution
+--- PASS: TestSlotOrderedExecution (0.00s)
+=== RUN   TestMixedStrongWeakSlotOrdering
+--- PASS: TestMixedStrongWeakSlotOrdering (0.00s)
+=== RUN   TestPendingWriteKey
+--- PASS: TestPendingWriteKey (0.00s)
+=== RUN   TestPendingWriteStruct
+--- PASS: TestPendingWriteStruct (0.00s)
+=== RUN   TestSameClientReadAfterWrite
+--- PASS: TestSameClientReadAfterWrite (0.00s)
+=== RUN   TestPendingWritesCleanup
+--- PASS: TestPendingWritesCleanup (0.00s)
+=== RUN   TestCrossClientIsolation
+--- PASS: TestCrossClientIsolation (0.00s)
+=== RUN   TestPendingWriteSequenceOrdering
+--- PASS: TestPendingWriteSequenceOrdering (0.00s)
+=== RUN   TestComputeSpeculativeResultGETWithPending
+--- PASS: TestComputeSpeculativeResultGETWithPending (0.00s)
+=== RUN   TestComputeSpeculativeResultPUT
+--- PASS: TestComputeSpeculativeResultPUT (0.00s)
+PASS
+ok  	github.com/imdea-software/swiftpaxos/curp-ht	(cached)
+?   	github.com/imdea-software/swiftpaxos/dlog	[no test files]
+?   	github.com/imdea-software/swiftpaxos/epaxos	[no test files]
+?   	github.com/imdea-software/swiftpaxos/fastpaxos	[no test files]
+?   	github.com/imdea-software/swiftpaxos/hook	[no test files]
+?   	github.com/imdea-software/swiftpaxos/master	[no test files]
+?   	github.com/imdea-software/swiftpaxos/n2paxos	[no test files]
+?   	github.com/imdea-software/swiftpaxos/paxos	[no test files]
+?   	github.com/imdea-software/swiftpaxos/replica	[no test files]
+?   	github.com/imdea-software/swiftpaxos/replica/defs	[no test files]
+?   	github.com/imdea-software/swiftpaxos/rpc	[no test files]
+=== RUN   TestComputeResultGET
+--- PASS: TestComputeResultGET (0.00s)
+=== RUN   TestComputeResultPUT
+--- PASS: TestComputeResultPUT (0.00s)
+=== RUN   TestComputeResultSCAN
+--- PASS: TestComputeResultSCAN (0.00s)
+=== RUN   TestComputeResultNONE
+--- PASS: TestComputeResultNONE (0.00s)
+=== RUN   TestComputeResultGetMissing
+--- PASS: TestComputeResultGetMissing (0.00s)
+=== RUN   TestComputeResultVsExecute
+--- PASS: TestComputeResultVsExecute (0.00s)
+=== RUN   TestExecuteModifiesState
+--- PASS: TestExecuteModifiesState (0.00s)
+PASS
+ok  	github.com/imdea-software/swiftpaxos/state	(cached)
+?   	github.com/imdea-software/swiftpaxos/swift	[no test files]

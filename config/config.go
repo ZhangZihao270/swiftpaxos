@@ -126,6 +126,29 @@ type Config struct {
 	//latency *LatencyTable
 }
 
+// GetNumClientThreads returns the number of client threads to spawn.
+// If ClientThreads > 0, it uses that value.
+// Otherwise, it falls back to Clones + 1 for backward compatibility.
+func (c *Config) GetNumClientThreads() int {
+	if c.ClientThreads > 0 {
+		return c.ClientThreads
+	}
+	return c.Clones + 1
+}
+
+// GetClientOffset calculates the client offset for a given client alias in a sorted list.
+// This is used to ensure unique client IDs across all threads on all clients.
+// Returns the offset (numThreads * clientIndex).
+func (c *Config) GetClientOffset(sortedClients []string, alias string) int {
+	numThreads := c.GetNumClientThreads()
+	for i, a := range sortedClients {
+		if a == alias {
+			return numThreads * i
+		}
+	}
+	return 0
+}
+
 func Read(filename, alias string) (*Config, error) {
 	c := &Config{
 		ClientAddrs:  make(map[string]string),

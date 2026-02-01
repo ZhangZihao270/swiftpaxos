@@ -85,16 +85,8 @@ func runMaster(c *config.Config) {
 	m.Run()
 }
 
-// getNumClientThreads returns the number of client threads to spawn
-func getNumClientThreads(c *config.Config) int {
-	if c.ClientThreads > 0 {
-		return c.ClientThreads
-	}
-	return c.Clones + 1
-}
-
 func runClient(c *config.Config, verbose bool) {
-	numThreads := getNumClientThreads(c)
+	numThreads := c.GetNumClientThreads()
 
 	var wg sync.WaitGroup
 	for i := 0; i < numThreads; i++ {
@@ -167,13 +159,7 @@ func runSingleClient(c *config.Config, i int, verbose bool) {
 		sort.Slice(cls, func(i, j int) bool {
 			return cls[i] < cls[j]
 		})
-		numThreads := getNumClientThreads(c)
-		pclients := 0
-		for i, a := range cls {
-			if a == c.Alias {
-				pclients = numThreads * i
-			}
-		}
+		pclients := c.GetClientOffset(cls, c.Alias)
 		cl := curp.NewClient(b, len(c.ReplicaAddrs), c.Reqs, pclients)
 		if cl == nil {
 			return
@@ -187,13 +173,7 @@ func runSingleClient(c *config.Config, i int, verbose bool) {
 		sort.Slice(cls, func(i, j int) bool {
 			return cls[i] < cls[j]
 		})
-		numThreads := getNumClientThreads(c)
-		pclients := 0
-		for i, a := range cls {
-			if a == c.Alias {
-				pclients = numThreads * i
-			}
-		}
+		pclients := c.GetClientOffset(cls, c.Alias)
 		cl := curpht.NewClient(b, len(c.ReplicaAddrs), c.Reqs, pclients)
 		if cl == nil {
 			return

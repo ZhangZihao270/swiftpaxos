@@ -357,3 +357,197 @@ weakRatio 50
 		t.Errorf("WeakRatio = %d, want 50", c.WeakRatio)
 	}
 }
+
+// TestGetNumClientThreads tests the GetNumClientThreads method
+func TestGetNumClientThreads(t *testing.T) {
+	tests := []struct {
+		name          string
+		clientThreads int
+		clones        int
+		expected      int
+	}{
+		{
+			name:          "ClientThreads set, overrides Clones",
+			clientThreads: 4,
+			clones:        2,
+			expected:      4,
+		},
+		{
+			name:          "ClientThreads set to 1",
+			clientThreads: 1,
+			clones:        5,
+			expected:      1,
+		},
+		{
+			name:          "ClientThreads 0, falls back to Clones+1",
+			clientThreads: 0,
+			clones:        3,
+			expected:      4, // Clones + 1
+		},
+		{
+			name:          "Both 0, returns 1",
+			clientThreads: 0,
+			clones:        0,
+			expected:      1, // 0 + 1
+		},
+		{
+			name:          "High ClientThreads count",
+			clientThreads: 16,
+			clones:        0,
+			expected:      16,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Config{
+				ClientThreads: tc.clientThreads,
+				Clones:        tc.clones,
+			}
+
+			result := c.GetNumClientThreads()
+			if result != tc.expected {
+				t.Errorf("GetNumClientThreads() = %d, want %d", result, tc.expected)
+			}
+		})
+	}
+}
+
+// TestGetClientOffset tests the GetClientOffset method
+func TestGetClientOffset(t *testing.T) {
+	tests := []struct {
+		name          string
+		clientThreads int
+		clones        int
+		clients       []string
+		alias         string
+		expected      int
+	}{
+		{
+			name:          "First client with 4 threads",
+			clientThreads: 4,
+			clones:        0,
+			clients:       []string{"client0", "client1", "client2"},
+			alias:         "client0",
+			expected:      0, // 4 * 0
+		},
+		{
+			name:          "Second client with 4 threads",
+			clientThreads: 4,
+			clones:        0,
+			clients:       []string{"client0", "client1", "client2"},
+			alias:         "client1",
+			expected:      4, // 4 * 1
+		},
+		{
+			name:          "Third client with 4 threads",
+			clientThreads: 4,
+			clones:        0,
+			clients:       []string{"client0", "client1", "client2"},
+			alias:         "client2",
+			expected:      8, // 4 * 2
+		},
+		{
+			name:          "Client with 8 threads",
+			clientThreads: 8,
+			clones:        0,
+			clients:       []string{"a", "b", "c"},
+			alias:         "c",
+			expected:      16, // 8 * 2
+		},
+		{
+			name:          "Fallback to Clones+1",
+			clientThreads: 0,
+			clones:        3,
+			clients:       []string{"x", "y"},
+			alias:         "y",
+			expected:      4, // (3+1) * 1
+		},
+		{
+			name:          "Client not in list",
+			clientThreads: 4,
+			clones:        0,
+			clients:       []string{"a", "b"},
+			alias:         "notfound",
+			expected:      0, // Not found, returns 0
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Config{
+				ClientThreads: tc.clientThreads,
+				Clones:        tc.clones,
+			}
+
+			result := c.GetClientOffset(tc.clients, tc.alias)
+			if result != tc.expected {
+				t.Errorf("GetClientOffset() = %d, want %d", result, tc.expected)
+			}
+		})
+	}
+}
+
+// TestGetClientOffsetWithParsedConfig tests GetClientOffset with a parsed config
+func TestGetClientOffsetWithParsedConfig(t *testing.T) {
+	content := `
+clientThreads 4
+`
+	f, err := os.CreateTemp("", "test_config_*.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name())
+
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	c, err := Read(f.Name(), "test")
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+
+	// Verify GetNumClientThreads
+	if c.GetNumClientThreads() != 4 {
+		t.Errorf("GetNumClientThreads() = %d, want 4", c.GetNumClientThreads())
+	}
+
+	// Verify GetClientOffset
+	clients := []string{"client0", "client1", "client2"}
+	offset := c.GetClientOffset(clients, "client1")
+	if offset != 4 {
+		t.Errorf("GetClientOffset() = %d, want 4", offset)
+	}
+}
+
+// TestMultiThreadedClientIDUniqueness verifies that client IDs are unique across threads
+func TestMultiThreadedClientIDUniqueness(t *testing.T) {
+	c := &Config{
+		ClientThreads: 4,
+	}
+
+	clients := []string{"client0", "client1", "client2"}
+
+	// Calculate all client IDs that would be assigned
+	ids := make(map[int]bool)
+	numThreads := c.GetNumClientThreads()
+
+	for _, client := range clients {
+		baseOffset := c.GetClientOffset(clients, client)
+		for threadIdx := 0; threadIdx < numThreads; threadIdx++ {
+			clientID := baseOffset + threadIdx
+			if ids[clientID] {
+				t.Errorf("Duplicate client ID: %d for client %s thread %d", clientID, client, threadIdx)
+			}
+			ids[clientID] = true
+		}
+	}
+
+	// Verify we have exactly numClients * numThreads unique IDs
+	expectedIDs := len(clients) * numThreads
+	if len(ids) != expectedIDs {
+		t.Errorf("Expected %d unique IDs, got %d", expectedIDs, len(ids))
+	}
+}
