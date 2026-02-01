@@ -551,3 +551,102 @@ func TestMultiThreadedClientIDUniqueness(t *testing.T) {
 		t.Errorf("Expected %d unique IDs, got %d", expectedIDs, len(ids))
 	}
 }
+
+// TestHighThreadCountStress tests the system with high thread counts (8, 16, 32, 64)
+func TestHighThreadCountStress(t *testing.T) {
+	threadCounts := []int{8, 16, 32, 64}
+	clientCounts := []int{2, 5, 10}
+
+	for _, numThreads := range threadCounts {
+		for _, numClients := range clientCounts {
+			t.Run(
+				// Using manual string concatenation instead of fmt for test name
+				"threads_"+string(rune('0'+numThreads/10))+string(rune('0'+numThreads%10))+"_clients_"+string(rune('0'+numClients/10))+string(rune('0'+numClients%10)),
+				func(t *testing.T) {
+					testHighThreadCount(t, numThreads, numClients)
+				})
+		}
+	}
+}
+
+func testHighThreadCount(t *testing.T, numThreads, numClients int) {
+	c := &Config{
+		ClientThreads: numThreads,
+	}
+
+	// Generate client list
+	clients := make([]string, numClients)
+	for i := 0; i < numClients; i++ {
+		clients[i] = "client" + string(rune('0'+i/10)) + string(rune('0'+i%10))
+	}
+
+	// Verify GetNumClientThreads
+	if c.GetNumClientThreads() != numThreads {
+		t.Errorf("GetNumClientThreads() = %d, want %d", c.GetNumClientThreads(), numThreads)
+	}
+
+	// Verify all client IDs are unique
+	ids := make(map[int]bool)
+	for _, client := range clients {
+		baseOffset := c.GetClientOffset(clients, client)
+		for threadIdx := 0; threadIdx < numThreads; threadIdx++ {
+			clientID := baseOffset + threadIdx
+			if ids[clientID] {
+				t.Errorf("Duplicate client ID: %d", clientID)
+			}
+			ids[clientID] = true
+		}
+	}
+
+	// Verify total unique IDs
+	expectedIDs := numClients * numThreads
+	if len(ids) != expectedIDs {
+		t.Errorf("Expected %d unique IDs, got %d", expectedIDs, len(ids))
+	}
+
+	// Verify ID range is contiguous (0 to expectedIDs-1)
+	for i := 0; i < expectedIDs; i++ {
+		if !ids[i] {
+			t.Errorf("Missing client ID: %d", i)
+		}
+	}
+}
+
+// TestGetNumClientThreadsConcurrent tests concurrent access to GetNumClientThreads
+func TestGetNumClientThreadsConcurrent(t *testing.T) {
+	c := &Config{
+		ClientThreads: 16,
+		Clones:        4,
+	}
+
+	clients := []string{"client0", "client1", "client2", "client3"}
+
+	// Run many concurrent goroutines accessing the methods
+	const numGoroutines = 100
+	done := make(chan bool, numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		go func(idx int) {
+			// Each goroutine reads multiple times
+			for j := 0; j < 1000; j++ {
+				numThreads := c.GetNumClientThreads()
+				if numThreads != 16 {
+					t.Errorf("Goroutine %d: GetNumClientThreads() = %d, want 16", idx, numThreads)
+				}
+
+				clientIdx := idx % len(clients)
+				offset := c.GetClientOffset(clients, clients[clientIdx])
+				expectedOffset := 16 * clientIdx
+				if offset != expectedOffset {
+					t.Errorf("Goroutine %d: GetClientOffset() = %d, want %d", idx, offset, expectedOffset)
+				}
+			}
+			done <- true
+		}(i)
+	}
+
+	// Wait for all goroutines to complete
+	for i := 0; i < numGoroutines; i++ {
+		<-done
+	}
+}

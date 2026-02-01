@@ -207,3 +207,88 @@ func TestKeyGeneratorSameSeed(t *testing.T) {
 		}
 	}
 }
+
+// TestKeyGeneratorHighThroughput tests generator under high load
+func TestKeyGeneratorHighThroughput(t *testing.T) {
+	keySpace := int64(10000)
+
+	tests := []struct {
+		name    string
+		gen     KeyGenerator
+		numKeys int
+	}{
+		{
+			name:    "Uniform high throughput",
+			gen:     NewUniformKeyGenerator(keySpace, 42),
+			numKeys: 100000,
+		},
+		{
+			name:    "Zipf high throughput",
+			gen:     NewZipfKeyGenerator(keySpace, 1.5, 42),
+			numKeys: 100000,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for i := 0; i < tc.numKeys; i++ {
+				key := tc.gen.NextKey()
+				if key < 0 || key >= keySpace {
+					t.Errorf("Key %d out of range [0, %d)", key, keySpace)
+				}
+			}
+		})
+	}
+}
+
+// TestMultipleGeneratorsIndependent tests that multiple generators don't interfere
+func TestMultipleGeneratorsIndependent(t *testing.T) {
+	keySpace := int64(1000)
+
+	// Create 10 generators with different seeds
+	gens := make([]KeyGenerator, 10)
+	for i := 0; i < 10; i++ {
+		gens[i] = NewKeyGenerator(keySpace, 0.99, int32(i))
+	}
+
+	// Generate keys from each generator
+	for i := 0; i < 1000; i++ {
+		for _, gen := range gens {
+			key := gen.NextKey()
+			if key < 0 || key >= keySpace {
+				t.Errorf("Key %d out of range [0, %d)", key, keySpace)
+			}
+		}
+	}
+}
+
+// TestNewKeyGeneratorWithClientIDs simulates multi-client scenario
+func TestNewKeyGeneratorWithClientIDs(t *testing.T) {
+	keySpace := int64(10000)
+	skew := float64(0.99)
+
+	// Simulate 8 clients with 4 threads each (32 total generators)
+	numClients := 8
+	threadsPerClient := 4
+
+	gens := make([]KeyGenerator, 0, numClients*threadsPerClient)
+
+	for clientIdx := 0; clientIdx < numClients; clientIdx++ {
+		baseOffset := clientIdx * threadsPerClient
+		for threadIdx := 0; threadIdx < threadsPerClient; threadIdx++ {
+			clientID := int32(baseOffset + threadIdx)
+			gen := NewKeyGenerator(keySpace, skew, clientID)
+			gens = append(gens, gen)
+		}
+	}
+
+	// Each generator should produce valid keys
+	for _, gen := range gens {
+		for i := 0; i < 100; i++ {
+			key := gen.NextKey()
+			if key < 0 || key >= keySpace {
+				t.Errorf("Key %d out of range [0, %d)", key, keySpace)
+			}
+		}
+	}
+}
