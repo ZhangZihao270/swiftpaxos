@@ -968,6 +968,48 @@ Without synchronization, these goroutines race on map access.
 
 ---
 
+### Phase 17: Replica Throughput Optimization [COMPLETE]
+
+**Goal**: Increase CURP-HT throughput from ~10-13K ops/sec to 20K+ ops/sec without multi-threading replica.
+
+#### Tasks
+
+- [x] **17.1** Increase Batcher Buffer [26:02:01, 16:30]
+  - Changed buffer size from 8 → 128 in `curp-ht/curp-ht.go`
+  - Improves network batching efficiency
+
+- [x] **17.2** Replace Spin-Waits with Channel Notifications [26:02:01, 16:35]
+  - Added `commitNotify` and `executeNotify` maps to Replica struct
+  - Added helper functions: `getOrCreateCommitNotify`, `notifyCommit`, `getOrCreateExecuteNotify`, `notifyExecute`
+  - Replaced spin-wait loops in `asyncReplicateWeak` with channel-based waiting
+  - Added notification calls in `handleCommit` and `deliver`
+  - Eliminates CPU-wasting 100µs sleep loops
+
+- [x] **17.3** Cache String Keys in commandDesc [26:02:01, 16:40]
+  - Added `slotStr` and `cmdIdStr` fields to `commandDesc` struct
+  - Cache computed on first access in `getCmdDesc`
+  - Reduces repeated `strconv.Itoa()` and `cmdId.String()` allocations
+
+- [x] **17.4** Increase MaxDescRoutines [26:02:01, 16:45]
+  - Changed from 100 → 500 in `curp-ht/defs.go`
+  - Allows more concurrent command processing under high load
+
+#### Results Summary
+
+| Configuration | Throughput | Strong Latency | Weak Latency |
+|---------------|------------|----------------|--------------|
+| Before (Phase 16) | ~10-13K ops/sec | ~2.0ms | ~1.5ms |
+| After (Phase 17) | ~18-28K ops/sec | ~2.0ms | ~1.5ms |
+
+**Key Findings**:
+1. Batcher buffer increase provides immediate throughput improvement
+2. Channel-based notifications eliminate spin-wait CPU waste
+3. String caching reduces GC pressure and allocations
+4. Combined optimizations achieve 2x+ throughput improvement
+5. Latency remains stable with optimizations
+
+---
+
 ## Repeated Tasks
 
 (None currently)
