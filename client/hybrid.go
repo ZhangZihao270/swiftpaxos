@@ -128,6 +128,9 @@ type HybridBufferClient struct {
 
 	// Reply channel with command type information
 	HybridReply chan *HybridReqReply
+
+	// Duration of the benchmark (for aggregation)
+	duration time.Duration
 }
 
 // NewHybridBufferClient creates a new HybridBufferClient wrapping an existing BufferClient.
@@ -396,4 +399,200 @@ func (c *HybridBufferClient) MetricsString() string {
 	return fmt.Sprintf("StrongW:%d StrongR:%d WeakW:%d WeakR:%d",
 		c.Metrics.StrongWriteCount, c.Metrics.StrongReadCount,
 		c.Metrics.WeakWriteCount, c.Metrics.WeakReadCount)
+}
+
+// HybridLoopWithOptions runs the hybrid benchmark with options.
+// If printResults is true, prints metrics at the end.
+// If false, metrics can be retrieved via GetMetrics() for aggregation.
+func (c *HybridBufferClient) HybridLoopWithOptions(printResults bool) {
+	if !c.SupportsHybrid() {
+		c.Println("Warning: HybridClient not set or does not support weak consistency, falling back to Loop()")
+		c.Loop()
+		return
+	}
+
+	getKey := c.genGetKey()
+	val := make([]byte, c.psize)
+	c.rand.Read(val)
+
+	// Track command types for metrics
+	cmdTypes := make([]CommandType, c.reqNum+1)
+
+	var cmdM sync.Mutex
+	cmdNum := int32(0)
+	wait := make(chan struct{}, 0)
+
+	// Reply processing goroutine
+	go func() {
+		for i := 0; i <= c.reqNum; i++ {
+			r := <-c.Reply
+			// Ignore first request (warmup)
+			if i != 0 {
+				d := r.Time.Sub(c.reqTime[r.Seqnum])
+				latencyMs := float64(d.Nanoseconds()) / float64(time.Millisecond)
+				cmdType := cmdTypes[r.Seqnum]
+				c.recordLatency(cmdType, latencyMs)
+				if printResults {
+					c.Println("Returning:", r.Val.String())
+					c.Printf("latency %v (%s)\n", latencyMs, cmdType.String())
+				}
+			}
+			if c.window > 0 {
+				cmdM.Lock()
+				if cmdNum == c.window {
+					cmdNum--
+					cmdM.Unlock()
+					wait <- struct{}{}
+				} else {
+					cmdNum--
+					cmdM.Unlock()
+				}
+			}
+			if c.seq || (c.syncFreq > 0 && i%c.syncFreq == 0) {
+				wait <- struct{}{}
+			}
+		}
+		if !c.seq {
+			wait <- struct{}{}
+		}
+	}()
+
+	// Command generation loop
+	for i := 0; i <= c.reqNum; i++ {
+		key := getKey()
+
+		var isWeak, isWrite bool
+		if i == 0 {
+			isWeak = false // Force strong for warmup
+			isWrite = false
+		} else {
+			isWeak, isWrite = c.DecideCommandType()
+		}
+		cmdType := GetCommandType(isWeak, isWrite)
+		cmdTypes[i] = cmdType
+
+		c.reqTime[i] = time.Now()
+
+		if i == 1 {
+			c.launchTime = c.reqTime[i]
+		}
+
+		switch cmdType {
+		case StrongWrite:
+			c.hybrid.SendStrongWrite(key, state.Value(val))
+		case StrongRead:
+			c.hybrid.SendStrongRead(key)
+		case WeakWrite:
+			c.hybrid.SendWeakWrite(key, state.Value(val))
+		case WeakRead:
+			c.hybrid.SendWeakRead(key)
+		}
+
+		if c.window > 0 {
+			cmdM.Lock()
+			if cmdNum == c.window-1 {
+				cmdNum++
+				cmdM.Unlock()
+				<-wait
+			} else {
+				cmdNum++
+				cmdM.Unlock()
+			}
+		}
+		if c.seq || (c.syncFreq > 0 && i%c.syncFreq == 0) {
+			<-wait
+		}
+	}
+
+	if !c.seq {
+		<-wait
+	}
+
+	c.duration = time.Now().Sub(c.launchTime)
+	if printResults {
+		c.Printf("Test took %v\n", c.duration)
+		c.PrintMetrics(c.duration)
+	}
+	c.Disconnect()
+}
+
+// GetMetrics returns a copy of the metrics for aggregation.
+func (c *HybridBufferClient) GetMetrics() *HybridMetrics {
+	return c.Metrics
+}
+
+// GetDuration returns the benchmark duration.
+func (c *HybridBufferClient) GetDuration() time.Duration {
+	return c.duration
+}
+
+// AggregateMetrics combines metrics from multiple threads into one.
+func AggregateMetrics(metrics []*HybridMetrics) *HybridMetrics {
+	result := &HybridMetrics{
+		StrongWriteLatency: make([]float64, 0),
+		StrongReadLatency:  make([]float64, 0),
+		WeakWriteLatency:   make([]float64, 0),
+		WeakReadLatency:    make([]float64, 0),
+	}
+
+	for _, m := range metrics {
+		if m == nil {
+			continue
+		}
+		result.StrongWriteCount += m.StrongWriteCount
+		result.StrongReadCount += m.StrongReadCount
+		result.WeakWriteCount += m.WeakWriteCount
+		result.WeakReadCount += m.WeakReadCount
+		result.StrongWriteLatency = append(result.StrongWriteLatency, m.StrongWriteLatency...)
+		result.StrongReadLatency = append(result.StrongReadLatency, m.StrongReadLatency...)
+		result.WeakWriteLatency = append(result.WeakWriteLatency, m.WeakWriteLatency...)
+		result.WeakReadLatency = append(result.WeakReadLatency, m.WeakReadLatency...)
+	}
+
+	return result
+}
+
+// Printer is an interface for logging output.
+type Printer interface {
+	Println(v ...interface{})
+	Printf(format string, v ...interface{})
+}
+
+// Print outputs the aggregated metrics summary.
+func (m *HybridMetrics) Print(p Printer, totalOps int, duration time.Duration) {
+	strongOps := m.StrongWriteCount + m.StrongReadCount
+	weakOps := m.WeakWriteCount + m.WeakReadCount
+	actualTotalOps := strongOps + weakOps
+	throughput := float64(actualTotalOps) / duration.Seconds()
+
+	p.Println("\n=== Hybrid Benchmark Results ===")
+	p.Printf("Total operations: %d\n", actualTotalOps)
+	p.Printf("Duration: %.2fs\n", duration.Seconds())
+	p.Printf("Throughput: %.2f ops/sec\n", throughput)
+
+	if strongOps > 0 {
+		strongPct := float64(strongOps) * 100 / float64(actualTotalOps)
+		p.Printf("\nStrong Operations: %d (%.1f%%)\n", strongOps, strongPct)
+		p.Printf("  Writes: %d | Reads: %d\n", m.StrongWriteCount, m.StrongReadCount)
+
+		allStrongLatencies := append(m.StrongWriteLatency, m.StrongReadLatency...)
+		if len(allStrongLatencies) > 0 {
+			median, p99, p999 := computePercentiles(allStrongLatencies)
+			p.Printf("  Median latency: %.2fms | P99: %.2fms | P99.9: %.2fms\n", median, p99, p999)
+		}
+	}
+
+	if weakOps > 0 {
+		weakPct := float64(weakOps) * 100 / float64(actualTotalOps)
+		p.Printf("\nWeak Operations: %d (%.1f%%)\n", weakOps, weakPct)
+		p.Printf("  Writes: %d | Reads: %d\n", m.WeakWriteCount, m.WeakReadCount)
+
+		allWeakLatencies := append(m.WeakWriteLatency, m.WeakReadLatency...)
+		if len(allWeakLatencies) > 0 {
+			median, p99, p999 := computePercentiles(allWeakLatencies)
+			p.Printf("  Median latency: %.2fms | P99: %.2fms | P99.9: %.2fms\n", median, p99, p999)
+		}
+	}
+
+	p.Println("================================")
 }

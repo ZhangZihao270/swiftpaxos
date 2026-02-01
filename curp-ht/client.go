@@ -35,6 +35,9 @@ type Client struct {
 	// Weak command tracking
 	weakPending    map[int32]struct{}
 	lastWeakSeqNum int32 // Track sequence number of last weak command for causal ordering
+
+	// Mutex for concurrent map access (needed for pipelining)
+	mu sync.Mutex
 }
 
 var (
@@ -151,9 +154,12 @@ func (c *Client) handleMsgs() {
 }
 
 func (c *Client) handleReply(r *MReply) {
+	c.mu.Lock()
 	if _, exists := c.delivered[r.CmdId.SeqNum]; exists {
+		c.mu.Unlock()
 		return
 	}
+	c.mu.Unlock()
 
 	ack := &MRecordAck{
 		Replica: r.Replica,
@@ -166,9 +172,12 @@ func (c *Client) handleReply(r *MReply) {
 }
 
 func (c *Client) handleRecordAck(r *MRecordAck, fromLeader bool) {
+	c.mu.Lock()
 	if _, exists := c.delivered[r.CmdId.SeqNum]; exists {
+		c.mu.Unlock()
 		return
 	}
+	c.mu.Unlock()
 
 	if c.ballot == -1 {
 		c.ballot = r.Ballot
@@ -194,7 +203,9 @@ func (c *Client) handleRecordAck(r *MRecordAck, fromLeader bool) {
 }
 
 func (c *Client) handleSyncReply(rep *MSyncReply) {
+	c.mu.Lock()
 	if _, exists := c.delivered[rep.CmdId.SeqNum]; exists {
+		c.mu.Unlock()
 		return
 	}
 
@@ -203,11 +214,13 @@ func (c *Client) handleSyncReply(rep *MSyncReply) {
 	} else if c.ballot < rep.Ballot {
 		c.ballot = rep.Ballot
 	} else if c.ballot > rep.Ballot {
+		c.mu.Unlock()
 		return
 	}
 
 	c.val = state.Value(rep.Rep)
 	c.delivered[rep.CmdId.SeqNum] = struct{}{}
+	c.mu.Unlock()
 	c.RegisterReply(c.val, rep.CmdId.SeqNum)
 	c.Println("Slow Paths:", c.slowPaths)
 }
@@ -217,18 +230,23 @@ func (c *Client) handleAcks(leaderMsg interface{}, msgs []interface{}) {
 		return
 	}
 
+	c.mu.Lock()
 	if _, exists := c.delivered[leaderMsg.(*MRecordAck).CmdId.SeqNum]; exists {
+		c.mu.Unlock()
 		return
 	}
 
 	c.delivered[leaderMsg.(*MRecordAck).CmdId.SeqNum] = struct{}{}
+	c.mu.Unlock()
 	c.RegisterReply(c.val, leaderMsg.(*MRecordAck).CmdId.SeqNum)
 	c.Println("Slow Paths:", c.slowPaths)
 }
 
 // handleWeakReply handles weak command reply from leader
 func (c *Client) handleWeakReply(rep *MWeakReply) {
+	c.mu.Lock()
 	if _, exists := c.delivered[rep.CmdId.SeqNum]; exists {
+		c.mu.Unlock()
 		return
 	}
 
@@ -238,6 +256,7 @@ func (c *Client) handleWeakReply(rep *MWeakReply) {
 	} else if c.ballot < rep.Ballot {
 		c.ballot = rep.Ballot
 	} else if c.ballot > rep.Ballot {
+		c.mu.Unlock()
 		return
 	}
 
@@ -248,12 +267,21 @@ func (c *Client) handleWeakReply(rep *MWeakReply) {
 	c.val = state.Value(rep.Rep)
 	c.delivered[rep.CmdId.SeqNum] = struct{}{}
 	delete(c.weakPending, rep.CmdId.SeqNum)
+	c.mu.Unlock()
 	c.RegisterReply(c.val, rep.CmdId.SeqNum)
 }
 
 // SendWeakWrite sends a weak consistency write operation to leader only
 func (c *Client) SendWeakWrite(key int64, value []byte) int32 {
 	seqnum := c.getNextSeqnum()
+
+	c.mu.Lock()
+	causalDep := c.lastWeakSeqNum
+	c.weakPending[seqnum] = struct{}{}
+	c.lastWeakSeqNum = seqnum
+	leader := c.leader
+	c.mu.Unlock()
+
 	p := &MWeakPropose{
 		CommandId: seqnum,
 		ClientId:  c.ClientId,
@@ -263,16 +291,12 @@ func (c *Client) SendWeakWrite(key int64, value []byte) int32 {
 			V:  value,
 		},
 		Timestamp: 0,
-		CausalDep: c.lastWeakSeqNum, // Depend on previous weak command
+		CausalDep: causalDep, // Depend on previous weak command
 	}
 
-	// Track as pending and update lastWeakSeqNum for causal ordering
-	c.weakPending[seqnum] = struct{}{}
-	c.lastWeakSeqNum = seqnum
-
 	// Send only to leader
-	if c.leader != -1 {
-		c.SendMsg(c.leader, c.cs.weakProposeRPC, p)
+	if leader != -1 {
+		c.SendMsg(leader, c.cs.weakProposeRPC, p)
 	}
 	return seqnum
 }
@@ -280,6 +304,14 @@ func (c *Client) SendWeakWrite(key int64, value []byte) int32 {
 // SendWeakRead sends a weak consistency read operation to leader only
 func (c *Client) SendWeakRead(key int64) int32 {
 	seqnum := c.getNextSeqnum()
+
+	c.mu.Lock()
+	causalDep := c.lastWeakSeqNum
+	c.weakPending[seqnum] = struct{}{}
+	c.lastWeakSeqNum = seqnum
+	leader := c.leader
+	c.mu.Unlock()
+
 	p := &MWeakPropose{
 		CommandId: seqnum,
 		ClientId:  c.ClientId,
@@ -289,16 +321,12 @@ func (c *Client) SendWeakRead(key int64) int32 {
 			V:  state.NIL(),
 		},
 		Timestamp: 0,
-		CausalDep: c.lastWeakSeqNum, // Depend on previous weak command
+		CausalDep: causalDep, // Depend on previous weak command
 	}
 
-	// Track as pending and update lastWeakSeqNum for causal ordering
-	c.weakPending[seqnum] = struct{}{}
-	c.lastWeakSeqNum = seqnum
-
 	// Send only to leader
-	if c.leader != -1 {
-		c.SendMsg(c.leader, c.cs.weakProposeRPC, p)
+	if leader != -1 {
+		c.SendMsg(leader, c.cs.weakProposeRPC, p)
 	}
 	return seqnum
 }

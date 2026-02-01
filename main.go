@@ -6,9 +6,9 @@ import (
 	"log"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/imdea-software/swiftpaxos/client"
 	"github.com/imdea-software/swiftpaxos/config"
@@ -88,28 +88,50 @@ func runMaster(c *config.Config) {
 func runClient(c *config.Config, verbose bool) {
 	numThreads := c.GetNumClientThreads()
 
+	// Collect metrics and durations from all threads
+	allMetrics := make([]*client.HybridMetrics, numThreads)
+	allDurations := make([]time.Duration, numThreads)
+	var metricsLock sync.Mutex
+
 	var wg sync.WaitGroup
 	for i := 0; i < numThreads; i++ {
 		wg.Add(1)
 		go func(i int) {
-			runSingleClient(c, i, verbose)
+			metrics, duration := runSingleClient(c, i, verbose, numThreads)
+			metricsLock.Lock()
+			allMetrics[i] = metrics
+			allDurations[i] = duration
+			metricsLock.Unlock()
 			wg.Done()
 		}(i)
 	}
 	wg.Wait()
+
+	// Use max duration across all threads (they run in parallel)
+	var maxDuration time.Duration
+	for _, d := range allDurations {
+		if d > maxDuration {
+			maxDuration = d
+		}
+	}
+
+	// Aggregate and print metrics (only for curpht with multiple threads)
+	if numThreads > 1 && strings.ToLower(c.Protocol) == "curpht" {
+		aggregated := client.AggregateMetrics(allMetrics)
+		l := dlog.New(*logFile, verbose)
+		l.Printf("Test took %v\n", maxDuration)
+		aggregated.Print(l, c.Reqs*numThreads, maxDuration)
+	}
 }
 
-func runSingleClient(c *config.Config, i int, verbose bool) {
+func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads int) (*client.HybridMetrics, time.Duration) {
+	// Thread 0 uses the main log file, other threads use /dev/null to avoid clutter
+	// All operational output goes through thread 0
 	var l *dlog.Logger
-	if i == 0 {
+	if threadIdx == 0 {
 		l = dlog.New(*logFile, verbose)
 	} else {
-		f := *logFile
-		if f == "" {
-			f = "client_"
-		}
-		l = dlog.New(f+strconv.Itoa(i), verbose)
-		// TODO: remove if already exists
+		l = dlog.New("/dev/null", false)
 	}
 
 	switch strings.ToLower(c.Protocol) {
@@ -148,9 +170,10 @@ func runSingleClient(c *config.Config, i int, verbose bool) {
 	if p := strings.ToLower(c.Protocol); p == "swiftpaxos" {
 		cl := swift.NewClient(b, len(c.ReplicaAddrs))
 		if cl == nil {
-			return
+			return nil, 0
 		}
 		cl.Loop()
+		return nil, 0
 	} else if p == "curp" {
 		cls := []string{}
 		for a := range c.ClientAddrs {
@@ -162,9 +185,10 @@ func runSingleClient(c *config.Config, i int, verbose bool) {
 		pclients := c.GetClientOffset(cls, c.Alias)
 		cl := curp.NewClient(b, len(c.ReplicaAddrs), c.Reqs, pclients)
 		if cl == nil {
-			return
+			return nil, 0
 		}
 		cl.Loop()
+		return nil, 0
 	} else if p == "curpht" {
 		cls := []string{}
 		for a := range c.ClientAddrs {
@@ -176,21 +200,21 @@ func runSingleClient(c *config.Config, i int, verbose bool) {
 		pclients := c.GetClientOffset(cls, c.Alias)
 		cl := curpht.NewClient(b, len(c.ReplicaAddrs), c.Reqs, pclients)
 		if cl == nil {
-			return
+			return nil, 0
 		}
-		// Use HybridLoop if weakRatio > 0, otherwise use standard Loop
-		if c.WeakRatio > 0 {
-			// Default weakWrites to 50 if not specified
-			weakWrites := c.WeakWrites
-			if weakWrites == 0 && c.WeakRatio > 0 {
-				weakWrites = 50
-			}
-			hbc := client.NewHybridBufferClient(b, c.WeakRatio, weakWrites)
-			hbc.SetHybridClient(cl)
-			hbc.HybridLoop()
-		} else {
-			cl.Loop()
+		// Always use HybridLoop for curpht to get consistent output format
+		// HybridLoop handles all-strong workloads (weakRatio=0) correctly
+		weakWrites := c.WeakWrites
+		if weakWrites == 0 && c.WeakRatio > 0 {
+			// Default weakWrites to 50 if weak commands are enabled but no ratio specified
+			weakWrites = 50
 		}
+		hbc := client.NewHybridBufferClient(b, c.WeakRatio, weakWrites)
+		hbc.SetHybridClient(cl)
+		// For single thread, run with printing. For multiple threads, collect metrics.
+		printResults := (numThreads == 1)
+		hbc.HybridLoopWithOptions(printResults)
+		return hbc.GetMetrics(), hbc.GetDuration()
 	} else {
 		waitFrom := b.LeaderId
 		if b.Fast || b.Leaderless || c.WaitClosest {
@@ -198,5 +222,6 @@ func runSingleClient(c *config.Config, i int, verbose bool) {
 		}
 		b.WaitReplies(waitFrom)
 		b.Loop()
+		return nil, 0
 	}
 }
