@@ -340,6 +340,11 @@ func (r *Replica) handleAccept(msg *MAccept, desc *commandDesc) {
 
 	desc.cmdId = msg.CmdId
 	desc.cmdSlot = msg.CmdSlot
+	// Copy command from Accept message if not already set (needed for weak commands
+	// which aren't in r.proposes on non-leaders)
+	if desc.cmd.Op == 0 && msg.Cmd.Op != 0 {
+		desc.cmd = msg.Cmd
+	}
 
 	desc.afterPayload.Call(func() {
 
@@ -354,7 +359,10 @@ func (r *Replica) handleAccept(msg *MAccept, desc *commandDesc) {
 			desc.Call()
 		}
 
-		if r.contactClients && !r.isLeader {
+		// Non-leaders should always send ORDERED reply when previous commands are ready
+		// This is needed for the macks quorum to complete when there are key conflicts
+		// (when non-leaders initially return Ok=FALSE instead of TRUE)
+		if !r.isLeader {
 			prop, exists := r.proposes.Get(desc.cmdId.String())
 			if exists { // or if desc.propose != nil ?
 				r.IfPreviousAreReady(desc, func() {
@@ -524,12 +532,17 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 		if exists {
 			desc.propose = p.(*defs.GPropose)
 		}
-		if desc.propose == nil {
+		// For weak commands on non-leaders, desc.propose is nil but desc.cmd is set
+		// from the Accept message (via handleAccept). Check desc.cmd.Op to handle this case.
+		if desc.propose == nil && desc.cmd.Op == 0 {
 			return
 		}
 
-		if !r.isLeader {
+		if !r.isLeader && desc.propose != nil {
 			desc.cmd = desc.propose.Command
+			r.sync(desc.cmdId, desc.cmd)
+		} else if !r.isLeader && desc.cmd.Op != 0 {
+			// Weak command on non-leader: cmd is already set from Accept message
 			r.sync(desc.cmdId, desc.cmd)
 		}
 
@@ -539,7 +552,9 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 			desc.val = desc.cmd.ComputeResult(r.State)
 		}
 
-		if r.isLeader && desc.phase != COMMIT {
+		// Speculative reply to client for strong commands (leader only, before commit)
+		// Weak commands are handled separately via handleWeakPropose
+		if r.isLeader && desc.phase != COMMIT && desc.propose != nil {
 			rep := &MReply{
 				Replica: r.Id,
 				Ballot:  r.ballot,
@@ -551,12 +566,10 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 			} else {
 				rep.Ok = TRUE
 			}
-			if rep.Ok == TRUE || r.contactClients {
-				// if !r.contactClients then the client gets reply
-				// from the leader or the closes replica after the command
-				// gets committed and executed
-				r.sender.SendToClient(desc.propose.ClientId, rep, r.cs.replyRPC)
-			}
+			// Always send reply to client so they can complete via macks quorum
+			// even when rep.Ok == FALSE (pending dependency). Without this,
+			// the client hangs waiting for a leader reply that never comes.
+			r.sender.SendToClient(desc.propose.ClientId, rep, r.cs.replyRPC)
 		}
 
 		// After commit: actually execute and modify state
@@ -570,7 +583,9 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 		}
 
 		if desc.phase == COMMIT {
-			if !r.contactClients {
+			// Sync reply is only for strong commands (which have desc.propose set)
+			// Weak commands are handled separately
+			if !r.contactClients && desc.propose != nil {
 				if (r.optimized && desc.propose.Proxy) ||
 					(!r.optimized && r.isLeader) {
 					rep := &MSyncReply{
@@ -656,7 +671,9 @@ func (r *Replica) newDesc() *commandDesc {
 	desc.accepted = false
 
 	desc.afterPayload = desc.afterPayload.ReinitCondF(func() bool {
-		return (desc.propose != nil || r.proposes.Has(desc.cmdId.String()))
+		// For weak commands on non-leaders, desc.cmd is set from the Accept message
+		// even though desc.propose is nil and proposes doesn't have the command
+		return (desc.propose != nil || r.proposes.Has(desc.cmdId.String()) || desc.cmd.Op != 0)
 	})
 
 	desc.acks = desc.acks.ReinitMsgSet(r.Q, func(_, _ interface{}) bool {
