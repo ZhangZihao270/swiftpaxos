@@ -251,7 +251,17 @@ func (c *HybridBufferClient) HybridLoop() {
 	// Command generation loop
 	for i := 0; i <= c.reqNum; i++ {
 		key := getKey()
-		isWeak, isWrite := c.DecideCommandType()
+
+		// First command (i=0, warmup) MUST be a strong command to set up ClientWriters.
+		// Weak commands use custom RPC messages that don't register ClientWriters,
+		// so we need at least one strong PROPOSE to establish the connection properly.
+		var isWeak, isWrite bool
+		if i == 0 {
+			isWeak = false // Force strong for warmup
+			isWrite = false
+		} else {
+			isWeak, isWrite = c.DecideCommandType()
+		}
 		cmdType := GetCommandType(isWeak, isWrite)
 		cmdTypes[i] = cmdType
 
