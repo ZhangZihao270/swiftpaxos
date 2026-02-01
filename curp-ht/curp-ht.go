@@ -61,6 +61,11 @@ type Replica struct {
 	// Track pending (uncommitted) writes per client for non-blocking speculative reads
 	// Key: "clientId:key", Value: *pendingWrite
 	pendingWrites cmap.ConcurrentMap
+
+	// Notification channels for async waiting (replaces spin-waits)
+	commitNotify  map[int]chan struct{} // slot -> notification channel for commit
+	executeNotify map[int]chan struct{} // slot -> notification channel for execution
+	notifyMu      sync.Mutex            // protects commitNotify and executeNotify
 }
 
 // pendingWrite tracks an uncommitted write for speculative read computation
@@ -94,6 +99,10 @@ type commandDesc struct {
 
 	isWeak  bool // Mark if this is a weak command
 	applied bool // Track if command has been applied to state machine
+
+	// Cached string keys to avoid repeated conversions
+	slotStr  string // cached strconv.Itoa(cmdSlot)
+	cmdIdStr string // cached cmdId.String()
 }
 
 type commandStaticDesc struct {
@@ -132,6 +141,9 @@ func New(alias string, rid int, addrs []string, exec bool, pl, f int,
 		pendingWrites: cmap.New(),
 		history:       make([]commandStaticDesc, HISTORY_SIZE),
 
+		commitNotify:  make(map[int]chan struct{}),
+		executeNotify: make(map[int]chan struct{}),
+
 		deliverChan: make(chan int, defs.CHAN_BUFFER_SIZE),
 
 		poolLevel:    pl,
@@ -152,7 +164,7 @@ func New(alias string, rid int, addrs []string, exec bool, pl, f int,
 
 	r.Q = replica.NewMajorityOf(r.N)
 	r.sender = replica.NewSender(r.Replica)
-	r.batcher = NewBatcher(r, 8)
+	r.batcher = NewBatcher(r, 128) // Increased from 8 for better batching
 
 	_, leaderIds, err := replica.NewQuorumsFromFile(conf.Quorum, r.Replica)
 	if err == nil && len(leaderIds) != 0 {
@@ -435,6 +447,7 @@ func (r *Replica) handleCommit(msg *MCommit, desc *commandDesc) {
 		desc.phase = COMMIT
 		if r.isLeader {
 			r.committed.Set(strconv.Itoa(desc.cmdSlot), struct{}{})
+			r.notifyCommit(desc.cmdSlot) // Notify waiters that slot is committed
 		}
 
 		defer func() {
@@ -577,6 +590,7 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 			desc.val = desc.cmd.Execute(r.State)
 			desc.applied = true
 			r.executed.Set(slotStr, struct{}{})
+			r.notifyExecute(slot) // Notify waiters that slot is executed
 			go func(nextSlot int) {
 				r.deliverChan <- nextSlot
 			}(slot + 1)
@@ -634,6 +648,7 @@ func (r *Replica) getCmdDescSeq(slot int, msg interface{}, dep int, seq bool) *c
 			desc = r.newDesc()
 			desc.seq = seq || desc.seq
 			desc.cmdSlot = slot
+			desc.slotStr = slotStr // Cache the string key
 			if !desc.seq {
 				go r.handleDesc(desc, slot, dep)
 				r.routineCount++
@@ -861,23 +876,24 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 	// ensures slot ordering is maintained
 
 	// After commit is complete (tracked via committed map), execute in slot order
-	// Wait for commit
+	// Wait for commit using channel notification (replaces spin-wait)
 	slotStr := strconv.Itoa(slot)
-	for i := 0; i < 10000; i++ { // Max ~1s wait
-		if r.committed.Has(slotStr) {
-			break
-		}
-		time.Sleep(100 * time.Microsecond)
+	commitCh := r.getOrCreateCommitNotify(slot)
+	select {
+	case <-commitCh:
+		// Committed
+	case <-time.After(1 * time.Second):
+		// Timeout - proceed anyway to avoid deadlock
 	}
 
 	// Wait for slot-1 to be executed (slot ordering)
 	if slot > 0 {
-		prevSlotStr := strconv.Itoa(slot - 1)
-		for i := 0; i < 10000; i++ { // Max ~1s wait
-			if r.executed.Has(prevSlotStr) {
-				break
-			}
-			time.Sleep(100 * time.Microsecond)
+		executeCh := r.getOrCreateExecuteNotify(slot - 1)
+		select {
+		case <-executeCh:
+			// Slot-1 executed
+		case <-time.After(1 * time.Second):
+			// Timeout - proceed anyway to avoid deadlock
 		}
 	}
 
@@ -892,6 +908,7 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 		desc.val = desc.cmd.Execute(r.State)
 		desc.applied = true
 		r.executed.Set(slotStr, struct{}{})
+		r.notifyExecute(slot) // Notify waiters that slot is executed
 
 		// Mark this weak command as executed for causal ordering
 		r.markWeakExecuted(clientId, seqNum)
@@ -1016,5 +1033,71 @@ func (r *Replica) computeSpeculativeResult(clientId int32, causalDep int32, cmd 
 
 	default:
 		return state.NIL()
+	}
+}
+
+// getOrCreateCommitNotify returns a channel that will be closed when the slot is committed
+func (r *Replica) getOrCreateCommitNotify(slot int) chan struct{} {
+	r.notifyMu.Lock()
+	defer r.notifyMu.Unlock()
+
+	// Check if already committed
+	if r.committed.Has(strconv.Itoa(slot)) {
+		// Return a closed channel
+		ch := make(chan struct{})
+		close(ch)
+		return ch
+	}
+
+	// Get or create notification channel
+	if ch, ok := r.commitNotify[slot]; ok {
+		return ch
+	}
+	ch := make(chan struct{})
+	r.commitNotify[slot] = ch
+	return ch
+}
+
+// notifyCommit notifies waiters that a slot has been committed
+func (r *Replica) notifyCommit(slot int) {
+	r.notifyMu.Lock()
+	defer r.notifyMu.Unlock()
+
+	if ch, ok := r.commitNotify[slot]; ok {
+		close(ch)
+		delete(r.commitNotify, slot)
+	}
+}
+
+// getOrCreateExecuteNotify returns a channel that will be closed when the slot is executed
+func (r *Replica) getOrCreateExecuteNotify(slot int) chan struct{} {
+	r.notifyMu.Lock()
+	defer r.notifyMu.Unlock()
+
+	// Check if already executed
+	if r.executed.Has(strconv.Itoa(slot)) {
+		// Return a closed channel
+		ch := make(chan struct{})
+		close(ch)
+		return ch
+	}
+
+	// Get or create notification channel
+	if ch, ok := r.executeNotify[slot]; ok {
+		return ch
+	}
+	ch := make(chan struct{})
+	r.executeNotify[slot] = ch
+	return ch
+}
+
+// notifyExecute notifies waiters that a slot has been executed
+func (r *Replica) notifyExecute(slot int) {
+	r.notifyMu.Lock()
+	defer r.notifyMu.Unlock()
+
+	if ch, ok := r.executeNotify[slot]; ok {
+		close(ch)
+		delete(r.executeNotify, slot)
 	}
 }
