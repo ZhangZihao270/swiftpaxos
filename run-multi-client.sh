@@ -11,7 +11,8 @@
 #
 # Options:
 #   -c, --config FILE       Config file (default: local.conf)
-#   -k, --clones N          Clones per client process (default: 0, means 1 thread)
+#   -k, --clones N          Clones per client process (deprecated, use -t)
+#   -t, --threads N         Threads per client process (overrides config clientThreads)
 #   -o, --output FILE       Output file for merged results
 #   -d, --distributed       Run in distributed mode (SSH to remote servers)
 #   --startup-delay N       Seconds to wait for replicas (default: 5)
@@ -30,7 +31,8 @@ set -e
 
 # Default values
 CONFIG="local.conf"
-CLONES=""  # Empty means use config value
+CLONES=""  # Empty means use config value (deprecated)
+THREADS=""  # Empty means use config value (preferred)
 OUTPUT=""
 DISTRIBUTED=false
 STARTUP_DELAY=10
@@ -44,6 +46,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         -c|--config) CONFIG="$2"; shift 2 ;;
         -k|--clones) CLONES="$2"; shift 2 ;;
+        -t|--threads) THREADS="$2"; shift 2 ;;
         -o|--output) OUTPUT="$2"; shift 2 ;;
         -d|--distributed) DISTRIBUTED=true; shift ;;
         --startup-delay) STARTUP_DELAY="$2"; shift 2 ;;
@@ -54,10 +57,25 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Read clones from config if not specified via -k
-if [[ -z "$CLONES" ]]; then
-    CLONES=$(grep -E "^clones:" "$CONFIG" 2>/dev/null | awk '{print $2}' | head -1)
-    CLONES=${CLONES:-0}  # Default to 0 if not found
+# Determine thread count (prefer --threads, then config clientThreads, then config clones)
+if [[ -n "$THREADS" ]]; then
+    # Explicitly specified via -t/--threads
+    THREAD_COUNT=$THREADS
+elif [[ -n "$CLONES" ]]; then
+    # Legacy -k/--clones specified
+    THREAD_COUNT=$((CLONES + 1))
+else
+    # Read from config (prefer clientThreads over clones)
+    CLIENT_THREADS=$(grep -iE "^clientthreads:" "$CONFIG" 2>/dev/null | awk '{print $2}' | head -1)
+    CLONES_CFG=$(grep -iE "^clones:" "$CONFIG" 2>/dev/null | awk '{print $2}' | head -1)
+
+    if [[ -n "$CLIENT_THREADS" && "$CLIENT_THREADS" -gt 0 ]]; then
+        THREAD_COUNT=$CLIENT_THREADS
+    elif [[ -n "$CLONES_CFG" ]]; then
+        THREAD_COUNT=$((CLONES_CFG + 1))
+    else
+        THREAD_COUNT=1  # Default: single thread
+    fi
 fi
 
 mkdir -p "$RESULTS_DIR"
@@ -114,7 +132,7 @@ parse_config() {
 
 parse_config
 
-TOTAL_THREADS=$((NUM_CLIENTS * (CLONES + 1)))
+TOTAL_THREADS=$((NUM_CLIENTS * THREAD_COUNT))
 
 echo "============================================"
 echo "  Distributed Multi-Client CURP-HT Benchmark"
@@ -122,7 +140,7 @@ echo "============================================"
 echo "Config: $CONFIG"
 echo "Mode: $(if $DISTRIBUTED; then echo 'Distributed (SSH)'; else echo 'Local'; fi)"
 echo "Client servers: $NUM_CLIENTS"
-echo "Clones per server: $CLONES"
+echo "Threads per server: $THREAD_COUNT"
 echo "Total concurrent threads: $TOTAL_THREADS"
 echo "Replicas: $NUM_REPLICAS"
 echo "Results dir: $RESULTS_DIR"

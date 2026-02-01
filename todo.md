@@ -643,13 +643,14 @@ clientThreads: 4  // Default threads per client
 
 ##### 13.3 Update Benchmark Script
 
-- [ ] **13.3.1** Update run-multi-client.sh to read thread config
-  - Pass thread count to client process via command line or config
-  - Update summary aggregation to account for threads
+- [x] **13.3.1** Update run-multi-client.sh to read thread config [26:02:01, 00:35]
+  - Added -t/--threads option for explicit thread count
+  - Updated to read clientThreads from config (prefers over clones)
+  - Backward compatible with legacy clones parameter
 
-- [ ] **13.3.2** Update result parsing for multi-threaded output
-  - Parse per-thread metrics if available
-  - Aggregate total throughput correctly
+- [x] **13.3.2** Update result parsing for multi-threaded output [26:02:01, 00:35]
+  - Python aggregation script already handles per-client metrics correctly
+  - Updated output to show "Threads per server" instead of "Clones"
 
 ##### 13.4 Testing
 
