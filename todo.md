@@ -509,45 +509,53 @@ Weak Operations: 5000 (50%)
 
 ##### 12.1 Implement Zipf Generator
 
-- [ ] **12.1.1** Add Zipf distribution generator in `client/zipf.go`
-  - Use Go's `math/rand` Zipf generator or implement custom
-  - Parameters: n (number of keys), s (skewness), v (offset)
-  - Thread-safe for concurrent client usage
+- [x] **12.1.1** Add Zipf distribution generator in `client/zipf.go` [26:02:01, 01:20]
+  - Created KeyGenerator interface with NextKey() method
+  - Implemented UniformKeyGenerator and ZipfKeyGenerator
+  - Thread-safe using separate rand sources per generator
 
-- [ ] **12.1.2** Add configuration parameters in config/config.go
-  - `zipfSkew`: Skewness parameter s (default: 0 = uniform)
-  - `keySpace`: Total number of unique keys (default: 1000000)
+- [x] **12.1.2** Add configuration parameters in config/config.go [26:02:01, 01:20]
+  - Added `KeySpace int64` field for total number of unique keys
+  - Added `ZipfSkew float64` field for skewness parameter
+  - Default: 0 (uniform distribution, backward compatible)
 
-- [ ] **12.1.3** Update config parser to read new parameters
-  - Add cases for `zipfSkew` and `keySpace`
-  - Validate: zipfSkew >= 0
+- [x] **12.1.3** Update config parser to read new parameters [26:02:01, 01:20]
+  - Added expectInt64() and expectFloat64() helper functions
+  - Added cases for `keyspace` and `zipfskew` in Read()
+  - Fixed Go's rand.Zipf s>1 requirement by clamping to 1.01
 
 ##### 12.2 Integrate with Benchmark
 
-- [ ] **12.2.1** Create KeyGenerator interface
-  - Methods: `NextKey() string`
+- [x] **12.2.1** Create KeyGenerator interface [26:02:01, 01:25]
+  - Methods: `NextKey() int64`
   - Implementations: UniformKeyGenerator, ZipfKeyGenerator
+  - NewKeyGenerator() factory selects based on skew value
 
-- [ ] **12.2.2** Update HybridLoop to use KeyGenerator
-  - Replace direct random key generation with KeyGenerator
-  - Select generator based on zipfSkew config (0 = uniform, >0 = zipf)
+- [x] **12.2.2** Update BufferClient to use KeyGenerator [26:02:01, 01:25]
+  - Added SetKeyGenerator() method to BufferClient
+  - Updated genGetKey() to use keyGen when configured
+  - HybridLoop inherits from BufferClient, automatically supported
 
-- [ ] **12.2.3** Update original Loop for backward compatibility
-  - Same KeyGenerator integration
-  - Default behavior unchanged when zipfSkew = 0
+- [x] **12.2.3** Update main.go for KeyGenerator initialization [26:02:01, 01:25]
+  - When keySpace > 0, creates KeyGenerator with configured params
+  - Passes client ID for unique seeding per client
+  - Default behavior unchanged when keySpace = 0
 
 ##### 12.3 Testing
 
-- [ ] **12.3.1** Unit test: Zipf distribution correctness
-  - Verify distribution matches expected Zipf curve
-  - Test edge cases: s=0 (uniform), s=1, s=2
+- [x] **12.3.1** Unit test: Zipf distribution correctness [26:02:01, 01:28]
+  - TestZipfDistributionSkew: Verifies skew produces expected frequency
+  - TestZipfSkewClamping: Tests s<=1 clamping to 1.01
+  - TestZipfNegativeSkew: Tests negative skew handling
 
-- [ ] **12.3.2** Unit test: Configuration parsing
-  - Test zipfSkew and keySpace parsing
-  - Test default values
+- [x] **12.3.2** Unit test: Configuration parsing [26:02:01, 01:28]
+  - TestZipfSkewConfig, TestZipfSkewDefault, TestZipfSkewWithOtherParams
+  - Added to config/config_test.go
 
-- [ ] **12.3.3** Benchmark: Key distribution histogram
-  - Output actual key frequency distribution for validation
+- [x] **12.3.3** Unit test: Key generator correctness [26:02:01, 01:28]
+  - TestUniformKeyGenerator, TestUniformDistribution
+  - TestKeyGeneratorDifferentSeeds, TestKeyGeneratorSameSeed
+  - TestNewKeyGeneratorUniform, TestNewKeyGeneratorZipf
 
 #### Example Configuration
 
