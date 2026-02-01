@@ -35,6 +35,9 @@ type BufferClient struct {
 	launchTime time.Time
 
 	rand *rand.Rand
+
+	// KeyGenerator for Zipf/uniform key distribution
+	keyGen KeyGenerator
 }
 
 func NewBufferClient(c *Client, reqNum, psize, conflict, writes int, conflictKey int64) *BufferClient {
@@ -61,6 +64,12 @@ func (c *BufferClient) Pipeline(syncFreq int, window int32) {
 	c.seq = false
 	c.syncFreq = syncFreq
 	c.window = window
+}
+
+// SetKeyGenerator sets a KeyGenerator for key distribution (Zipf or Uniform).
+// If set, genGetKey will use the KeyGenerator instead of UUID-based keys.
+func (c *BufferClient) SetKeyGenerator(kg KeyGenerator) {
+	c.keyGen = kg
 }
 
 func (c *BufferClient) RegisterReply(val state.Value, seqnum int32) {
@@ -195,6 +204,10 @@ func (c *BufferClient) genGetKey() func() int64 {
 	getKey := func() int64 {
 		if c.randomTrue(c.conflict) {
 			return c.conflictKey
+		}
+		// Use KeyGenerator if configured (Zipf or Uniform distribution)
+		if c.keyGen != nil {
+			return c.keyGen.NextKey()
 		}
 		if c.GetClientKey == nil {
 			return key

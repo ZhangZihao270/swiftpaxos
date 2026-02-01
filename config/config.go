@@ -112,6 +112,13 @@ type Config struct {
 	// Number of client threads per client process (default: 0 = use clones behavior)
 	ClientThreads int
 
+	// Key distribution parameters
+	// Total number of unique keys (default: 10000)
+	KeySpace int64
+	// Zipf skewness parameter (default: 0 = uniform)
+	// Values: 0=uniform, 0.99=moderate skew, 1.5=high skew
+	ZipfSkew float64
+
 	// quorum config file
 	Quorum string
 
@@ -246,6 +253,12 @@ func Read(filename, alias string) (*Config, error) {
 			case "clientthreads":
 				c.ClientThreads, err = expectInt(words)
 				ok = true
+			case "keyspace":
+				c.KeySpace, err = expectInt64(words)
+				ok = true
+			case "zipfskew":
+				c.ZipfSkew, err = expectFloat64(words)
+				ok = true
 			}
 			if ok {
 				readingMaster = false
@@ -291,6 +304,18 @@ func expectInt(ws []string) (int, error) {
 	return expect(ws, strconv.Atoi, 0)
 }
 
+func expectInt64(ws []string) (int64, error) {
+	return expect(ws, func(s string) (int64, error) {
+		return strconv.ParseInt(s, 10, 64)
+	}, int64(0))
+}
+
+func expectFloat64(ws []string) (float64, error) {
+	return expect(ws, func(s string) (float64, error) {
+		return strconv.ParseFloat(s, 64)
+	}, float64(0))
+}
+
 func expectString(ws []string) (string, error) {
 	return expect(ws, func(s string) (string, error) {
 		return s, nil
@@ -311,7 +336,7 @@ func expectDuration(ws []string) (time.Duration, error) {
 }
 
 type expectRet interface {
-	int | string | bool | time.Duration
+	int | int64 | float64 | string | bool | time.Duration
 }
 
 func expect[R expectRet](ws []string, f func(string) (R, error), none R) (R, error) {

@@ -257,3 +257,103 @@ clientThreads 8
 		t.Errorf("ClientThreads = %d, want 8", c.ClientThreads)
 	}
 }
+
+// TestZipfSkewConfig tests parsing of zipfSkew configuration parameter
+func TestZipfSkewConfig(t *testing.T) {
+	content := `
+keySpace 100000
+zipfSkew 0.99
+`
+	f, err := os.CreateTemp("", "test_config_*.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name())
+
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	c, err := Read(f.Name(), "test")
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+
+	if c.KeySpace != 100000 {
+		t.Errorf("KeySpace = %d, want 100000", c.KeySpace)
+	}
+
+	if c.ZipfSkew != 0.99 {
+		t.Errorf("ZipfSkew = %f, want 0.99", c.ZipfSkew)
+	}
+}
+
+// TestZipfSkewDefault tests default values of Zipf parameters
+func TestZipfSkewDefault(t *testing.T) {
+	content := `
+writes 100
+`
+	f, err := os.CreateTemp("", "test_config_*.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name())
+
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	c, err := Read(f.Name(), "test")
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+
+	// Default should be 0 (uniform distribution)
+	if c.KeySpace != 0 {
+		t.Errorf("Default KeySpace = %d, want 0", c.KeySpace)
+	}
+	if c.ZipfSkew != 0 {
+		t.Errorf("Default ZipfSkew = %f, want 0", c.ZipfSkew)
+	}
+}
+
+// TestZipfSkewWithOtherParams tests zipfSkew with other config parameters
+func TestZipfSkewWithOtherParams(t *testing.T) {
+	content := `
+protocol curpht
+reqs 1000
+keySpace 50000
+zipfSkew 1.5
+weakRatio 50
+`
+	f, err := os.CreateTemp("", "test_config_*.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name())
+
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	c, err := Read(f.Name(), "test")
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+
+	if c.Protocol != "curpht" {
+		t.Errorf("Protocol = %s, want curpht", c.Protocol)
+	}
+	if c.KeySpace != 50000 {
+		t.Errorf("KeySpace = %d, want 50000", c.KeySpace)
+	}
+	if c.ZipfSkew != 1.5 {
+		t.Errorf("ZipfSkew = %f, want 1.5", c.ZipfSkew)
+	}
+	if c.WeakRatio != 50 {
+		t.Errorf("WeakRatio = %d, want 50", c.WeakRatio)
+	}
+}

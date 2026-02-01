@@ -145,6 +145,11 @@ func runSingleClient(c *config.Config, i int, verbose bool) {
 	if c.Pipeline {
 		b.Pipeline(c.Syncs, int32(c.Pendings))
 	}
+	// Configure KeyGenerator for Zipf/Uniform key distribution
+	if c.KeySpace > 0 {
+		keyGen := client.NewKeyGenerator(c.KeySpace, c.ZipfSkew, cl.ClientId)
+		b.SetKeyGenerator(keyGen)
+	}
 	if err := b.Connect(); err != nil {
 		log.Fatal(err)
 	}

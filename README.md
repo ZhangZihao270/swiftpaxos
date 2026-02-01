@@ -126,6 +126,33 @@ Example:
 clientThreads 4  // Each client process runs 4 threads
 ```
 
+Zipf Key Distribution
+---------------------
+
+By default, clients use unique keys (one per client). For realistic workloads where some keys are accessed more frequently ("hot keys"), you can enable Zipf distribution:
+
+| Parameter  | Description                                              | Default |
+|------------|----------------------------------------------------------|---------|
+| keySpace   | Total number of unique keys (must be > 0 to enable)      | 0       |
+| zipfSkew   | Zipf skewness parameter (0 = uniform, >1 = skewed)       | 0       |
+
+When `keySpace` > 0, keys are selected from `[0, keySpace)` instead of using unique per-client keys.
+
+When `zipfSkew` > 0, keys follow a Zipf distribution where lower-numbered keys are accessed more frequently.
+Go's rand.Zipf requires s > 1, so values ≤ 1 are automatically clamped to 1.01.
+
+Typical `zipfSkew` values:
+- 0 or very small: Uniform distribution
+- 1.01-1.2: Mild skew
+- 1.5: Moderate skew
+- 2.0+: High skew (few keys get most accesses)
+
+Example:
+```
+keySpace 10000    // 10,000 unique keys
+zipfSkew 0.99     // Zipf distribution (will be clamped to 1.01)
+```
+
 Flint
 -----
 
