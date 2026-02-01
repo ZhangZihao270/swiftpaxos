@@ -108,6 +108,10 @@ type Config struct {
 	// Percentage of weak commands that are writes (0-100), default 50
 	WeakWrites int
 
+	// Multi-threaded client parameters
+	// Number of client threads per client process (default: 0 = use clones behavior)
+	ClientThreads int
+
 	// quorum config file
 	Quorum string
 
@@ -238,6 +242,9 @@ func Read(filename, alias string) (*Config, error) {
 				ok = true
 			case "weakwrites":
 				c.WeakWrites, err = expectInt(words)
+				ok = true
+			case "clientthreads":
+				c.ClientThreads, err = expectInt(words)
 				ok = true
 			}
 			if ok {

@@ -487,6 +487,213 @@ Weak Operations: 5000 (50%)
 
 ---
 
+### Phase 12: Zipf Distribution for Key Access Pattern [MEDIUM PRIORITY]
+
+> **Goal**: Add support for varying key access skewness using Zipf distribution, enabling realistic workload simulation where some keys are accessed more frequently than others.
+
+#### Background
+
+**Current Limitation**: The benchmark uses uniform random key selection, which doesn't reflect real-world access patterns where a small number of "hot" keys receive disproportionate traffic.
+
+**Zipf Distribution**: A power-law distribution where the frequency of an item is inversely proportional to its rank. Parameter `s` (skewness) controls the distribution:
+- `s = 0`: Uniform distribution (current behavior)
+- `s = 0.99`: Moderate skew (top 20% keys get ~80% of accesses)
+- `s = 1.5`: High skew (top 1% keys get majority of accesses)
+
+**Key Reference Files**:
+- `client/hybrid.go`: HybridLoop key generation (getKey function)
+- `client/buffer.go`: Original Loop key generation
+- `config/config.go`: Configuration parameters
+
+#### Tasks
+
+##### 12.1 Implement Zipf Generator
+
+- [ ] **12.1.1** Add Zipf distribution generator in `client/zipf.go`
+  - Use Go's `math/rand` Zipf generator or implement custom
+  - Parameters: n (number of keys), s (skewness), v (offset)
+  - Thread-safe for concurrent client usage
+
+- [ ] **12.1.2** Add configuration parameters in config/config.go
+  - `zipfSkew`: Skewness parameter s (default: 0 = uniform)
+  - `keySpace`: Total number of unique keys (default: 1000000)
+
+- [ ] **12.1.3** Update config parser to read new parameters
+  - Add cases for `zipfSkew` and `keySpace`
+  - Validate: zipfSkew >= 0
+
+##### 12.2 Integrate with Benchmark
+
+- [ ] **12.2.1** Create KeyGenerator interface
+  - Methods: `NextKey() string`
+  - Implementations: UniformKeyGenerator, ZipfKeyGenerator
+
+- [ ] **12.2.2** Update HybridLoop to use KeyGenerator
+  - Replace direct random key generation with KeyGenerator
+  - Select generator based on zipfSkew config (0 = uniform, >0 = zipf)
+
+- [ ] **12.2.3** Update original Loop for backward compatibility
+  - Same KeyGenerator integration
+  - Default behavior unchanged when zipfSkew = 0
+
+##### 12.3 Testing
+
+- [ ] **12.3.1** Unit test: Zipf distribution correctness
+  - Verify distribution matches expected Zipf curve
+  - Test edge cases: s=0 (uniform), s=1, s=2
+
+- [ ] **12.3.2** Unit test: Configuration parsing
+  - Test zipfSkew and keySpace parsing
+  - Test default values
+
+- [ ] **12.3.3** Benchmark: Key distribution histogram
+  - Output actual key frequency distribution for validation
+
+#### Example Configuration
+
+```
+// Key access pattern
+keySpace:    1000000   // 1M unique keys
+zipfSkew:    0.99      // Moderate skew (0 = uniform)
+```
+
+#### Expected Impact
+
+| Skewness | Top 1% Keys Access Share | Contention Level |
+|----------|-------------------------|------------------|
+| 0.0 | ~1% | Low (uniform) |
+| 0.5 | ~10% | Low-Medium |
+| 0.99 | ~50% | Medium-High |
+| 1.5 | ~90% | Very High |
+
+---
+
+### Phase 13: Multi-threaded Client Support [HIGH PRIORITY]
+
+> **Goal**: Enable each client process to run multiple client threads, allowing higher throughput from fewer physical machines. Thread count should be configurable per server in the config file.
+
+#### Background
+
+**Current Limitation**: Each client IP runs exactly one client process with one thread. The `clones` parameter exists but is set to 0.
+
+**Desired Behavior**:
+- Each client server can run multiple client threads within a single process
+- Thread count is configurable per client in the config file
+- Aggregate metrics from all threads for reporting
+
+**Key Reference Files**:
+- `multi-client.conf`: Client configuration
+- `run-multi-client.sh`: Multi-client orchestration script
+- `main.go`: Client process startup
+- `client/hybrid.go`: HybridLoop implementation
+
+#### Current Config Structure
+
+```
+-- Clients --
+client0 127.0.0.4
+client1 127.0.0.5
+
+clones: 0  // Currently global, not per-client
+```
+
+#### Proposed Config Structure
+
+```
+-- Clients --
+client0 127.0.0.4 threads=4
+client1 127.0.0.5 threads=2
+
+// OR use a global default with per-client override:
+clientThreads: 4  // Default threads per client
+```
+
+#### Tasks
+
+##### 13.1 Extend Configuration
+
+- [x] **13.1.1** Add global `clientThreads` parameter in config/config.go [26:02:01, 00:15]
+  - Added `ClientThreads int` field to Config struct
+  - Default: 0 (use clones behavior, backward compatible)
+  - Plan: docs/dev/phase13-multithreaded-client-plan.md
+
+- [x] **13.1.2** Update config parser to read clientThreads [26:02:01, 00:15]
+  - Added case for "clientthreads" in Read() function
+  - Added unit tests: TestClientThreadsConfig, TestClientThreadsDefault
+
+- [x] **13.1.3** Update Config struct [26:02:01, 00:15]
+  - Added `ClientThreads int` field with documentation
+  - Note: Per-client thread count (threads=N syntax) deferred for future enhancement
+
+##### 13.2 Multi-threaded Client Implementation
+
+- [x] **13.2.1** Update main.go to use clientThreads [26:02:01, 00:18]
+  - Added getNumClientThreads() helper function
+  - When ClientThreads > 0, uses it; otherwise falls back to Clones+1
+  - Each thread gets separate connection (existing behavior)
+
+- [x] **13.2.2** Update main.go to spawn multiple goroutines [26:02:01, 00:18]
+  - runClient() uses getNumClientThreads() to determine thread count
+  - Updated pclients calculation for curp and curpht protocols
+
+- [x] **13.2.3** Thread-local metrics [26:02:01, 00:18]
+  - Each thread already tracks its own latencies (existing HybridMetrics)
+  - Each thread outputs its own results independently
+  - Note: Aggregate metrics collection deferred for future enhancement
+
+##### 13.3 Update Benchmark Script
+
+- [ ] **13.3.1** Update run-multi-client.sh to read thread config
+  - Pass thread count to client process via command line or config
+  - Update summary aggregation to account for threads
+
+- [ ] **13.3.2** Update result parsing for multi-threaded output
+  - Parse per-thread metrics if available
+  - Aggregate total throughput correctly
+
+##### 13.4 Testing
+
+- [x] **13.4.1** Unit test: Config parsing for clientThreads [26:02:01, 00:20]
+  - TestClientThreadsConfig: Parses clientThreads correctly
+  - TestClientThreadsDefault: Default value is 0
+  - TestClientThreadsWithOtherParams: Works with other config params
+
+- [ ] **13.4.2** Integration test: Multi-threaded client execution
+  - Verify all threads run and complete
+  - Verify metrics aggregation
+
+- [ ] **13.4.3** Stress test: High thread count
+  - Test with 8+ threads per client
+  - Verify no race conditions
+
+#### Example Configuration
+
+```
+-- Clients --
+client0 127.0.0.4 threads=4
+client1 127.0.0.5 threads=4
+
+// Or with global default:
+clientThreads: 4  // Each client runs 4 threads
+
+-- Clients --
+client0 127.0.0.4           // Uses default (4 threads)
+client1 127.0.0.5 threads=8 // Override: 8 threads
+```
+
+#### Expected Output
+
+```
+=== Hybrid Benchmark Results ===
+Client servers: 2
+Threads per server: 4 (client0), 4 (client1)
+Total client threads: 8
+Total operations: 80000
+...
+```
+
+---
+
 ## Repeated Tasks
 
 (None currently)

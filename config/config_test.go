@@ -165,3 +165,95 @@ func TestWeakRatioEdgeCases(t *testing.T) {
 		})
 	}
 }
+
+// TestClientThreadsConfig tests parsing of clientThreads configuration parameter
+func TestClientThreadsConfig(t *testing.T) {
+	content := `
+clientThreads 4
+`
+	f, err := os.CreateTemp("", "test_config_*.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name())
+
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	c, err := Read(f.Name(), "test")
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+
+	if c.ClientThreads != 4 {
+		t.Errorf("ClientThreads = %d, want 4", c.ClientThreads)
+	}
+}
+
+// TestClientThreadsDefault tests default value of clientThreads (should be 0)
+func TestClientThreadsDefault(t *testing.T) {
+	content := `
+writes 100
+`
+	f, err := os.CreateTemp("", "test_config_*.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name())
+
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	c, err := Read(f.Name(), "test")
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+
+	// Default should be 0 (use clones behavior)
+	if c.ClientThreads != 0 {
+		t.Errorf("Default ClientThreads = %d, want 0", c.ClientThreads)
+	}
+}
+
+// TestClientThreadsWithOtherParams tests clientThreads with other config parameters
+func TestClientThreadsWithOtherParams(t *testing.T) {
+	content := `
+protocol curpht
+reqs 1000
+writes 80
+weakRatio 50
+clientThreads 8
+`
+	f, err := os.CreateTemp("", "test_config_*.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name())
+
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	c, err := Read(f.Name(), "test")
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+
+	if c.Protocol != "curpht" {
+		t.Errorf("Protocol = %s, want curpht", c.Protocol)
+	}
+	if c.Reqs != 1000 {
+		t.Errorf("Reqs = %d, want 1000", c.Reqs)
+	}
+	if c.WeakRatio != 50 {
+		t.Errorf("WeakRatio = %d, want 50", c.WeakRatio)
+	}
+	if c.ClientThreads != 8 {
+		t.Errorf("ClientThreads = %d, want 8", c.ClientThreads)
+	}
+}

@@ -85,9 +85,19 @@ func runMaster(c *config.Config) {
 	m.Run()
 }
 
+// getNumClientThreads returns the number of client threads to spawn
+func getNumClientThreads(c *config.Config) int {
+	if c.ClientThreads > 0 {
+		return c.ClientThreads
+	}
+	return c.Clones + 1
+}
+
 func runClient(c *config.Config, verbose bool) {
+	numThreads := getNumClientThreads(c)
+
 	var wg sync.WaitGroup
-	for i := 0; i < c.Clones+1; i++ {
+	for i := 0; i < numThreads; i++ {
 		wg.Add(1)
 		go func(i int) {
 			runSingleClient(c, i, verbose)
@@ -152,10 +162,11 @@ func runSingleClient(c *config.Config, i int, verbose bool) {
 		sort.Slice(cls, func(i, j int) bool {
 			return cls[i] < cls[j]
 		})
+		numThreads := getNumClientThreads(c)
 		pclients := 0
 		for i, a := range cls {
 			if a == c.Alias {
-				pclients = (c.Clones + 1) * i
+				pclients = numThreads * i
 			}
 		}
 		cl := curp.NewClient(b, len(c.ReplicaAddrs), c.Reqs, pclients)
@@ -171,10 +182,11 @@ func runSingleClient(c *config.Config, i int, verbose bool) {
 		sort.Slice(cls, func(i, j int) bool {
 			return cls[i] < cls[j]
 		})
+		numThreads := getNumClientThreads(c)
 		pclients := 0
 		for i, a := range cls {
 			if a == c.Alias {
-				pclients = (c.Clones + 1) * i
+				pclients = numThreads * i
 			}
 		}
 		cl := curpht.NewClient(b, len(c.ReplicaAddrs), c.Reqs, pclients)

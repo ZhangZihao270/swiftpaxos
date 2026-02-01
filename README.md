@@ -109,6 +109,23 @@ The benchmark outputs per-consistency-level metrics:
 - Throughput breakdown by consistency level
 - Total operations and duration
 
+Multi-threaded Client
+---------------------
+
+Each client process can run multiple client threads for higher throughput:
+
+| Parameter      | Description                                           | Default |
+|----------------|-------------------------------------------------------|---------|
+| clientThreads  | Number of client threads per process                  | 0       |
+
+When `clientThreads` is 0, the `clones` parameter is used (backward compatible).
+When `clientThreads` > 0, it overrides `clones` for thread count.
+
+Example:
+```
+clientThreads 4  // Each client process runs 4 threads
+```
+
 Flint
 -----
 
