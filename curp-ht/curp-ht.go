@@ -66,14 +66,6 @@ type Replica struct {
 	commitNotify  map[int]chan struct{} // slot -> notification channel for commit
 	executeNotify map[int]chan struct{} // slot -> notification channel for execution
 	notifyMu      sync.Mutex            // protects commitNotify and executeNotify
-
-	// Cache for client ID strings (small fixed set of clients)
-	clientIdStrCache map[int32]string
-	clientIdStrMu    sync.RWMutex
-
-	// Notification channels for weak command dependencies
-	weakExecNotify map[int32]chan int32 // clientId -> channel (sends last executed seqnum)
-	weakExecMu     sync.Mutex
 }
 
 // pendingWrite tracks an uncommitted write for speculative read computation
@@ -936,43 +928,26 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 // waitForWeakDep waits for a causal dependency to be executed
 // This ensures that weak commands from the same client execute in order
 func (r *Replica) waitForWeakDep(clientId int32, depSeqNum int32) {
-	clientKey := r.getClientIdStr(clientId)
+	clientKey := strconv.FormatInt(int64(clientId), 10)
 
-	// Quick check: is dependency already satisfied?
-	if lastExec, exists := r.weakExecuted.Get(clientKey); exists {
-		if lastExec.(int32) >= depSeqNum {
-			return
-		}
-	}
-
-	// Not satisfied - wait for notification
-	notifyCh := r.getOrCreateWeakExecNotify(clientId)
-	timeout := time.After(500 * time.Millisecond)
-
-	for {
-		select {
-		case execSeqNum := <-notifyCh:
-			// Check if this notification satisfies our dependency
-			if execSeqNum >= depSeqNum {
-				return
+	// Spin wait with brief sleeps until dependency is executed
+	// In production, this could use channels/conditions for efficiency
+	for i := 0; i < 1000; i++ { // Max ~100ms wait (100 iterations * 100us)
+		if lastExec, exists := r.weakExecuted.Get(clientKey); exists {
+			if lastExec.(int32) >= depSeqNum {
+				return // Dependency satisfied
 			}
-			// Not yet satisfied, keep waiting
-
-		case <-timeout:
-			// Timeout - check one final time and return
-			if lastExec, exists := r.weakExecuted.Get(clientKey); exists {
-				if lastExec.(int32) >= depSeqNum {
-					return
-				}
-			}
-			return // Give up after timeout
 		}
+		// Brief sleep to avoid busy-waiting
+		time.Sleep(100 * time.Microsecond)
 	}
+	// Timeout: proceed anyway to avoid deadlock
+	// In production, might want to log a warning here
 }
 
 // markWeakExecuted marks a weak command as executed for causal ordering
 func (r *Replica) markWeakExecuted(clientId int32, seqNum int32) {
-	clientKey := r.getClientIdStr(clientId)
+	clientKey := strconv.FormatInt(int64(clientId), 10)
 	r.weakExecuted.Upsert(clientKey, nil,
 		func(exists bool, mapV, _ interface{}) interface{} {
 			if exists {
@@ -984,9 +959,6 @@ func (r *Replica) markWeakExecuted(clientId int32, seqNum int32) {
 			}
 			return seqNum
 		})
-
-	// Notify waiters that this client's weak command was executed
-	r.notifyWeakExec(clientId, seqNum)
 }
 
 // pendingWriteKey creates a unique key for pending writes: "clientId:key"
@@ -1127,65 +1099,5 @@ func (r *Replica) notifyExecute(slot int) {
 	if ch, ok := r.executeNotify[slot]; ok {
 		close(ch)
 		delete(r.executeNotify, slot)
-	}
-}
-
-// getClientIdStr returns cached string representation of client ID
-func (r *Replica) getClientIdStr(clientId int32) string {
-	r.clientIdStrMu.RLock()
-	if str, ok := r.clientIdStrCache[clientId]; ok {
-		r.clientIdStrMu.RUnlock()
-		return str
-	}
-	r.clientIdStrMu.RUnlock()
-
-	r.clientIdStrMu.Lock()
-	defer r.clientIdStrMu.Unlock()
-
-	// Double-check after acquiring write lock
-	if str, ok := r.clientIdStrCache[clientId]; ok {
-		return str
-	}
-
-	str := strconv.Itoa(int(clientId))
-	if r.clientIdStrCache == nil {
-		r.clientIdStrCache = make(map[int32]string)
-	}
-	r.clientIdStrCache[clientId] = str
-	return str
-}
-
-// getOrCreateWeakExecNotify returns a channel for weak execution notifications for this client
-func (r *Replica) getOrCreateWeakExecNotify(clientId int32) chan int32 {
-	r.weakExecMu.Lock()
-	defer r.weakExecMu.Unlock()
-
-	if r.weakExecNotify == nil {
-		r.weakExecNotify = make(map[int32]chan int32)
-	}
-
-	if ch, ok := r.weakExecNotify[clientId]; ok {
-		return ch
-	}
-
-	// Buffered channel to avoid blocking notifier
-	ch := make(chan int32, 100)
-	r.weakExecNotify[clientId] = ch
-	return ch
-}
-
-// notifyWeakExec broadcasts to all waiters that client's weak command seqnum was executed
-func (r *Replica) notifyWeakExec(clientId int32, seqNum int32) {
-	r.weakExecMu.Lock()
-	ch, ok := r.weakExecNotify[clientId]
-	r.weakExecMu.Unlock()
-
-	if ok {
-		// Non-blocking send (channel is buffered)
-		select {
-		case ch <- seqNum:
-		default:
-			// Channel full, skip notification (waiters will timeout and check map)
-		}
 	}
 }

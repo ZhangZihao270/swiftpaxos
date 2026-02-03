@@ -39,7 +39,7 @@ const (
 	ORDERED      = uint8(2)
 )
 
-var MaxDescRoutines = 100000 // Effectively unlimited - let Go runtime handle scheduling
+var MaxDescRoutines = 500 // Increased from 100 to handle higher throughput
 
 type CommandId struct {
 	ClientId int32
