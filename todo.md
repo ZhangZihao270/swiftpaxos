@@ -1010,6 +1010,59 @@ Without synchronization, these goroutines race on map access.
 
 ---
 
+### Phase 18: Systematic Optimization Testing [IN PROGRESS]
+
+**Goal**: Improve throughput beyond Phase 17 baseline by testing optimizations individually.
+
+**Baseline Performance** (4 clients × 2 threads, pendings=5):
+- Throughput: 12.9K ops/sec
+- Strong latency: 3.29ms (median), 11.53ms (P99)
+- Weak latency: 2.01ms (median), 9.28ms (P99)
+
+**Note**: Phase 18 initial attempt (all optimizations together) caused performance regression to 16.7K→12K ops/sec. Testing individually to identify effective optimizations.
+
+#### Optimization Candidates
+
+- [ ] **18.1** Increase MaxDescRoutines (500 → 10000)
+  - Test if sequential fallback is the bottleneck
+  - Expected: No improvement (not hitting limit with 40 concurrent commands)
+
+- [ ] **18.2** Remove weak command spin-wait overhead
+  - Replace 100μs sleep with conditional notification
+  - Expected: Minimal impact (weak commands are minority)
+
+- [ ] **18.3** Increase client pipeline depth
+  - Change pendings from 5 → 10 or 20
+  - Test if client-side pipelining helps
+  - Expected: May help if replica can handle more concurrency
+
+- [ ] **18.4** Reduce channel buffer contention
+  - Increase CHAN_BUFFER_SIZE in defs.go
+  - Test if channel blocking is the issue
+  - Expected: Minimal impact
+
+#### Testing Protocol
+
+For each optimization:
+1. Make single change
+2. Rebuild: `go build -o swiftpaxos .`
+3. Test: `./run-multi-client.sh -c multi-client.conf`
+4. Record results in this file
+5. If improvement: keep and test next
+6. If regression: revert immediately
+
+#### Test Results
+
+**Baseline** [26:02:03, 18:40]
+```
+Config: 4 clients × 2 threads, pendings=5, 3 replicas
+Throughput: 12,947 ops/sec
+Strong: 3.29ms median, 11.53ms P99
+Weak: 2.01ms median, 9.28ms P99
+```
+
+---
+
 ## Repeated Tasks
 
 (None currently)
