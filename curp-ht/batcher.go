@@ -1,6 +1,10 @@
 package curpht
 
-import "github.com/imdea-software/swiftpaxos/rpc"
+import (
+	"time"
+
+	"github.com/imdea-software/swiftpaxos/rpc"
+)
 
 type Batcher struct {
 	acks chan rpc.Serializable
@@ -14,45 +18,68 @@ func NewBatcher(r *Replica, size int) *Batcher {
 	}
 
 	go func() {
+		// Periodic flush timer
+		flushTicker := time.NewTicker(100 * time.Microsecond)
+		defer flushTicker.Stop()
+
+		// Accumulate messages in slices
+		var pendingAcks []MAcceptAck
+		var pendingAccs []MAccept
+
 		for !r.Shutdown {
 			select {
 			case op := <-b.acks:
-				l1 := len(b.acks) + 1
-				l2 := len(b.accs)
-				aacks := &MAAcks{
-					Acks:    make([]MAcceptAck, l1),
-					Accepts: make([]MAccept, l2),
-				}
-				for i := 0; i < l1; i++ {
-					aacks.Acks[i] = *op.(*MAcceptAck)
-					if i < l1-1 {
-						op = <-b.acks
+				pendingAcks = append(pendingAcks, *op.(*MAcceptAck))
+
+				// Try to collect more without blocking
+				for len(pendingAcks) < size {
+					select {
+					case op := <-b.acks:
+						pendingAcks = append(pendingAcks, *op.(*MAcceptAck))
+					default:
+						goto checkFlush // No more messages, check if should flush
 					}
 				}
-				for i := 0; i < l2; i++ {
-					op = <-b.accs
-					aacks.Accepts[i] = *op.(*MAccept)
+				// Buffer full, flush immediately
+				goto flush
+
+			case op := <-b.accs:
+				pendingAccs = append(pendingAccs, *op.(*MAccept))
+
+				// Try to collect more without blocking
+				for len(pendingAccs) < size {
+					select {
+					case op := <-b.accs:
+						pendingAccs = append(pendingAccs, *op.(*MAccept))
+					default:
+						goto checkFlush
+					}
+				}
+				goto flush
+
+			case <-flushTicker.C:
+				// Time-based flush
+				goto flush
+			}
+
+		checkFlush:
+			// Flush if we have enough messages or timer fired
+			if len(pendingAcks) > 0 || len(pendingAccs) > 0 {
+				goto flush
+			}
+			continue
+
+		flush:
+			if len(pendingAcks) > 0 || len(pendingAccs) > 0 {
+				aacks := &MAAcks{
+					Acks:    pendingAcks,
+					Accepts: pendingAccs,
 				}
 				r.sender.SendToAll(aacks, r.cs.aacksRPC)
 
-			case op := <-b.accs:
-				l1 := len(b.acks)
-				l2 := len(b.accs) + 1
-				aacks := &MAAcks{
-					Acks:    make([]MAcceptAck, l1),
-					Accepts: make([]MAccept, l2),
-				}
-				for i := 0; i < l2; i++ {
-					aacks.Accepts[i] = *op.(*MAccept)
-					if i < l2-1 {
-						op = <-b.accs
-					}
-				}
-				for i := 0; i < l1; i++ {
-					op = <-b.acks
-					aacks.Acks[i] = *op.(*MAcceptAck)
-				}
-				r.sender.SendToAll(aacks, r.cs.aacksRPC)
+				// Reset slices (reuse backing array)
+				pendingAcks = pendingAcks[:0]
+				pendingAccs = pendingAccs[:0]
 			}
 		}
 	}()
