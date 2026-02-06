@@ -245,11 +245,13 @@ func (r *Replica) run() {
 					continue
 				}
 				r.proposes.Set(cmdId.String(), propose)
+				ok, weakDep := r.okWithWeakDep(propose.Command)
 				recAck := &MRecordAck{
 					Replica: r.Id,
 					Ballot:  r.ballot,
 					CmdId:   cmdId,
-					Ok:      r.ok(propose.Command),
+					Ok:      ok,
+					WeakDep: weakDep,
 				}
 				r.sender.SendToClient(propose.ClientId, recAck, r.cs.recordAckRPC)
 				r.unsyncStrong(propose.Command, cmdId)
@@ -787,9 +789,9 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 		}
 
 		// Speculative execution: compute result WITHOUT modifying state
+		// CURP-HO: Strong speculative CAN see unsynced (including uncommitted weak writes)
 		if desc.val == nil && desc.phase != COMMIT {
-			// Before commit: use ComputeResult (read-only)
-			desc.val = desc.cmd.ComputeResult(r.State)
+			desc.val = r.computeSpeculativeResultWithUnsynced(desc.cmd)
 		}
 
 		// Speculative reply to client for strong commands (leader only, before commit)
@@ -1376,6 +1378,29 @@ func (r *Replica) getPendingWrite(clientId int32, key state.Key, causalDep int32
 		}
 	}
 	return nil
+}
+
+// computeSpeculativeResultWithUnsynced computes the speculative result for strong ops.
+// CURP-HO: Strong speculative execution CAN see unsynced (including uncommitted weak writes).
+// For GET: checks unsynced witness pool for weak write first, then falls back to committed state.
+// For PUT: returns NIL during speculation.
+func (r *Replica) computeSpeculativeResultWithUnsynced(cmd state.Command) state.Value {
+	switch cmd.Op {
+	case state.GET:
+		// Check unsynced witness pool for weak write value first
+		if val, found := r.getWeakWriteValue(cmd.K); found {
+			return val
+		}
+		// Fall back to committed state
+		return cmd.ComputeResult(r.State)
+
+	case state.PUT:
+		// For PUT, return NIL during speculation
+		return state.NIL()
+
+	default:
+		return cmd.ComputeResult(r.State)
+	}
 }
 
 // computeSpeculativeResult computes the speculative result for a command

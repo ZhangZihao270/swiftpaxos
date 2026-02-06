@@ -96,6 +96,7 @@ type MRecordAck struct {
 	Ballot  int32
 	CmdId   CommandId
 	Ok      uint8
+	WeakDep *CommandId // CURP-HO: weak write dependency (nil if none)
 }
 
 type MCommit struct {
@@ -843,7 +844,7 @@ func (t *MAAcks) Unmarshal(rr io.Reader) error {
 }
 
 func (t *MRecordAck) BinarySize() (nbytes int, sizeKnown bool) {
-	return 17, true
+	return 0, false // Variable size: 18 bytes (no weakDep) or 26 bytes (with weakDep)
 }
 
 type MRecordAckCache struct {
@@ -876,9 +877,9 @@ func (p *MRecordAckCache) Put(t *MRecordAck) {
 	p.mu.Unlock()
 }
 func (t *MRecordAck) Marshal(wire io.Writer) {
-	var b [17]byte
+	var b [26]byte
 	var bs []byte
-	bs = b[:17]
+	bs = b[:18]
 	tmp32 := t.Replica
 	bs[0] = byte(tmp32)
 	bs[1] = byte(tmp32 >> 8)
@@ -900,14 +901,32 @@ func (t *MRecordAck) Marshal(wire io.Writer) {
 	bs[14] = byte(tmp32 >> 16)
 	bs[15] = byte(tmp32 >> 24)
 	bs[16] = byte(t.Ok)
-	wire.Write(bs)
+	if t.WeakDep != nil {
+		bs[17] = 1 // hasWeakDep flag
+		wire.Write(bs)
+		bs = b[18:26]
+		tmp32 = t.WeakDep.ClientId
+		bs[0] = byte(tmp32)
+		bs[1] = byte(tmp32 >> 8)
+		bs[2] = byte(tmp32 >> 16)
+		bs[3] = byte(tmp32 >> 24)
+		tmp32 = t.WeakDep.SeqNum
+		bs[4] = byte(tmp32)
+		bs[5] = byte(tmp32 >> 8)
+		bs[6] = byte(tmp32 >> 16)
+		bs[7] = byte(tmp32 >> 24)
+		wire.Write(bs)
+	} else {
+		bs[17] = 0 // no weakDep
+		wire.Write(bs)
+	}
 }
 
 func (t *MRecordAck) Unmarshal(wire io.Reader) error {
-	var b [17]byte
+	var b [26]byte
 	var bs []byte
-	bs = b[:17]
-	if _, err := io.ReadAtLeast(wire, bs, 17); err != nil {
+	bs = b[:18]
+	if _, err := io.ReadAtLeast(wire, bs, 18); err != nil {
 		return err
 	}
 	t.Replica = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
@@ -915,6 +934,19 @@ func (t *MRecordAck) Unmarshal(wire io.Reader) error {
 	t.CmdId.ClientId = int32((uint32(bs[8]) | (uint32(bs[9]) << 8) | (uint32(bs[10]) << 16) | (uint32(bs[11]) << 24)))
 	t.CmdId.SeqNum = int32((uint32(bs[12]) | (uint32(bs[13]) << 8) | (uint32(bs[14]) << 16) | (uint32(bs[15]) << 24)))
 	t.Ok = uint8(bs[16])
+	hasWeakDep := uint8(bs[17])
+	if hasWeakDep == 1 {
+		bs = b[18:26]
+		if _, err := io.ReadAtLeast(wire, bs, 8); err != nil {
+			return err
+		}
+		t.WeakDep = &CommandId{
+			ClientId: int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24))),
+			SeqNum:   int32((uint32(bs[4]) | (uint32(bs[5]) << 8) | (uint32(bs[6]) << 16) | (uint32(bs[7]) << 24))),
+		}
+	} else {
+		t.WeakDep = nil
+	}
 	return nil
 }
 

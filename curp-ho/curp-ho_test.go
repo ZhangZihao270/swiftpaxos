@@ -504,7 +504,7 @@ func TestBinarySizes(t *testing.T) {
 		{"CommandId", 8, true, func() (int, bool) { return (&CommandId{}).BinarySize() }},
 		{"MCommit", 16, true, func() (int, bool) { return (&MCommit{}).BinarySize() }},
 		{"MAcceptAck", 16, true, func() (int, bool) { return (&MAcceptAck{}).BinarySize() }},
-		{"MRecordAck", 17, true, func() (int, bool) { return (&MRecordAck{}).BinarySize() }},
+		{"MRecordAck", 0, false, func() (int, bool) { return (&MRecordAck{}).BinarySize() }},
 		{"MSync", 8, true, func() (int, bool) { return (&MSync{}).BinarySize() }},
 		{"MReply", 0, false, func() (int, bool) { return (&MReply{}).BinarySize() }},
 		{"MSyncReply", 0, false, func() (int, bool) { return (&MSyncReply{}).BinarySize() }},
@@ -3265,5 +3265,398 @@ func TestCommitNotifyAlreadyCommitted(t *testing.T) {
 		// Expected - already committed
 	default:
 		t.Fatal("Channel should be pre-closed for already committed slot")
+	}
+}
+
+// ============================================================================
+// Phase 25: Strong Op Modifications Tests
+// These tests verify MRecordAck with WeakDep serialization, okWithWeakDep,
+// and computeSpeculativeResultWithUnsynced.
+// ============================================================================
+
+// --- MRecordAck with WeakDep serialization tests ---
+
+func TestMRecordAckSerializationNoWeakDep(t *testing.T) {
+	original := &MRecordAck{
+		Replica: 2,
+		Ballot:  5,
+		CmdId:   CommandId{ClientId: 10, SeqNum: 20},
+		Ok:      TRUE,
+		WeakDep: nil,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	decoded := &MRecordAck{}
+	err := decoded.Unmarshal(&buf)
+	if err != nil {
+		t.Fatalf("Unmarshal error: %v", err)
+	}
+
+	if decoded.Replica != 2 {
+		t.Errorf("Replica = %d, want 2", decoded.Replica)
+	}
+	if decoded.Ballot != 5 {
+		t.Errorf("Ballot = %d, want 5", decoded.Ballot)
+	}
+	if decoded.CmdId.ClientId != 10 || decoded.CmdId.SeqNum != 20 {
+		t.Errorf("CmdId = %v, want {10,20}", decoded.CmdId)
+	}
+	if decoded.Ok != TRUE {
+		t.Errorf("Ok = %d, want TRUE", decoded.Ok)
+	}
+	if decoded.WeakDep != nil {
+		t.Errorf("WeakDep = %v, want nil", decoded.WeakDep)
+	}
+}
+
+func TestMRecordAckSerializationWithWeakDep(t *testing.T) {
+	original := &MRecordAck{
+		Replica: 3,
+		Ballot:  7,
+		CmdId:   CommandId{ClientId: 42, SeqNum: 100},
+		Ok:      TRUE,
+		WeakDep: &CommandId{ClientId: 99, SeqNum: 50},
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	decoded := &MRecordAck{}
+	err := decoded.Unmarshal(&buf)
+	if err != nil {
+		t.Fatalf("Unmarshal error: %v", err)
+	}
+
+	if decoded.Replica != 3 {
+		t.Errorf("Replica = %d, want 3", decoded.Replica)
+	}
+	if decoded.Ballot != 7 {
+		t.Errorf("Ballot = %d, want 7", decoded.Ballot)
+	}
+	if decoded.CmdId.ClientId != 42 || decoded.CmdId.SeqNum != 100 {
+		t.Errorf("CmdId = %v, want {42,100}", decoded.CmdId)
+	}
+	if decoded.Ok != TRUE {
+		t.Errorf("Ok = %d, want TRUE", decoded.Ok)
+	}
+	if decoded.WeakDep == nil {
+		t.Fatal("WeakDep should not be nil")
+	}
+	if decoded.WeakDep.ClientId != 99 || decoded.WeakDep.SeqNum != 50 {
+		t.Errorf("WeakDep = %v, want {99,50}", decoded.WeakDep)
+	}
+}
+
+func TestMRecordAckSerializationSizes(t *testing.T) {
+	// Without WeakDep: 18 bytes (17 fixed + 1 flag)
+	noWeak := &MRecordAck{
+		Replica: 1,
+		Ballot:  1,
+		CmdId:   CommandId{ClientId: 1, SeqNum: 1},
+		Ok:      TRUE,
+		WeakDep: nil,
+	}
+	var buf1 bytes.Buffer
+	noWeak.Marshal(&buf1)
+	if buf1.Len() != 18 {
+		t.Errorf("Size without WeakDep = %d, want 18", buf1.Len())
+	}
+
+	// With WeakDep: 26 bytes (17 fixed + 1 flag + 8 CommandId)
+	withWeak := &MRecordAck{
+		Replica: 1,
+		Ballot:  1,
+		CmdId:   CommandId{ClientId: 1, SeqNum: 1},
+		Ok:      TRUE,
+		WeakDep: &CommandId{ClientId: 1, SeqNum: 1},
+	}
+	var buf2 bytes.Buffer
+	withWeak.Marshal(&buf2)
+	if buf2.Len() != 26 {
+		t.Errorf("Size with WeakDep = %d, want 26", buf2.Len())
+	}
+}
+
+func TestMRecordAckSerializationFALSEOk(t *testing.T) {
+	original := &MRecordAck{
+		Replica: 0,
+		Ballot:  0,
+		CmdId:   CommandId{ClientId: 1, SeqNum: 1},
+		Ok:      FALSE,
+		WeakDep: nil,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	decoded := &MRecordAck{}
+	decoded.Unmarshal(&buf)
+
+	if decoded.Ok != FALSE {
+		t.Errorf("Ok = %d, want FALSE", decoded.Ok)
+	}
+}
+
+func TestMRecordAckSerializationORDEREDOk(t *testing.T) {
+	dep := &CommandId{ClientId: 5, SeqNum: 3}
+	original := &MRecordAck{
+		Replica: 1,
+		Ballot:  2,
+		CmdId:   CommandId{ClientId: 10, SeqNum: 7},
+		Ok:      ORDERED,
+		WeakDep: dep,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	decoded := &MRecordAck{}
+	decoded.Unmarshal(&buf)
+
+	if decoded.Ok != ORDERED {
+		t.Errorf("Ok = %d, want ORDERED", decoded.Ok)
+	}
+	if decoded.WeakDep == nil || decoded.WeakDep.ClientId != 5 || decoded.WeakDep.SeqNum != 3 {
+		t.Errorf("WeakDep = %v, want {5,3}", decoded.WeakDep)
+	}
+}
+
+// --- okWithWeakDep tests ---
+
+func TestOkWithWeakDepNoConflict(t *testing.T) {
+	r := newTestReplica(false)
+	cmd := state.Command{Op: state.PUT, K: state.Key(100)}
+
+	ok, weakDep := r.okWithWeakDep(cmd)
+	if ok != TRUE {
+		t.Errorf("ok = %d, want TRUE (no entries)", ok)
+	}
+	if weakDep != nil {
+		t.Errorf("weakDep = %v, want nil", weakDep)
+	}
+}
+
+func TestOkWithWeakDepStrongWriteConflict(t *testing.T) {
+	r := newTestReplica(false)
+
+	// Add a strong write to unsynced
+	strongCmd := state.Command{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("v1"))}
+	strongId := CommandId{ClientId: 1, SeqNum: 1}
+	r.unsyncStrong(strongCmd, strongId)
+
+	// Check incoming strong op on same key
+	ok, weakDep := r.okWithWeakDep(state.Command{Op: state.PUT, K: state.Key(100)})
+	if ok != FALSE {
+		t.Errorf("ok = %d, want FALSE (strong write conflict)", ok)
+	}
+	if weakDep != nil {
+		t.Errorf("weakDep = %v, want nil (conflict, not dep)", weakDep)
+	}
+}
+
+func TestOkWithWeakDepCausalWriteDep(t *testing.T) {
+	r := newTestReplica(false)
+
+	// Add a causal write to unsynced
+	causalCmd := state.Command{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("causal"))}
+	causalId := CommandId{ClientId: 10, SeqNum: 5}
+	r.unsyncCausal(causalCmd, causalId)
+
+	// Check incoming strong op on same key - should get weakDep
+	ok, weakDep := r.okWithWeakDep(state.Command{Op: state.GET, K: state.Key(100)})
+	if ok != TRUE {
+		t.Errorf("ok = %d, want TRUE (causal doesn't conflict)", ok)
+	}
+	if weakDep == nil {
+		t.Fatal("weakDep should not be nil (causal write dep)")
+	}
+	if weakDep.ClientId != 10 || weakDep.SeqNum != 5 {
+		t.Errorf("weakDep = %v, want {10,5}", weakDep)
+	}
+}
+
+func TestOkWithWeakDepCausalReadNoDep(t *testing.T) {
+	r := newTestReplica(false)
+
+	// Add a causal READ to unsynced (not a write)
+	causalCmd := state.Command{Op: state.GET, K: state.Key(100), V: state.NIL()}
+	causalId := CommandId{ClientId: 10, SeqNum: 5}
+	r.unsyncCausal(causalCmd, causalId)
+
+	// Should get TRUE and no weakDep (only writes create deps)
+	ok, weakDep := r.okWithWeakDep(state.Command{Op: state.GET, K: state.Key(100)})
+	if ok != TRUE {
+		t.Errorf("ok = %d, want TRUE", ok)
+	}
+	if weakDep != nil {
+		t.Errorf("weakDep = %v, want nil (causal read, not write)", weakDep)
+	}
+}
+
+// --- computeSpeculativeResultWithUnsynced tests ---
+
+func TestSpeculativeWithUnsyncedGETSeesWeakWrite(t *testing.T) {
+	r := newTestReplica(false)
+
+	// Add a causal write to witness pool
+	causalCmd := state.Command{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("weak-value"))}
+	causalId := CommandId{ClientId: 10, SeqNum: 5}
+	r.unsyncCausal(causalCmd, causalId)
+
+	// Strong GET should see the weak write via getWeakWriteValue
+	val, found := r.getWeakWriteValue(state.Key(100))
+	if !found {
+		t.Fatal("Expected weak write value in witness pool")
+	}
+	if !bytes.Equal(val, []byte("weak-value")) {
+		t.Errorf("Value = %q, want weak-value", val)
+	}
+}
+
+func TestSpeculativeWithUnsyncedGETNoWeakWrite(t *testing.T) {
+	r := newTestReplica(false)
+
+	// No weak write - getWeakWriteValue should return false
+	_, found := r.getWeakWriteValue(state.Key(100))
+	if found {
+		t.Error("Should not find weak write value for empty witness pool")
+	}
+}
+
+func TestSpeculativeWithUnsyncedStrongWriteNotReturned(t *testing.T) {
+	r := newTestReplica(false)
+
+	// Add a STRONG write to unsynced
+	strongCmd := state.Command{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("strong-val"))}
+	strongId := CommandId{ClientId: 1, SeqNum: 1}
+	r.unsyncStrong(strongCmd, strongId)
+
+	// getWeakWriteValue should NOT return strong writes
+	_, found := r.getWeakWriteValue(state.Key(100))
+	if found {
+		t.Error("Should not return strong write value (only causal/weak)")
+	}
+}
+
+// --- checkStrongWriteConflict tests ---
+
+func TestCheckStrongWriteConflictExists(t *testing.T) {
+	r := newTestReplica(false)
+
+	strongCmd := state.Command{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("v1"))}
+	strongId := CommandId{ClientId: 1, SeqNum: 1}
+	r.unsyncStrong(strongCmd, strongId)
+
+	if !r.checkStrongWriteConflict(state.Key(100)) {
+		t.Error("Should detect strong write conflict")
+	}
+}
+
+func TestCheckStrongWriteConflictNotExists(t *testing.T) {
+	r := newTestReplica(false)
+
+	if r.checkStrongWriteConflict(state.Key(100)) {
+		t.Error("Should not detect conflict on empty witness pool")
+	}
+}
+
+func TestCheckStrongWriteConflictCausalNotConflict(t *testing.T) {
+	r := newTestReplica(false)
+
+	causalCmd := state.Command{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("causal"))}
+	causalId := CommandId{ClientId: 10, SeqNum: 1}
+	r.unsyncCausal(causalCmd, causalId)
+
+	// Causal writes should NOT be detected as strong write conflicts
+	if r.checkStrongWriteConflict(state.Key(100)) {
+		t.Error("Causal write should not be a strong write conflict")
+	}
+}
+
+// --- getWeakWriteDep tests ---
+
+func TestGetWeakWriteDepExists(t *testing.T) {
+	r := newTestReplica(false)
+
+	causalCmd := state.Command{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("v"))}
+	causalId := CommandId{ClientId: 10, SeqNum: 5}
+	r.unsyncCausal(causalCmd, causalId)
+
+	dep := r.getWeakWriteDep(state.Key(100))
+	if dep == nil {
+		t.Fatal("Expected weak write dep")
+	}
+	if dep.ClientId != 10 || dep.SeqNum != 5 {
+		t.Errorf("dep = %v, want {10,5}", dep)
+	}
+}
+
+func TestGetWeakWriteDepNotExists(t *testing.T) {
+	r := newTestReplica(false)
+
+	dep := r.getWeakWriteDep(state.Key(100))
+	if dep != nil {
+		t.Errorf("dep = %v, want nil", dep)
+	}
+}
+
+func TestGetWeakWriteDepStrongWriteNotReturned(t *testing.T) {
+	r := newTestReplica(false)
+
+	strongCmd := state.Command{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("v"))}
+	strongId := CommandId{ClientId: 1, SeqNum: 1}
+	r.unsyncStrong(strongCmd, strongId)
+
+	dep := r.getWeakWriteDep(state.Key(100))
+	if dep != nil {
+		t.Errorf("dep = %v, want nil (strong write, not weak)", dep)
+	}
+}
+
+// --- Integration: strong op with causal in witness pool ---
+
+func TestStrongReadWithCausalWriteInWitnessPool(t *testing.T) {
+	r := newTestReplica(false)
+
+	// Client A writes causal op to key 100
+	causalCmd := state.Command{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("causal-data"))}
+	causalId := CommandId{ClientId: 10, SeqNum: 1}
+	r.unsyncCausal(causalCmd, causalId)
+
+	// Client B does strong read of key 100
+	// okWithWeakDep should return TRUE + weakDep pointing to causal write
+	ok, weakDep := r.okWithWeakDep(state.Command{Op: state.GET, K: state.Key(100)})
+	if ok != TRUE {
+		t.Errorf("ok = %d, want TRUE", ok)
+	}
+	if weakDep == nil || *weakDep != causalId {
+		t.Errorf("weakDep = %v, want %v", weakDep, causalId)
+	}
+
+	// getWeakWriteValue should return causal write value for speculative execution
+	val, found := r.getWeakWriteValue(state.Key(100))
+	if !found || !bytes.Equal(val, []byte("causal-data")) {
+		t.Errorf("Speculative result = %q, want causal-data", val)
+	}
+}
+
+func TestStrongWriteWithCausalWriteInWitnessPool(t *testing.T) {
+	r := newTestReplica(false)
+
+	// Causal write on key 100
+	causalCmd := state.Command{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("causal"))}
+	causalId := CommandId{ClientId: 10, SeqNum: 1}
+	r.unsyncCausal(causalCmd, causalId)
+
+	// Strong write on same key - should NOT conflict (causal != strong conflict)
+	ok, weakDep := r.okWithWeakDep(state.Command{Op: state.PUT, K: state.Key(100)})
+	if ok != TRUE {
+		t.Errorf("ok = %d, want TRUE (causal write doesn't conflict with strong write)", ok)
+	}
+	// WeakDep should be set since there's a pending causal write
+	if weakDep == nil || *weakDep != causalId {
+		t.Errorf("weakDep = %v, want %v", weakDep, causalId)
 	}
 }
