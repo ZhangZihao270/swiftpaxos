@@ -14,6 +14,7 @@ import (
 	"github.com/imdea-software/swiftpaxos/config"
 	"github.com/imdea-software/swiftpaxos/curp"
 	curpht "github.com/imdea-software/swiftpaxos/curp-ht"
+	curpho "github.com/imdea-software/swiftpaxos/curp-ho"
 	"github.com/imdea-software/swiftpaxos/dlog"
 	"github.com/imdea-software/swiftpaxos/master"
 	"github.com/imdea-software/swiftpaxos/replica/defs"
@@ -115,8 +116,9 @@ func runClient(c *config.Config, verbose bool) {
 		}
 	}
 
-	// Aggregate and print metrics (only for curpht with multiple threads)
-	if numThreads > 1 && strings.ToLower(c.Protocol) == "curpht" {
+	// Aggregate and print metrics (only for curpht/curpho with multiple threads)
+	p := strings.ToLower(c.Protocol)
+	if numThreads > 1 && (p == "curpht" || p == "curpho") {
 		aggregated := client.AggregateMetrics(allMetrics)
 		l := dlog.New(*logFile, verbose)
 		l.Printf("Test took %v\n", maxDuration)
@@ -138,6 +140,7 @@ func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads i
 	case "swiftpaxos":
 	case "curp":
 	case "curpht":
+	case "curpho":
 	case "fastpaxos":
 		c.Fast = true
 		c.WaitClosest = true
@@ -212,6 +215,29 @@ func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads i
 		hbc := client.NewHybridBufferClient(b, c.WeakRatio, weakWrites)
 		hbc.SetHybridClient(cl)
 		// For single thread, run with printing. For multiple threads, collect metrics.
+		printResults := (numThreads == 1)
+		hbc.HybridLoopWithOptions(printResults)
+		return hbc.GetMetrics(), hbc.GetDuration()
+	} else if p == "curpho" {
+		cls := []string{}
+		for a := range c.ClientAddrs {
+			cls = append(cls, a)
+		}
+		sort.Slice(cls, func(i, j int) bool {
+			return cls[i] < cls[j]
+		})
+		pclients := c.GetClientOffset(cls, c.Alias)
+		cl := curpho.NewClient(b, len(c.ReplicaAddrs), c.Reqs, pclients)
+		if cl == nil {
+			return nil, 0
+		}
+		// Always use HybridLoop for curpho to get consistent output format
+		weakWrites := c.WeakWrites
+		if weakWrites == 0 && c.WeakRatio > 0 {
+			weakWrites = 50
+		}
+		hbc := client.NewHybridBufferClient(b, c.WeakRatio, weakWrites)
+		hbc.SetHybridClient(cl)
 		printResults := (numThreads == 1)
 		hbc.HybridLoopWithOptions(printResults)
 		return hbc.GetMetrics(), hbc.GetDuration()
