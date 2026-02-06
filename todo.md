@@ -107,7 +107,7 @@ See original todo.md for detailed history.
 
 # CURP-HO (Hybrid Optimal)
 
-## Status: 📋 **PLANNED**
+## Status: 🔧 **IN PROGRESS** (Phase 20 Complete, Phase 21+ Planned)
 
 ## Design Summary
 
@@ -262,86 +262,44 @@ Slow path:
 
 ---
 
-### Phase 20: Extend Unsynced Structure for Witness Pool [HIGH PRIORITY]
+### Phase 20: Extend Unsynced Structure for Witness Pool [COMPLETE]
 
 **Goal**: Extend CURP-HT's existing `unsynced` structure to support witness pool functionality, avoiding duplicate data structures.
 
-**Background**: CURP-HT already has `unsynced cmap.ConcurrentMap` that tracks uncommitted commands by key for conflict detection. Currently it stores `int` (count or slot). We need to extend it to also store command metadata for CURP-HO.
+**Background**: CURP-HT already has `unsynced cmap.ConcurrentMap` that tracks uncommitted commands by key for conflict detection. Previously stored `int` (count or slot). Extended to store `*UnsyncedEntry` with command metadata for CURP-HO witness pool.
 
-- [ ] **20.1** Define UnsyncedEntry struct in curp-ho/defs.go
-  ```go
-  // Replaces simple int value in unsynced map
-  type UnsyncedEntry struct {
-      Slot      int             // Slot number (for leader) or count (for non-leader)
-      IsStrong  bool            // true=strong, false=causal
-      Op        state.Op        // GET/PUT
-      Value     state.Value     // Value for PUT operations (needed for speculative reads)
-      ClientId  int32           // Client that issued this command
-      SeqNum    int32           // Sequence number
-      CmdId     CommandId       // Full command ID
-  }
-  ```
+- [x] **20.1** Define UnsyncedEntry struct in curp-ho/defs.go [26:02:06]
+  - Fields: Slot, IsStrong, Op, Value, ClientId, SeqNum, CmdId
+  - On non-leaders, Slot serves as pending count; on leader, stores actual slot number
 
-- [ ] **20.2** Update unsynced usage in curp-ho/curp-ho.go
-  - Keep the same `unsynced cmap.ConcurrentMap` (no new field needed!)
-  - Change value type from `int` to `*UnsyncedEntry`
-  - Update all unsynced operations: `unsync()`, `leaderUnsync()`, `sync()`, `ok()`
+- [x] **20.2** Update unsynced usage in curp-ho/curp-ho.go [26:02:06]
+  - Changed value type from `int` to `*UnsyncedEntry`
+  - Split `unsync()` → `unsyncStrong()` + `unsyncCausal()` (distinguish strong vs causal entries)
+  - Split `leaderUnsync()` → `leaderUnsyncStrong()` + `leaderUnsyncCausal()`
+  - Updated `sync()` to work with `*UnsyncedEntry` count field
+  - Updated `ok()` to distinguish strong conflicts (FALSE) from causal entries (TRUE)
+  - Added `okWithWeakDep()` returning both ok status and weak write dependency
 
-- [ ] **20.3** Implement enhanced conflict checking functions
-  ```go
-  // Check if there's a strong write conflict
-  func (r *Replica) checkStrongWriteConflict(key state.Key) bool {
-      keyStr := strconv.FormatInt(int64(key), 10)
-      if entry, exists := r.unsynced.Get(keyStr); exists {
-          e := entry.(*UnsyncedEntry)
-          return e.IsStrong && e.Op == state.PUT
-      }
-      return false
-  }
+- [x] **20.3** Implement enhanced conflict checking functions [26:02:06]
+  - `checkStrongWriteConflict(key)`: detects pending strong writes
+  - `getWeakWriteDep(key)`: returns CmdId of pending causal write (for strong read deps)
+  - `getWeakWriteValue(key)`: returns value of pending causal write (for speculative execution)
 
-  // Get weak write dependency (returns nil if no weak write)
-  func (r *Replica) getWeakWriteDep(key state.Key) *CommandId {
-      keyStr := strconv.FormatInt(int64(key), 10)
-      if entry, exists := r.unsynced.Get(keyStr); exists {
-          e := entry.(*UnsyncedEntry)
-          if !e.IsStrong && e.Op == state.PUT {
-              return &e.CmdId
-          }
-      }
-      return nil
-  }
+- [x] **20.4** Add boundClients tracking to Replica struct [26:02:06]
+  - Added `boundClients map[int32]bool` field + initialization
+  - `isBoundReplicaFor(clientId)`: checks if client is bound to this replica
+  - `registerBoundClient(clientId)`: auto-detect binding from first causal propose
 
-  // Get weak write value for speculative execution
-  func (r *Replica) getWeakWriteValue(key state.Key) (state.Value, bool) {
-      keyStr := strconv.FormatInt(int64(key), 10)
-      if entry, exists := r.unsynced.Get(keyStr); exists {
-          e := entry.(*UnsyncedEntry)
-          if !e.IsStrong && e.Op == state.PUT {
-              return e.Value, true
-          }
-      }
-      return nil, false
-  }
-  ```
+- [x] **20.5** Update cleanup logic in deliver() [26:02:06]
+  - Added `syncLeader()` for leader-side cleanup after execution
+  - Leader removes entry only if CmdId matches (preserves newer entries)
+  - Non-leader cleanup via `sync()` already works with `*UnsyncedEntry`
+  - 37 new unit tests, all passing (67 total in curp-ho)
 
-- [ ] **20.4** Add boundClients tracking to Replica struct
-  ```go
-  type Replica struct {
-      // ... existing fields from CURP-HT
-      boundClients  map[int32]bool  // clientId -> is bound to me?
-  }
-  ```
-
-- [ ] **20.5** Update cleanup logic in deliver()
-  - After Execute(), remove from unsynced (already happens in CURP-HT)
-  - Prevent unbounded growth (already handled)
-  - Plan: docs/dev/curp-ho/phase20-witness-pool-plan.md
-
-**Advantages of reusing unsynced**:
-- ✅ No duplicate data structures
-- ✅ Reuse existing conflict detection logic
-- ✅ Same cleanup mechanism
-- ✅ Key-based indexing already optimal for lookups
+**Design decisions**:
+- Single entry per key (latest op overwrites metadata, count tracks total pending)
+- Strong entries block strong writes; causal entries create weakDep for strong reads
+- Leader stores actual slot number; non-leader uses count for pending tracking
 
 ---
 

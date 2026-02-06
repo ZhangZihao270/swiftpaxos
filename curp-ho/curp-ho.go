@@ -62,6 +62,11 @@ type Replica struct {
 	// Key: "clientId:key", Value: *pendingWrite
 	pendingWrites cmap.ConcurrentMap
 
+	// CURP-HO: Track which clients are bound to this replica.
+	// A client binds to its closest replica for 1-RTT causal op replies.
+	// Key: clientId, Value: true if bound to this replica.
+	boundClients map[int32]bool
+
 	// Notification channels for async waiting (replaces spin-waits)
 	commitNotify  map[int]chan struct{} // slot -> notification channel for commit
 	executeNotify map[int]chan struct{} // slot -> notification channel for execution
@@ -139,6 +144,7 @@ func New(alias string, rid int, addrs []string, exec bool, pl, f int,
 		delivered:     cmap.New(),
 		weakExecuted:  cmap.New(),
 		pendingWrites: cmap.New(),
+		boundClients:  make(map[int32]bool),
 		history:       make([]commandStaticDesc, HISTORY_SIZE),
 
 		commitNotify:  make(map[int]chan struct{}),
@@ -224,7 +230,8 @@ func (r *Replica) run() {
 
 		case propose := <-r.ProposeChan:
 			if r.isLeader {
-				dep := r.leaderUnsync(propose.Command, r.lastCmdSlot)
+				proposeCmdId := CommandId{ClientId: propose.ClientId, SeqNum: propose.CommandId}
+				dep := r.leaderUnsyncStrong(propose.Command, r.lastCmdSlot, proposeCmdId)
 				desc := r.getCmdDescSeq(r.lastCmdSlot, propose, dep, true) // why Seq?
 				if desc == nil {
 					r.Fatal("Got propose for the delivered command:",
@@ -245,7 +252,7 @@ func (r *Replica) run() {
 					Ok:      r.ok(propose.Command),
 				}
 				r.sender.SendToClient(propose.ClientId, recAck, r.cs.recordAckRPC)
-				r.unsync(propose.Command)
+				r.unsyncStrong(propose.Command, cmdId)
 				slot, exists := r.slots[cmdId]
 				if exists {
 					r.getCmdDesc(slot, "deliver", -1)
@@ -476,52 +483,267 @@ func (r *Replica) sync(cmdId CommandId, cmd state.Command) {
 					return mapV
 				}
 				r.synced.Set(cmdId.String(), struct{}{})
-				v := mapV.(int) - 1
-				if v < 0 {
-					v = 0
+				entry := mapV.(*UnsyncedEntry)
+				newCount := entry.Slot - 1
+				if newCount < 0 {
+					newCount = 0
 				}
-				return v
+				if newCount == 0 {
+					// Return a zeroed entry to indicate nothing pending
+					return &UnsyncedEntry{Slot: 0}
+				}
+				// Decrement count, keep metadata of most recent entry
+				return &UnsyncedEntry{
+					Slot:     newCount,
+					IsStrong: entry.IsStrong,
+					Op:       entry.Op,
+					Value:    entry.Value,
+					ClientId: entry.ClientId,
+					SeqNum:   entry.SeqNum,
+					CmdId:    entry.CmdId,
+				}
 			}
 			r.synced.Set(cmdId.String(), struct{}{})
-			return 0
+			return &UnsyncedEntry{Slot: 0}
 		})
 }
 
-func (r *Replica) unsync(cmd state.Command) {
+// syncLeader cleans up the unsynced map on the leader after a command is executed.
+// For the leader, unsynced entries track the latest slot. After execution, we
+// remove the entry only if this command's slot matches (no newer op has taken over).
+func (r *Replica) syncLeader(cmdId CommandId, cmd state.Command) {
+	key := strconv.FormatInt(int64(cmd.K), 10)
+	v, exists := r.unsynced.Get(key)
+	if !exists {
+		return
+	}
+	entry := v.(*UnsyncedEntry)
+	// Only remove if this entry's CmdId matches (no newer op for this key)
+	if entry.CmdId == cmdId {
+		r.unsynced.Remove(key)
+	}
+}
+
+// unsyncStrong adds a strong (linearizable) op to the unsynced map on non-leaders.
+// On non-leaders, entry.Slot is used as a count of pending ops for this key.
+func (r *Replica) unsyncStrong(cmd state.Command, cmdId CommandId) {
 	key := strconv.FormatInt(int64(cmd.K), 10)
 	r.unsynced.Upsert(key, nil,
 		func(exists bool, mapV, _ interface{}) interface{} {
 			if exists {
-				return mapV.(int) + 1
+				entry := mapV.(*UnsyncedEntry)
+				return &UnsyncedEntry{
+					Slot:     entry.Slot + 1,
+					IsStrong: true,
+					Op:       cmd.Op,
+					Value:    cmd.V,
+					ClientId: cmdId.ClientId,
+					SeqNum:   cmdId.SeqNum,
+					CmdId:    cmdId,
+				}
 			}
-			return 1
+			return &UnsyncedEntry{
+				Slot:     1,
+				IsStrong: true,
+				Op:       cmd.Op,
+				Value:    cmd.V,
+				ClientId: cmdId.ClientId,
+				SeqNum:   cmdId.SeqNum,
+				CmdId:    cmdId,
+			}
 		})
 }
 
-func (r *Replica) leaderUnsync(cmd state.Command, slot int) int {
+// unsyncCausal adds a causal (weak) op to the unsynced map (witness pool).
+// Called by ALL replicas when receiving a causal propose.
+func (r *Replica) unsyncCausal(cmd state.Command, cmdId CommandId) {
+	key := strconv.FormatInt(int64(cmd.K), 10)
+	r.unsynced.Upsert(key, nil,
+		func(exists bool, mapV, _ interface{}) interface{} {
+			if exists {
+				entry := mapV.(*UnsyncedEntry)
+				return &UnsyncedEntry{
+					Slot:     entry.Slot + 1,
+					IsStrong: false,
+					Op:       cmd.Op,
+					Value:    cmd.V,
+					ClientId: cmdId.ClientId,
+					SeqNum:   cmdId.SeqNum,
+					CmdId:    cmdId,
+				}
+			}
+			return &UnsyncedEntry{
+				Slot:     1,
+				IsStrong: false,
+				Op:       cmd.Op,
+				Value:    cmd.V,
+				ClientId: cmdId.ClientId,
+				SeqNum:   cmdId.SeqNum,
+				CmdId:    cmdId,
+			}
+		})
+}
+
+// leaderUnsyncStrong adds a strong op to the unsynced map on the leader.
+// On leader, entry.Slot stores the actual slot number for dependency tracking.
+// Returns the previous slot (dependency) or -1 if no dependency.
+func (r *Replica) leaderUnsyncStrong(cmd state.Command, slot int, cmdId CommandId) int {
 	depSlot := -1
 	key := strconv.FormatInt(int64(cmd.K), 10)
 	r.unsynced.Upsert(key, nil,
 		func(exists bool, mapV, _ interface{}) interface{} {
 			if exists {
-				if mapV.(int) > slot {
-					r.Fatal(mapV.(int), slot)
+				entry := mapV.(*UnsyncedEntry)
+				if entry.Slot > slot {
+					r.Fatal(entry.Slot, slot)
 					return mapV
 				}
-				depSlot = mapV.(int)
+				depSlot = entry.Slot
 			}
-			return slot
+			return &UnsyncedEntry{
+				Slot:     slot,
+				IsStrong: true,
+				Op:       cmd.Op,
+				Value:    cmd.V,
+				ClientId: cmdId.ClientId,
+				SeqNum:   cmdId.SeqNum,
+				CmdId:    cmdId,
+			}
 		})
 	return depSlot
 }
 
+// leaderUnsyncCausal adds a causal op to the unsynced map on the leader.
+// Returns the previous slot (dependency) or -1 if no dependency.
+func (r *Replica) leaderUnsyncCausal(cmd state.Command, slot int, cmdId CommandId) int {
+	depSlot := -1
+	key := strconv.FormatInt(int64(cmd.K), 10)
+	r.unsynced.Upsert(key, nil,
+		func(exists bool, mapV, _ interface{}) interface{} {
+			if exists {
+				entry := mapV.(*UnsyncedEntry)
+				if entry.Slot > slot {
+					r.Fatal(entry.Slot, slot)
+					return mapV
+				}
+				depSlot = entry.Slot
+			}
+			return &UnsyncedEntry{
+				Slot:     slot,
+				IsStrong: false,
+				Op:       cmd.Op,
+				Value:    cmd.V,
+				ClientId: cmdId.ClientId,
+				SeqNum:   cmdId.SeqNum,
+				CmdId:    cmdId,
+			}
+		})
+	return depSlot
+}
+
+// ok checks the unsynced map for conflicts with an incoming strong op.
+// Returns TRUE if no conflict, FALSE if there's a strong write conflict.
+// In CURP-HO, this is used by non-leaders when processing strong proposes.
 func (r *Replica) ok(cmd state.Command) uint8 {
 	key := strconv.FormatInt(int64(cmd.K), 10)
 	v, exists := r.unsynced.Get(key)
-	if exists && v.(int) > 0 {
+	if !exists {
+		return TRUE
+	}
+	entry := v.(*UnsyncedEntry)
+	if entry.Slot <= 0 {
+		return TRUE // No pending entries
+	}
+	// In CURP-HO: strong write in unsynced → conflict (FALSE)
+	if entry.IsStrong && entry.Op == state.PUT {
+		return FALSE
+	}
+	// Weak entries don't cause conflicts for strong ops (they create weakDep instead)
+	// But a pending counter > 0 with a non-strong entry means there are causal ops pending
+	// For backward compat with CURP-HT behavior: any pending strong op is a conflict
+	if entry.IsStrong {
 		return FALSE
 	}
 	return TRUE
+}
+
+// okWithWeakDep checks unsynced for conflicts and returns both ok status and weakDep.
+// Used by non-leaders in CURP-HO when processing strong proposes.
+// weakDep is non-nil if there's an uncommitted weak write on the same key.
+func (r *Replica) okWithWeakDep(cmd state.Command) (uint8, *CommandId) {
+	key := strconv.FormatInt(int64(cmd.K), 10)
+	v, exists := r.unsynced.Get(key)
+	if !exists {
+		return TRUE, nil
+	}
+	entry := v.(*UnsyncedEntry)
+	if entry.Slot <= 0 {
+		return TRUE, nil
+	}
+	// Strong write conflict
+	if entry.IsStrong && entry.Op == state.PUT {
+		return FALSE, nil
+	}
+	// Any strong op pending → conflict
+	if entry.IsStrong {
+		return FALSE, nil
+	}
+	// Causal (weak) write pending → return weakDep
+	if !entry.IsStrong && entry.Op == state.PUT {
+		dep := entry.CmdId
+		return TRUE, &dep
+	}
+	return TRUE, nil
+}
+
+// checkStrongWriteConflict checks if there's a pending strong write on the given key.
+// Used in CURP-HO strong op handling to detect write-write conflicts.
+func (r *Replica) checkStrongWriteConflict(key state.Key) bool {
+	keyStr := strconv.FormatInt(int64(key), 10)
+	if v, exists := r.unsynced.Get(keyStr); exists {
+		entry := v.(*UnsyncedEntry)
+		return entry.Slot > 0 && entry.IsStrong && entry.Op == state.PUT
+	}
+	return false
+}
+
+// getWeakWriteDep returns the CmdId of a pending weak write on the given key, if any.
+// Used in CURP-HO to track weak write dependencies for strong reads.
+func (r *Replica) getWeakWriteDep(key state.Key) *CommandId {
+	keyStr := strconv.FormatInt(int64(key), 10)
+	if v, exists := r.unsynced.Get(keyStr); exists {
+		entry := v.(*UnsyncedEntry)
+		if entry.Slot > 0 && !entry.IsStrong && entry.Op == state.PUT {
+			dep := entry.CmdId
+			return &dep
+		}
+	}
+	return nil
+}
+
+// getWeakWriteValue returns the value of a pending weak write on the given key.
+// Used for speculative execution: strong reads can see uncommitted weak writes.
+func (r *Replica) getWeakWriteValue(key state.Key) (state.Value, bool) {
+	keyStr := strconv.FormatInt(int64(key), 10)
+	if v, exists := r.unsynced.Get(keyStr); exists {
+		entry := v.(*UnsyncedEntry)
+		if entry.Slot > 0 && !entry.IsStrong && entry.Op == state.PUT {
+			return entry.Value, true
+		}
+	}
+	return nil, false
+}
+
+// isBoundReplicaFor checks if this replica is the bound (closest) replica for a given client.
+// In CURP-HO, bound replicas execute causal ops speculatively and reply immediately.
+func (r *Replica) isBoundReplicaFor(clientId int32) bool {
+	return r.boundClients[clientId]
+}
+
+// registerBoundClient registers a client as bound to this replica.
+// Called when a client's first causal propose arrives (auto-detect binding).
+func (r *Replica) registerBoundClient(clientId int32) {
+	r.boundClients[clientId] = true
 }
 
 func (r *Replica) deliver(desc *commandDesc, slot int) {
@@ -591,6 +813,14 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 			desc.applied = true
 			r.executed.Set(slotStr, struct{}{})
 			r.notifyExecute(slot) // Notify waiters that slot is executed
+
+			// CURP-HO: Clean up unsynced entry on leader after execution.
+			// On non-leaders, sync() handles cleanup. On leader, we clean up here
+			// by decrementing the count or removing the entry if no other pending ops.
+			if r.isLeader {
+				r.syncLeader(desc.cmdId, desc.cmd)
+			}
+
 			go func(nextSlot int) {
 				r.deliverChan <- nextSlot
 			}(slot + 1)
@@ -795,7 +1025,8 @@ func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
 	r.lastCmdSlot++
 
 	// 2. Record dependency (for causal ordering)
-	dep := r.leaderUnsync(propose.Command, slot)
+	weakCmdId := CommandId{ClientId: propose.ClientId, SeqNum: propose.CommandId}
+	dep := r.leaderUnsyncCausal(propose.Command, slot, weakCmdId)
 
 	// 3. Create weak command descriptor
 	desc := r.getWeakCmdDesc(slot, propose, dep)

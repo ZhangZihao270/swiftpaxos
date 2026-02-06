@@ -41,6 +41,20 @@ const (
 
 var MaxDescRoutines = 500 // Increased from 100 to handle higher throughput
 
+// UnsyncedEntry stores metadata for uncommitted commands in the witness pool.
+// Replaces the simple int value used in CURP-HT's unsynced map.
+// In CURP-HO, every replica tracks unsynced entries for conflict detection,
+// and strong ops can see uncommitted weak writes via the witness pool.
+type UnsyncedEntry struct {
+	Slot     int             // Slot number (for leader) or -1 (for non-leader before slot assignment)
+	IsStrong bool            // true=strong (linearizable), false=causal (weak)
+	Op       state.Operation // GET/PUT/SCAN
+	Value    state.Value     // Value for PUT operations (needed for speculative reads)
+	ClientId int32           // Client that issued this command
+	SeqNum   int32           // Sequence number
+	CmdId    CommandId       // Full command ID
+}
+
 type CommandId struct {
 	ClientId int32
 	SeqNum   int32
