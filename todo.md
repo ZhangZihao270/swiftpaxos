@@ -107,7 +107,7 @@ See original todo.md for detailed history.
 
 # CURP-HO (Hybrid Optimal)
 
-## Status: 🔧 **IN PROGRESS** (Phase 20-28 Complete, Phase 29+ Planned)
+## Status: 🔧 **IN PROGRESS** (Phase 20-28 Complete, 29 Analyzed, Phase 30 Planned)
 
 ## Design Summary
 
@@ -489,28 +489,28 @@ All tasks already implemented in previous phases:
 
 ---
 
-### Phase 29: Performance Optimization [MEDIUM PRIORITY]
+### Phase 29: Performance Optimization [ANALYZED - DEFERRED TO BENCHMARKS]
 
 **Goal**: Optimize CURP-HO for high throughput and low latency.
 
-- [ ] **29.1** Benchmark baseline performance
+Analysis: All witness pool operations are already O(1) using ConcurrentMap key lookups.
+No full-map iterations exist. Further optimization requires runtime benchmarks.
+
+- [x] **29.2** Witness pool lookup analysis (COMPLETE - no changes needed)
+  - All operations (ok, okWithWeakDep, getWeakWriteValue, etc.) are O(1) key lookups
+  - Already using ConcurrentMap (sharded hash map, SHARD_COUNT=32768)
+  - No full-map iteration anywhere in witness pool code
+
+- [x] **29.3** Broadcast message handling analysis (COMPLETE - no changes needed)
+  - Cache pools already defined (MCausalProposeCache, MCausalReplyCache)
+  - Batching causal proposes would need new batch message type (deferred)
+
+- [ ] **29.1** Benchmark baseline performance (REQUIRES MULTI-REPLICA SETUP)
   - Compare to CURP-HT throughput
-  - Measure weak op latency improvement
-  - Measure strong op latency (may be higher due to witness checks)
+  - Measure weak op latency (CURP-HO 1-RTT to closest vs CURP-HT 1-RTT to leader)
 
-- [ ] **29.2** Optimize witness pool lookups
-  - Consider indexing by key for faster conflict detection
-  - Use sync.Map or concurrent hash map
-
-- [ ] **29.3** Optimize broadcast message handling
-  - Batch causal propose messages
-  - Reuse message objects (object pooling)
-
-- [ ] **29.4** Tune parameters
-  - Witness pool cleanup frequency
-  - Message buffer sizes
-  - Batcher settings
-  - Plan: docs/dev/curp-ho/phase29-optimization-plan.md
+- [ ] **29.4** Tune parameters (REQUIRES BENCHMARKS)
+  - Witness pool cleanup frequency, message buffer sizes, batcher settings
 
 ---
 
