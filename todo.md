@@ -107,7 +107,7 @@ See original todo.md for detailed history.
 
 # CURP-HO (Hybrid Optimal)
 
-## Status: 🔧 **IN PROGRESS** (Phase 20-24 Complete, Phase 25+ Planned)
+## Status: 🔧 **IN PROGRESS** (Phase 20-25 Complete, Phase 26+ Planned)
 
 ## Design Summary
 
@@ -397,51 +397,27 @@ Slow path:
 
 ---
 
-### Phase 25: Strong Op Modifications [HIGH PRIORITY]
+### Phase 25: Strong Op Modifications [COMPLETE]
 
 **Goal**: Modify strong op handling to check witness pool and track weakDep.
 
-- [ ] **25.1** Add weakDep field to MRecordAck message
-  ```go
-  type MRecordAck struct {
-      Replica int32
-      CmdId   CommandId
-      Ok      uint8
-      WeakDep *CommandId  // NEW: weak write dependency (if any)
-  }
-  ```
-  - Update serialization methods
+- [x] **25.1** Add weakDep field to MRecordAck message [26:02:06]
+  - Added `WeakDep *CommandId` (pointer, nil when no dep)
+  - Variable-size serialization: 18 bytes (no dep) or 26 bytes (with dep)
+  - hasWeakDep flag byte at offset 17
 
-- [ ] **25.2** Modify handlePropose() for strong ops
-  - Check unsynced for strong write conflicts using `checkStrongWriteConflict()`
-  - For strong read, check weak write conflicts using `getWeakWriteDep()`
-  - Return weakDep in RecordAck if applicable
+- [x] **25.2** Modify handlePropose() for strong ops [26:02:06]
+  - Non-leaders use okWithWeakDep() instead of ok()
+  - RecordAck now carries WeakDep when causal write exists on same key
 
-- [ ] **25.3** Modify deliver() speculative execution for strong ops
-  ```go
-  // CURP-HO: Strong speculative CAN see unsynced (including uncommitted weak writes)!
-  if desc.val == nil && desc.phase != COMMIT {
-      desc.val = r.computeSpeculativeResultWithUnsynced(desc.cmd)
-  }
-  ```
+- [x] **25.3** Modify deliver() speculative execution for strong ops [26:02:06]
+  - Replace ComputeResult with computeSpeculativeResultWithUnsynced
+  - Strong speculative reads can now see uncommitted weak writes
 
-- [ ] **25.4** Implement computeSpeculativeResultWithUnsynced()
-  ```go
-  func (r *Replica) computeSpeculativeResultWithUnsynced(cmd state.Command) state.Value {
-      switch cmd.Op {
-      case state.GET:
-          // Check unsynced for weak write first
-          if val, found := r.getWeakWriteValue(cmd.K); found {
-              return val
-          }
-          // Otherwise check pendingWrites (for committed but not in state yet)
-          // Then fall back to ComputeResult(r.State)
-          return r.computeSpeculativeResult(...) // Reuse CURP-HT logic
-      // ...
-      }
-  }
-  ```
-  - Plan: docs/dev/curp-ho/phase25-strong-witness-plan.md
+- [x] **25.4** Implement computeSpeculativeResultWithUnsynced() [26:02:06]
+  - GET: checks getWeakWriteValue first, falls back to ComputeResult
+  - PUT: returns NIL during speculation
+  - 20 new tests (156 total), all passing
 
 ---
 
