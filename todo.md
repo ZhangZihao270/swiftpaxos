@@ -107,7 +107,7 @@ See original todo.md for detailed history.
 
 # CURP-HO (Hybrid Optimal)
 
-## Status: 🔧 **IN PROGRESS** (Phase 20 Complete, Phase 21+ Planned)
+## Status: 🔧 **IN PROGRESS** (Phase 20-21 Complete, Phase 22+ Planned)
 
 ## Design Summary
 
@@ -303,27 +303,23 @@ Slow path:
 
 ---
 
-### Phase 21: Client-Replica Binding [HIGH PRIORITY]
+### Phase 21: Client-Replica Binding [COMPLETE]
 
 **Goal**: Implement client binding to closest replica.
 
-- [ ] **21.1** Add boundReplica field to Client struct in curp-ho/client.go
-  ```go
-  type Client struct {
-      boundReplica int32  // ID of bound (closest) replica
-      // ... existing fields from CURP-HT
-  }
-  ```
+- [x] **21.1** Add boundReplica field to Client struct in curp-ho/client.go [26:02:06]
+  - Added `boundReplica int32` field with documentation
+  - Added `BoundReplica()` accessor method
 
-- [ ] **21.2** Implement replica binding logic in NewClient()
-  - Measure latency to all replicas (reuse existing ping logic)
-  - Select replica with lowest latency
-  - Store as boundReplica
+- [x] **21.2** Implement replica binding logic in NewClient() [26:02:06]
+  - Set `boundReplica = int32(b.ClosestId)` from base client's latency measurement
+  - Base client computes ClosestId via ping during Connect() (co-located IP match or min latency)
 
-- [ ] **21.3** Add boundClients tracking on replica side
-  - Configuration file specifies which clients bind to which replicas
-  - Or auto-detect from first message
-  - Plan: docs/dev/curp-ho/phase21-binding-plan.md
+- [x] **21.3** Add boundClients tracking on replica side [26:02:06]
+  - Already implemented in Phase 20: `boundClients map[int32]bool`, `isBoundReplicaFor()`, `registerBoundClient()`
+  - Auto-detect from first causal propose message
+  - Added `sendMsgToAll()` helper for CURP-HO broadcast pattern
+  - 15 new tests (82 total), all passing
 
 ---
 
