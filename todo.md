@@ -107,7 +107,7 @@ See original todo.md for detailed history.
 
 # CURP-HO (Hybrid Optimal)
 
-## Status: 🔧 **IN PROGRESS** (Phase 20-23 Complete, Phase 24+ Planned)
+## Status: 🔧 **IN PROGRESS** (Phase 20-24 Complete, Phase 25+ Planned)
 
 ## Design Summary
 
@@ -371,60 +371,29 @@ Slow path:
 
 ---
 
-### Phase 24: Causal Op Replica-Side [HIGH PRIORITY]
+### Phase 24: Causal Op Replica-Side [COMPLETE]
 
 **Goal**: Implement causal op reception, witness pool addition, bound replica execution.
 
-- [ ] **24.1** Update run() loop in curp-ho/curp-ho.go
-  ```go
-  case m := <-r.cs.causalProposeChan:
-      propose := m.(*MCausalPropose)
-      r.handleCausalPropose(propose)
-  ```
+- [x] **24.1** Update run() loop in curp-ho/curp-ho.go [26:02:06]
+  - Added causalProposeChan case dispatching to handleCausalPropose
+  - ALL replicas process causal proposes (not just leader)
 
-- [ ] **24.2** Implement handleCausalPropose()
-  ```go
-  func (r *Replica) handleCausalPropose(propose *MCausalPropose) {
-      // 1. Add to unsynced (ALL replicas do this - witness for conflict detection)
-      keyStr := strconv.FormatInt(int64(propose.Command.K), 10)
-      entry := &UnsyncedEntry{
-          Slot:     -1,  // Not assigned yet (leader will assign)
-          IsStrong: false,
-          Op:       propose.Command.Op,
-          Value:    propose.Command.V,
-          ClientId: propose.ClientId,
-          SeqNum:   propose.CommandId,
-          CmdId:    CommandId{ClientId: propose.ClientId, SeqNum: propose.CommandId},
-      }
-      r.unsynced.Set(keyStr, entry)
+- [x] **24.2** Implement handleCausalPropose() [26:02:06]
+  - ALL replicas: add to witness pool (unsyncCausal), track pending writes
+  - ALL replicas: compute speculative result, reply with MCausalReply
+  - Client filters by boundReplica (avoids binding protocol)
+  - Leader: assigns slot, tracks dep (leaderUnsyncCausal), launches async replication
 
-      // 2. If bound replica, execute and reply (but DON'T replicate)
-      if r.isBoundReplicaFor(propose.ClientId) {
-          r.executeCausalAndReply(propose)
-      }
+- [x] **24.3** Implement getCausalCmdDesc() [26:02:06]
+  - Command descriptor creation for causal commands
+  - Sets isWeak=true, phase=ACCEPT (skips START), tracks dependencies
 
-      // 3. If leader, coordinate replication (separate responsibility)
-      if r.isLeader {
-          go r.asyncReplicateCausal(propose)
-      }
-      // Note: If bound replica == leader, it does BOTH (2) and (3)
-  }
-  ```
-
-- [ ] **24.3** Implement executeCausalAndReply() (bound replica only)
-  - Check causal dependency (waitForWeakDep if needed)
-  - Speculative execution with pendingWrites (reuse from CURP-HT!)
-  - Send MCausalReply to client immediately
-  - **NO replication** - this is purely for fast 1-RTT response
-
-- [ ] **24.4** Implement asyncReplicateCausal() (leader only)
-  - Assign slot number
-  - Send Accept{slot, cmd} to all replicas
-  - Wait for majority acks
-  - Send Commit{slot}
-  - Execute in slot order after commit
-  - **Important**: This happens independently of step 24.3
-  - Plan: docs/dev/curp-ho/phase24-replica-causal-plan.md
+- [x] **24.4** Implement asyncReplicateCausal() [26:02:06]
+  - Accept/commit flow via batcher, wait for commit + slot ordering
+  - Wait for causal dependency (waitForWeakDep)
+  - Execute, mark weakExecuted, clean pending writes, syncLeader cleanup
+  - 26 new tests (136 total) with newTestReplicaForDesc helper, all passing
 
 ---
 
