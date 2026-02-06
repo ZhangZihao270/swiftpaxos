@@ -309,6 +309,11 @@ func (r *Replica) run() {
 				r.handleWeakPropose(weakPropose)
 			}
 			// Non-Leader ignores weak propose (should not receive it)
+
+		case m := <-r.cs.causalProposeChan:
+			causalPropose := m.(*MCausalPropose)
+			r.handleCausalPropose(causalPropose)
+			// ALL replicas handle causal proposes (witness pool + reply)
 		}
 	}
 }
@@ -1148,6 +1153,141 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 		if desc.cmd.Op == state.PUT {
 			r.removePendingWrite(clientId, desc.cmd.K, seqNum)
 		}
+
+		// Trigger next slot
+		go func(nextSlot int) {
+			r.deliverChan <- nextSlot
+		}(slot + 1)
+	}
+}
+
+// handleCausalPropose handles a CURP-HO causal command received from a client.
+// Unlike handleWeakPropose (leader-only), ALL replicas process causal proposes:
+//   1. Add to witness pool (unsyncCausal) for conflict detection
+//   2. Track pending write (for speculative read-after-write)
+//   3. Compute speculative result and reply with MCausalReply
+//   4. If leader: assign slot and coordinate replication (accept/commit flow)
+//
+// All replicas reply with MCausalReply. The client filters by boundReplica,
+// ignoring non-bound replies. This avoids needing a binding protocol.
+func (r *Replica) handleCausalPropose(propose *MCausalPropose) {
+	cmdId := CommandId{ClientId: propose.ClientId, SeqNum: propose.CommandId}
+
+	// 1. ALL replicas: add to witness pool for conflict detection
+	r.unsyncCausal(propose.Command, cmdId)
+
+	// 2. ALL replicas: track pending write for speculative reads
+	if propose.Command.Op == state.PUT {
+		r.addPendingWrite(propose.ClientId, propose.Command.K, propose.CommandId, propose.Command.V)
+	}
+
+	// 3. ALL replicas: compute speculative result and reply
+	val := r.computeSpeculativeResult(propose.ClientId, propose.CausalDep, propose.Command)
+	rep := &MCausalReply{
+		Replica: r.Id,
+		CmdId:   cmdId,
+		Rep:     val,
+	}
+	r.sender.SendToClient(propose.ClientId, rep, r.cs.causalReplyRPC)
+
+	// 4. If leader: assign slot and coordinate replication
+	if r.isLeader {
+		slot := r.lastCmdSlot
+		r.lastCmdSlot++
+
+		dep := r.leaderUnsyncCausal(propose.Command, slot, cmdId)
+		desc := r.getCausalCmdDesc(slot, propose, dep)
+
+		go r.asyncReplicateCausal(desc, slot, propose.ClientId, propose.CommandId, propose.CausalDep)
+	}
+}
+
+// getCausalCmdDesc creates a command descriptor for causal commands.
+// Similar to getWeakCmdDesc but takes MCausalPropose instead of MWeakPropose.
+func (r *Replica) getCausalCmdDesc(slot int, propose *MCausalPropose, dep int) *commandDesc {
+	desc := r.newDesc()
+	desc.isWeak = true
+	desc.cmdSlot = slot
+	desc.dep = dep
+	desc.cmdId = CommandId{
+		ClientId: propose.ClientId,
+		SeqNum:   propose.CommandId,
+	}
+	desc.cmd = propose.Command
+	desc.phase = ACCEPT // Skip START phase for causal commands
+
+	// Track dependency
+	if dep != -1 {
+		depDesc := r.getCmdDesc(dep, nil, -1)
+		if depDesc != nil {
+			depDesc.successorL.Lock()
+			depDesc.successor = slot
+			depDesc.successorL.Unlock()
+		}
+	}
+
+	return desc
+}
+
+// asyncReplicateCausal replicates a causal command to other replicas asynchronously.
+// After replication completes (commit), it executes the command in slot order.
+// Similar to asyncReplicateWeak but also cleans up leader unsynced entries.
+func (r *Replica) asyncReplicateCausal(desc *commandDesc, slot int, clientId int32, seqNum int32, causalDep int32) {
+	// Send Accept to other replicas
+	acc := &MAccept{
+		Replica: r.Id,
+		Ballot:  r.ballot,
+		Cmd:     desc.cmd,
+		CmdId:   desc.cmdId,
+		CmdSlot: slot,
+	}
+
+	r.batcher.SendAccept(acc)
+	r.handleAccept(acc, desc)
+
+	// Wait for commit using channel notification
+	commitCh := r.getOrCreateCommitNotify(slot)
+	select {
+	case <-commitCh:
+		// Committed
+	case <-time.After(1 * time.Second):
+		// Timeout - proceed anyway to avoid deadlock
+	}
+
+	// Wait for slot-1 to be executed (slot ordering)
+	if slot > 0 {
+		executeCh := r.getOrCreateExecuteNotify(slot - 1)
+		select {
+		case <-executeCh:
+			// Slot-1 executed
+		case <-time.After(1 * time.Second):
+			// Timeout - proceed anyway to avoid deadlock
+		}
+	}
+
+	// Wait for causal dependency (session ordering within client)
+	if causalDep > 0 {
+		r.waitForWeakDep(clientId, causalDep)
+	}
+
+	// Execute and mark as executed (state modification happens here)
+	if !desc.applied {
+		desc.val = desc.cmd.Execute(r.State)
+		desc.applied = true
+		slotStr := strconv.Itoa(slot)
+		r.executed.Set(slotStr, struct{}{})
+		r.notifyExecute(slot)
+
+		// Mark this causal command as executed for causal ordering
+		r.markWeakExecuted(clientId, seqNum)
+
+		// Clean up pending write after execution (for PUT commands)
+		if desc.cmd.Op == state.PUT {
+			r.removePendingWrite(clientId, desc.cmd.K, seqNum)
+		}
+
+		// Clean up leader unsynced entry
+		r.syncLeader(desc.cmdId, desc.cmd)
 
 		// Trigger next slot
 		go func(nextSlot int) {

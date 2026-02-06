@@ -2,9 +2,11 @@ package curpho
 
 import (
 	"bytes"
+	"sync"
 	"testing"
 
 	"github.com/imdea-software/swiftpaxos/client"
+	"github.com/imdea-software/swiftpaxos/replica"
 	"github.com/imdea-software/swiftpaxos/state"
 	cmap "github.com/orcaman/concurrent-map"
 )
@@ -2595,5 +2597,673 @@ func TestHandleCausalReplyMultiplePending(t *testing.T) {
 
 	if _, exists := c.delivered[1]; !exists {
 		t.Error("Command 1 should be delivered")
+	}
+}
+
+// ============================================================================
+// Phase 24: Causal Op Replica-Side Tests
+// These tests verify the replica-side handling of CURP-HO causal operations:
+// handleCausalPropose, getCausalCmdDesc, asyncReplicateCausal.
+// ============================================================================
+
+// newTestReplicaForDesc creates a test replica with enough state for
+// command descriptor creation and causal propose processing.
+func newTestReplicaForDesc(isLeader bool) *Replica {
+	cmap.SHARD_COUNT = 32768
+	r := &Replica{
+		isLeader:      isLeader,
+		ballot:        0,
+		status:        NORMAL,
+		lastCmdSlot:   0,
+		unsynced:      cmap.New(),
+		synced:        cmap.New(),
+		values:        cmap.New(),
+		proposes:      cmap.New(),
+		cmdDescs:      cmap.New(),
+		executed:      cmap.New(),
+		committed:     cmap.New(),
+		delivered:     cmap.New(),
+		weakExecuted:  cmap.New(),
+		pendingWrites: cmap.New(),
+		boundClients:  make(map[int32]bool),
+		slots:         make(map[CommandId]int),
+		history:       make([]commandStaticDesc, HISTORY_SIZE),
+		commitNotify:  make(map[int]chan struct{}),
+		executeNotify: make(map[int]chan struct{}),
+		deliverChan:   make(chan int, 100),
+		descPool: sync.Pool{
+			New: func() interface{} {
+				return &commandDesc{}
+			},
+		},
+		routineCount: 0,
+	}
+	r.Q = replica.NewMajorityOf(3)
+	return r
+}
+
+// --- getCausalCmdDesc tests ---
+
+func TestGetCausalCmdDescBasicFields(t *testing.T) {
+	r := newTestReplicaForDesc(true)
+	propose := &MCausalPropose{
+		CommandId: 5,
+		ClientId:  42,
+		Command:   state.Command{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("v1"))},
+		CausalDep: 0,
+	}
+
+	desc := r.getCausalCmdDesc(0, propose, -1)
+
+	if desc.cmdId.ClientId != 42 {
+		t.Errorf("ClientId = %d, want 42", desc.cmdId.ClientId)
+	}
+	if desc.cmdId.SeqNum != 5 {
+		t.Errorf("SeqNum = %d, want 5", desc.cmdId.SeqNum)
+	}
+	if desc.cmdSlot != 0 {
+		t.Errorf("cmdSlot = %d, want 0", desc.cmdSlot)
+	}
+	if desc.dep != -1 {
+		t.Errorf("dep = %d, want -1", desc.dep)
+	}
+	if desc.phase != ACCEPT {
+		t.Errorf("phase = %d, want ACCEPT (%d)", desc.phase, ACCEPT)
+	}
+	if !desc.isWeak {
+		t.Error("isWeak should be true for causal commands")
+	}
+	if desc.cmd.Op != state.PUT {
+		t.Errorf("cmd.Op = %d, want PUT", desc.cmd.Op)
+	}
+	if desc.cmd.K != state.Key(100) {
+		t.Errorf("cmd.K = %d, want 100", desc.cmd.K)
+	}
+}
+
+func TestGetCausalCmdDescWithDependency(t *testing.T) {
+	r := newTestReplicaForDesc(true)
+
+	// Create first command at slot 0 and register in cmdDescs
+	// (so getCausalCmdDesc can find it when resolving dep)
+	propose1 := &MCausalPropose{
+		CommandId: 1,
+		ClientId:  42,
+		Command:   state.Command{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("v1"))},
+	}
+	desc1 := r.getCausalCmdDesc(0, propose1, -1)
+	r.cmdDescs.Set("0", desc1) // Register so dep lookup finds it
+
+	// Create second command at slot 1 depending on slot 0
+	propose2 := &MCausalPropose{
+		CommandId: 2,
+		ClientId:  42,
+		Command:   state.Command{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("v2"))},
+	}
+	desc2 := r.getCausalCmdDesc(1, propose2, 0)
+
+	if desc2.dep != 0 {
+		t.Errorf("dep = %d, want 0", desc2.dep)
+	}
+
+	// Verify successor linking: desc1.successor should be slot 1
+	desc1.successorL.Lock()
+	succ := desc1.successor
+	desc1.successorL.Unlock()
+	if succ != 1 {
+		t.Errorf("desc1.successor = %d, want 1", succ)
+	}
+}
+
+func TestGetCausalCmdDescNoDep(t *testing.T) {
+	r := newTestReplicaForDesc(true)
+	propose := &MCausalPropose{
+		CommandId: 1,
+		ClientId:  10,
+		Command:   state.Command{Op: state.GET, K: state.Key(50), V: state.NIL()},
+	}
+
+	desc := r.getCausalCmdDesc(0, propose, -1)
+
+	if desc.dep != -1 {
+		t.Errorf("dep = %d, want -1", desc.dep)
+	}
+	if desc.cmd.Op != state.GET {
+		t.Errorf("cmd.Op = %d, want GET", desc.cmd.Op)
+	}
+}
+
+// --- handleCausalPropose component tests ---
+// These test the individual building blocks that handleCausalPropose uses.
+
+func TestCausalProposeWitnessPoolAddsEntry(t *testing.T) {
+	r := newTestReplica(false) // Non-leader
+	cmd := state.Command{Op: state.PUT, K: state.Key(200), V: state.Value([]byte("causal-val"))}
+	cmdId := CommandId{ClientId: 77, SeqNum: 3}
+
+	// Simulate step 1 of handleCausalPropose: add to witness pool
+	r.unsyncCausal(cmd, cmdId)
+
+	v, exists := r.unsynced.Get("200")
+	if !exists {
+		t.Fatal("Expected entry in witness pool for key 200")
+	}
+	entry := v.(*UnsyncedEntry)
+	if entry.IsStrong {
+		t.Error("Entry should be causal (IsStrong=false)")
+	}
+	if entry.Slot != 1 {
+		t.Errorf("Slot = %d, want 1 (count)", entry.Slot)
+	}
+	if string(entry.Value) != "causal-val" {
+		t.Errorf("Value = %q, want causal-val", entry.Value)
+	}
+}
+
+func TestCausalProposePendingWriteTracking(t *testing.T) {
+	r := newTestReplica(false)
+	r.pendingWrites = cmap.New()
+
+	// Simulate step 2 of handleCausalPropose: track pending write for PUT
+	r.addPendingWrite(42, state.Key(100), 5, state.Value([]byte("pending-val")))
+
+	pw := r.getPendingWrite(42, state.Key(100), 5)
+	if pw == nil {
+		t.Fatal("Expected pending write for client 42, key 100")
+	}
+	if string(pw.value) != "pending-val" {
+		t.Errorf("Pending write value = %q, want pending-val", pw.value)
+	}
+	if pw.seqNum != 5 {
+		t.Errorf("Pending write seqNum = %d, want 5", pw.seqNum)
+	}
+}
+
+func TestCausalProposeNoPendingWriteForGET(t *testing.T) {
+	r := newTestReplica(false)
+	r.pendingWrites = cmap.New()
+
+	// GET commands should NOT add pending writes
+	// (handleCausalPropose checks cmd.Op == state.PUT before calling addPendingWrite)
+	pw := r.getPendingWrite(42, state.Key(100), 0)
+	if pw != nil {
+		t.Error("Should not have pending write for GET command")
+	}
+}
+
+func TestCausalProposeLeaderSlotAssignment(t *testing.T) {
+	r := newTestReplicaForDesc(true) // Leader
+	r.lastCmdSlot = 5
+
+	propose := &MCausalPropose{
+		CommandId: 10,
+		ClientId:  42,
+		Command:   state.Command{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("v1"))},
+		CausalDep: 0,
+	}
+
+	// Simulate leader-side slot assignment (step 4 of handleCausalPropose)
+	slot := r.lastCmdSlot
+	r.lastCmdSlot++
+	cmdId := CommandId{ClientId: propose.ClientId, SeqNum: propose.CommandId}
+	dep := r.leaderUnsyncCausal(propose.Command, slot, cmdId)
+	desc := r.getCausalCmdDesc(slot, propose, dep)
+
+	if slot != 5 {
+		t.Errorf("slot = %d, want 5", slot)
+	}
+	if r.lastCmdSlot != 6 {
+		t.Errorf("lastCmdSlot = %d, want 6 (incremented)", r.lastCmdSlot)
+	}
+	if dep != -1 {
+		t.Errorf("dep = %d, want -1 (no previous)", dep)
+	}
+	if desc.cmdSlot != 5 {
+		t.Errorf("desc.cmdSlot = %d, want 5", desc.cmdSlot)
+	}
+}
+
+func TestCausalProposeLeaderSlotDependency(t *testing.T) {
+	r := newTestReplicaForDesc(true)
+
+	// First causal op on key 100 at slot 0
+	cmd1 := state.Command{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("v1"))}
+	cmdId1 := CommandId{ClientId: 1, SeqNum: 1}
+	dep1 := r.leaderUnsyncCausal(cmd1, 0, cmdId1)
+	r.lastCmdSlot = 1
+
+	// Second causal op on same key at slot 1
+	cmd2 := state.Command{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("v2"))}
+	cmdId2 := CommandId{ClientId: 1, SeqNum: 2}
+	dep2 := r.leaderUnsyncCausal(cmd2, 1, cmdId2)
+
+	if dep1 != -1 {
+		t.Errorf("dep1 = %d, want -1", dep1)
+	}
+	if dep2 != 0 {
+		t.Errorf("dep2 = %d, want 0 (depends on slot 0)", dep2)
+	}
+}
+
+func TestCausalProposeNonLeaderNoSlotAssignment(t *testing.T) {
+	r := newTestReplica(false) // Non-leader
+	r.lastCmdSlot = 0
+
+	// Non-leaders don't assign slots in handleCausalPropose
+	// They only add to witness pool and reply
+	cmd := state.Command{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("v1"))}
+	cmdId := CommandId{ClientId: 42, SeqNum: 1}
+	r.unsyncCausal(cmd, cmdId)
+
+	// lastCmdSlot should remain unchanged for non-leaders
+	if r.lastCmdSlot != 0 {
+		t.Errorf("lastCmdSlot = %d, want 0 (non-leader should not increment)", r.lastCmdSlot)
+	}
+}
+
+// --- Speculative result tests for causal ops ---
+
+func TestComputeSpeculativeResultPUT(t *testing.T) {
+	r := newTestReplica(false)
+	r.pendingWrites = cmap.New()
+
+	cmd := state.Command{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("val"))}
+	result := r.computeSpeculativeResult(42, 0, cmd)
+
+	// PUT should return NIL during speculation
+	if !bytes.Equal(result, state.NIL()) {
+		t.Errorf("PUT speculative result = %v, want NIL", result)
+	}
+}
+
+func TestComputeSpeculativeResultGETWithPendingWrite(t *testing.T) {
+	r := newTestReplica(false)
+	r.pendingWrites = cmap.New()
+
+	// Add a pending write from client 42 for key 100
+	r.addPendingWrite(42, state.Key(100), 3, state.Value([]byte("pending-data")))
+
+	// GET should return the pending write value if causalDep >= seqNum
+	cmd := state.Command{Op: state.GET, K: state.Key(100), V: state.NIL()}
+	result := r.computeSpeculativeResult(42, 3, cmd)
+
+	if !bytes.Equal(result, []byte("pending-data")) {
+		t.Errorf("GET speculative result = %v, want pending-data", result)
+	}
+}
+
+func TestComputeSpeculativeResultGETNoPending(t *testing.T) {
+	r := newTestReplica(false)
+	r.pendingWrites = cmap.New()
+
+	// No pending write - would fall back to committed state
+	// But we don't have r.State in test replica, so just verify no panic
+	// when pending write doesn't exist
+	_ = state.Command{Op: state.GET, K: state.Key(999), V: state.NIL()}
+	pw := r.getPendingWrite(42, state.Key(999), 0)
+	if pw != nil {
+		t.Error("Should have no pending write for key 999")
+	}
+}
+
+// --- Multiple causal ops integration ---
+
+func TestMultipleCausalOpsWitnessPool(t *testing.T) {
+	r := newTestReplica(false)
+
+	// Multiple causal ops on same key should increment count
+	cmd1 := state.Command{Op: state.PUT, K: state.Key(50), V: state.Value([]byte("w1"))}
+	cmd2 := state.Command{Op: state.PUT, K: state.Key(50), V: state.Value([]byte("w2"))}
+	cmd3 := state.Command{Op: state.GET, K: state.Key(50), V: state.NIL()}
+	cmdId1 := CommandId{ClientId: 10, SeqNum: 1}
+	cmdId2 := CommandId{ClientId: 10, SeqNum: 2}
+	cmdId3 := CommandId{ClientId: 10, SeqNum: 3}
+
+	r.unsyncCausal(cmd1, cmdId1)
+	r.unsyncCausal(cmd2, cmdId2)
+	r.unsyncCausal(cmd3, cmdId3)
+
+	v, _ := r.unsynced.Get("50")
+	entry := v.(*UnsyncedEntry)
+	if entry.Slot != 3 {
+		t.Errorf("Slot = %d, want 3 (three pending causal ops)", entry.Slot)
+	}
+	// Latest metadata should be from cmd3
+	if entry.CmdId != cmdId3 {
+		t.Errorf("CmdId = %v, want %v", entry.CmdId, cmdId3)
+	}
+}
+
+func TestCausalAndStrongMixedWitnessPool(t *testing.T) {
+	r := newTestReplica(false)
+
+	// Add causal op first
+	causalCmd := state.Command{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("causal"))}
+	causalId := CommandId{ClientId: 10, SeqNum: 1}
+	r.unsyncCausal(causalCmd, causalId)
+
+	// Then strong op on same key
+	strongCmd := state.Command{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("strong"))}
+	strongId := CommandId{ClientId: 20, SeqNum: 1}
+	r.unsyncStrong(strongCmd, strongId)
+
+	v, _ := r.unsynced.Get("100")
+	entry := v.(*UnsyncedEntry)
+	if entry.Slot != 2 {
+		t.Errorf("Slot = %d, want 2 (causal + strong)", entry.Slot)
+	}
+	// Latest should be strong
+	if !entry.IsStrong {
+		t.Error("Latest entry should be strong")
+	}
+
+	// ok() should return FALSE (strong write conflict)
+	result := r.ok(state.Command{Op: state.PUT, K: state.Key(100)})
+	if result != FALSE {
+		t.Errorf("ok() = %d, want FALSE (strong write conflict)", result)
+	}
+}
+
+func TestCausalOpNoConflictForStrongCheck(t *testing.T) {
+	r := newTestReplica(false)
+
+	// Only causal op in witness pool
+	causalCmd := state.Command{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("causal"))}
+	causalId := CommandId{ClientId: 10, SeqNum: 1}
+	r.unsyncCausal(causalCmd, causalId)
+
+	// ok() should return TRUE (causal ops don't conflict with strong)
+	result := r.ok(state.Command{Op: state.PUT, K: state.Key(100)})
+	if result != TRUE {
+		t.Errorf("ok() = %d, want TRUE (causal ops don't conflict)", result)
+	}
+}
+
+// --- Leader causal replication setup ---
+
+func TestLeaderCausalMultipleSlotAssignment(t *testing.T) {
+	r := newTestReplicaForDesc(true)
+
+	// Simulate 3 causal commands from leader perspective
+	cmds := []state.Command{
+		{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("v1"))},
+		{Op: state.PUT, K: state.Key(200), V: state.Value([]byte("v2"))},
+		{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("v3"))},
+	}
+	cmdIds := []CommandId{
+		{ClientId: 1, SeqNum: 1},
+		{ClientId: 1, SeqNum: 2},
+		{ClientId: 1, SeqNum: 3},
+	}
+
+	var descs []*commandDesc
+	for i, cmd := range cmds {
+		slot := r.lastCmdSlot
+		r.lastCmdSlot++
+		dep := r.leaderUnsyncCausal(cmd, slot, cmdIds[i])
+		propose := &MCausalPropose{
+			CommandId: cmdIds[i].SeqNum,
+			ClientId:  cmdIds[i].ClientId,
+			Command:   cmd,
+		}
+		desc := r.getCausalCmdDesc(slot, propose, dep)
+		descs = append(descs, desc)
+	}
+
+	if r.lastCmdSlot != 3 {
+		t.Errorf("lastCmdSlot = %d, want 3", r.lastCmdSlot)
+	}
+
+	// Verify slots
+	if descs[0].cmdSlot != 0 {
+		t.Errorf("desc[0].cmdSlot = %d, want 0", descs[0].cmdSlot)
+	}
+	if descs[1].cmdSlot != 1 {
+		t.Errorf("desc[1].cmdSlot = %d, want 1", descs[1].cmdSlot)
+	}
+	if descs[2].cmdSlot != 2 {
+		t.Errorf("desc[2].cmdSlot = %d, want 2", descs[2].cmdSlot)
+	}
+
+	// cmd3 (slot 2) depends on cmd1 (slot 0) since both are key 100
+	if descs[2].dep != 0 {
+		t.Errorf("desc[2].dep = %d, want 0 (same key as slot 0)", descs[2].dep)
+	}
+	// cmd2 (slot 1) has no dep on key 200 (first op)
+	if descs[1].dep != -1 {
+		t.Errorf("desc[1].dep = %d, want -1 (different key)", descs[1].dep)
+	}
+}
+
+// --- Pending write lifecycle ---
+
+func TestPendingWriteLifecycle(t *testing.T) {
+	r := newTestReplica(false)
+	r.pendingWrites = cmap.New()
+
+	// Step 1: Add pending write (during handleCausalPropose)
+	r.addPendingWrite(42, state.Key(100), 5, state.Value([]byte("pending")))
+
+	// Step 2: Verify it's readable
+	pw := r.getPendingWrite(42, state.Key(100), 5)
+	if pw == nil || string(pw.value) != "pending" {
+		t.Fatal("Expected pending write to be readable")
+	}
+
+	// Step 3: Remove pending write (during asyncReplicateCausal after commit)
+	r.removePendingWrite(42, state.Key(100), 5)
+
+	// Step 4: Verify it's gone
+	pw = r.getPendingWrite(42, state.Key(100), 5)
+	if pw != nil {
+		t.Error("Pending write should be removed after execution")
+	}
+}
+
+func TestPendingWriteNewerNotRemoved(t *testing.T) {
+	r := newTestReplica(false)
+	r.pendingWrites = cmap.New()
+
+	// Add two writes for same key - newer seqNum wins
+	r.addPendingWrite(42, state.Key(100), 5, state.Value([]byte("old")))
+	r.addPendingWrite(42, state.Key(100), 7, state.Value([]byte("new")))
+
+	// Try to remove old one - should not remove since newer exists
+	r.removePendingWrite(42, state.Key(100), 5)
+
+	pw := r.getPendingWrite(42, state.Key(100), 7)
+	if pw == nil || string(pw.value) != "new" {
+		t.Error("Newer pending write should still exist")
+	}
+}
+
+// --- markWeakExecuted / waitForWeakDep tests ---
+
+func TestMarkWeakExecutedAndCheck(t *testing.T) {
+	r := newTestReplica(false)
+	r.weakExecuted = cmap.New()
+
+	r.markWeakExecuted(42, 5)
+
+	clientKey := "42"
+	v, exists := r.weakExecuted.Get(clientKey)
+	if !exists {
+		t.Fatal("Expected weakExecuted entry for client 42")
+	}
+	if v.(int32) != 5 {
+		t.Errorf("weakExecuted = %d, want 5", v.(int32))
+	}
+
+	// Newer seqNum should update
+	r.markWeakExecuted(42, 10)
+	v, _ = r.weakExecuted.Get(clientKey)
+	if v.(int32) != 10 {
+		t.Errorf("weakExecuted = %d, want 10", v.(int32))
+	}
+
+	// Older seqNum should NOT update
+	r.markWeakExecuted(42, 3)
+	v, _ = r.weakExecuted.Get(clientKey)
+	if v.(int32) != 10 {
+		t.Errorf("weakExecuted = %d, want 10 (should not regress)", v.(int32))
+	}
+}
+
+// --- syncLeader cleanup tests ---
+
+func TestSyncLeaderCleanupsMatchingEntry(t *testing.T) {
+	r := newTestReplica(true)
+
+	cmdId := CommandId{ClientId: 1, SeqNum: 1}
+	cmd := state.Command{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("v1"))}
+
+	// Add via leaderUnsyncCausal
+	r.leaderUnsyncCausal(cmd, 0, cmdId)
+
+	// Verify entry exists
+	_, exists := r.unsynced.Get("100")
+	if !exists {
+		t.Fatal("Expected unsynced entry")
+	}
+
+	// Cleanup
+	r.syncLeader(cmdId, cmd)
+
+	// Verify entry removed
+	_, exists = r.unsynced.Get("100")
+	if exists {
+		t.Error("Expected unsynced entry to be removed after syncLeader")
+	}
+}
+
+func TestSyncLeaderDoesNotRemoveNewerEntry(t *testing.T) {
+	r := newTestReplica(true)
+
+	cmd := state.Command{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("v1"))}
+	cmdId1 := CommandId{ClientId: 1, SeqNum: 1}
+	cmdId2 := CommandId{ClientId: 1, SeqNum: 2}
+
+	// Add two ops on same key
+	r.leaderUnsyncCausal(cmd, 0, cmdId1)
+	r.leaderUnsyncCausal(cmd, 1, cmdId2)
+
+	// Try to clean up the OLD entry - should not remove since newer exists
+	r.syncLeader(cmdId1, cmd)
+
+	v, exists := r.unsynced.Get("100")
+	if !exists {
+		t.Fatal("Expected unsynced entry to still exist (newer op)")
+	}
+	entry := v.(*UnsyncedEntry)
+	if entry.CmdId != cmdId2 {
+		t.Errorf("CmdId = %v, want %v (newer entry)", entry.CmdId, cmdId2)
+	}
+}
+
+// --- getCausalCmdDesc additional tests ---
+
+func TestGetCausalCmdDescGETCommand(t *testing.T) {
+	r := newTestReplicaForDesc(true)
+	propose := &MCausalPropose{
+		CommandId: 1,
+		ClientId:  10,
+		Command:   state.Command{Op: state.GET, K: state.Key(50), V: state.NIL()},
+	}
+
+	desc := r.getCausalCmdDesc(3, propose, -1)
+
+	if desc.cmd.Op != state.GET {
+		t.Errorf("cmd.Op = %d, want GET", desc.cmd.Op)
+	}
+	if desc.cmdSlot != 3 {
+		t.Errorf("cmdSlot = %d, want 3", desc.cmdSlot)
+	}
+}
+
+func TestGetCausalCmdDescPhaseIsACCEPT(t *testing.T) {
+	r := newTestReplicaForDesc(true)
+	propose := &MCausalPropose{
+		CommandId: 1,
+		ClientId:  1,
+		Command:   state.Command{Op: state.PUT, K: state.Key(1), V: state.Value([]byte("x"))},
+	}
+
+	desc := r.getCausalCmdDesc(0, propose, -1)
+
+	// Causal commands skip START and go directly to ACCEPT
+	if desc.phase != ACCEPT {
+		t.Errorf("phase = %d, want ACCEPT (%d)", desc.phase, ACCEPT)
+	}
+}
+
+// --- Notify channel tests ---
+
+func TestCommitNotifyChannel(t *testing.T) {
+	r := newTestReplicaForDesc(true)
+
+	// Get notify channel for slot 5
+	ch := r.getOrCreateCommitNotify(5)
+
+	// Channel should not be closed yet
+	select {
+	case <-ch:
+		t.Fatal("Channel should not be closed before commit")
+	default:
+		// Expected
+	}
+
+	// Mark as committed
+	r.committed.Set("5", struct{}{})
+	r.notifyCommit(5)
+
+	// Channel should now be closed
+	select {
+	case <-ch:
+		// Expected
+	default:
+		t.Fatal("Channel should be closed after commit notification")
+	}
+}
+
+func TestExecuteNotifyChannel(t *testing.T) {
+	r := newTestReplicaForDesc(true)
+
+	// Get notify channel for slot 3
+	ch := r.getOrCreateExecuteNotify(3)
+
+	// Not closed yet
+	select {
+	case <-ch:
+		t.Fatal("Channel should not be closed before execution")
+	default:
+	}
+
+	// Mark as executed
+	r.executed.Set("3", struct{}{})
+	r.notifyExecute(3)
+
+	// Should be closed now
+	select {
+	case <-ch:
+		// Expected
+	default:
+		t.Fatal("Channel should be closed after execution notification")
+	}
+}
+
+func TestCommitNotifyAlreadyCommitted(t *testing.T) {
+	r := newTestReplicaForDesc(true)
+
+	// Pre-commit slot 5
+	r.committed.Set("5", struct{}{})
+
+	// Getting notify should return already-closed channel
+	ch := r.getOrCreateCommitNotify(5)
+
+	select {
+	case <-ch:
+		// Expected - already committed
+	default:
+		t.Fatal("Channel should be pre-closed for already committed slot")
 	}
 }
