@@ -107,7 +107,7 @@ See original todo.md for detailed history.
 
 # CURP-HO (Hybrid Optimal)
 
-## Status: 🔧 **IN PROGRESS** (Phase 20-22 Complete, Phase 23+ Planned)
+## Status: 🔧 **IN PROGRESS** (Phase 20-23 Complete, Phase 24+ Planned)
 
 ## Design Summary
 
@@ -348,43 +348,26 @@ Slow path:
 
 ---
 
-### Phase 23: Causal Op Client-Side [HIGH PRIORITY]
+### Phase 23: Causal Op Client-Side [COMPLETE]
 
 **Goal**: Implement causal op sending (broadcast) and reply handling.
 
-- [ ] **23.1** Implement SendCausalWrite() in curp-ho/client.go
-  ```go
-  func (c *Client) SendCausalWrite(key int64, value []byte) int32 {
-      seqnum := c.getNextSeqnum()
-      causalDep := c.lastWeakSeqNum
-      c.lastWeakSeqNum = seqnum
+- [x] **23.1** Implement SendCausalWrite() in curp-ho/client.go [26:02:06]
+  - Broadcasts MCausalPropose to ALL replicas via sendMsgToAll()
+  - Tracks causal dependency chain (lastWeakSeqNum → causalDep)
 
-      p := &MCausalPropose{...}
-      c.SendMsgToAll(p, c.cs.causalProposeRPC)  // Broadcast!
-      return seqnum
-  }
-  ```
+- [x] **23.2** Implement SendCausalRead() [26:02:06]
+  - Same broadcast pattern as SendCausalWrite, with GET operation
 
-- [ ] **23.2** Implement SendCausalRead()
-  - Similar to SendCausalWrite, but with GET op
-  - Also broadcasts to all replicas
+- [x] **23.3** Implement handleCausalReply() [26:02:06]
+  - Only accepts replies from boundReplica (1-RTT completion)
+  - Marks delivered, cleans weakPending, calls RegisterReply
 
-- [ ] **23.3** Implement handleCausalReply()
-  ```go
-  func (c *Client) handleCausalReply(rep *MCausalReply) {
-      // Only process if from boundReplica
-      if rep.Replica != c.boundReplica {
-          return
-      }
-      // Mark as delivered and complete
-      c.delivered[rep.CmdId.SeqNum] = struct{}{}
-      c.RegisterReply(rep.Rep, rep.CmdId.SeqNum)
-  }
-  ```
-
-- [ ] **23.4** Update handleMsgs loop
-  - Add case for causalReplyChan
-  - Plan: docs/dev/curp-ho/phase23-client-causal-plan.md
+- [x] **23.4** Update handleMsgs loop and weak op delegation [26:02:06]
+  - Added causalReplyChan case dispatching to handleCausalReply
+  - SendWeakWrite/SendWeakRead now delegate to SendCausalWrite/SendCausalRead
+  - Added sendMsgToAll() helper, BoundReplica() accessor
+  - 10 new tests (110 total) with newTestClient helper, all passing
 
 ---
 
