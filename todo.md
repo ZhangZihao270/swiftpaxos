@@ -107,7 +107,7 @@ See original todo.md for detailed history.
 
 # CURP-HO (Hybrid Optimal)
 
-## Status: 🔧 **IN PROGRESS** (Phase 20-25 Complete, Phase 26+ Planned)
+## Status: 🔧 **IN PROGRESS** (Phase 20-26 Complete, Phase 27+ Planned)
 
 ## Design Summary
 
@@ -421,34 +421,25 @@ Slow path:
 
 ---
 
-### Phase 26: Client Fast Path with WeakDep [HIGH PRIORITY]
+### Phase 26: Client Fast Path with WeakDep [COMPLETE]
 
 **Goal**: Implement super majority fast path with weakDep consistency check.
 
-- [ ] **26.1** Update client to track weakDep in acks
-  - Modify acks MsgSet to include weakDep field
-  - Each RecordAck carries weakDep
+- [x] **26.1** Update client to track weakDep in acks
+  - MRecordAck already carries WeakDep from Phase 25
+  - MsgSet stores full MRecordAck objects with WeakDep
 
-- [ ] **26.2** Implement weakDep consistency check
-  ```go
-  func (c *Client) checkWeakDepConsistency(acks []MRecordAck) bool {
-      var firstWeakDep *CommandId
-      for _, ack := range acks {
-          if firstWeakDep == nil {
-              firstWeakDep = ack.WeakDep
-          } else if !weakDepEqual(firstWeakDep, ack.WeakDep) {
-              return false  // Inconsistent!
-          }
-      }
-      return true
-  }
-  ```
+- [x] **26.2** Implement weakDep consistency check
+  - Added `weakDepEqual(a, b *CommandId) bool` helper
+  - Added `checkWeakDepConsistency(msgs []interface{}) bool` method
+  - Checks all non-leader acks agree on the same WeakDep (or all nil)
 
-- [ ] **26.3** Modify handleAcks for super majority
-  - Change quorum from 3/4 to super majority
-  - Add weakDep consistency check
-  - If consistent, complete fast path
-  - Plan: docs/dev/curp-ho/phase26-fast-path-plan.md
+- [x] **26.3** Modify handleAcks for fast/slow path separation
+  - Split `handleAcks` into `handleFastPathAcks` (3/4 quorum + weakDep check) and `handleSlowPathAcks` (majority quorum)
+  - Fast path: checks weakDep consistency, delivers if consistent, increments slowPaths and defers to slow path if inconsistent
+  - Slow path: delivers unconditionally (leader has ordered the command)
+  - Updated `initMsgSets` to use separate handlers
+  - 21 new tests (177 total), all passing
 
 ---
 
