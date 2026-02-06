@@ -132,6 +132,26 @@ type MWeakReply struct {
 	Rep     []byte
 }
 
+// MCausalPropose - CURP-HO causal command propose (broadcast to ALL replicas).
+// Unlike MWeakPropose (leader-only), MCausalPropose goes to all replicas so
+// they can add to their witness pool for conflict detection.
+type MCausalPropose struct {
+	CommandId int32
+	ClientId  int32
+	Command   state.Command
+	Timestamp int64
+	CausalDep int32 // Sequence number of the previous causal command from this client (0 if none)
+}
+
+// MCausalReply - CURP-HO causal command reply (bound replica replies immediately).
+// The bound replica (closest to client) sends this after speculative execution.
+// No Ballot field: causal replies don't participate in ballot-based voting.
+type MCausalReply struct {
+	Replica int32
+	CmdId   CommandId
+	Rep     []byte // Speculative execution result
+}
+
 func (m *MReply) New() fastrpc.Serializable {
 	return new(MReply)
 }
@@ -172,6 +192,14 @@ func (m *MWeakReply) New() fastrpc.Serializable {
 	return new(MWeakReply)
 }
 
+func (m *MCausalPropose) New() fastrpc.Serializable {
+	return new(MCausalPropose)
+}
+
+func (m *MCausalReply) New() fastrpc.Serializable {
+	return new(MCausalReply)
+}
+
 type CommunicationSupply struct {
 	maxLatency time.Duration
 
@@ -184,9 +212,13 @@ type CommunicationSupply struct {
 	syncChan      chan fastrpc.Serializable
 	syncReplyChan chan fastrpc.Serializable
 
-	// Weak command channels
+	// Weak command channels (CURP-HT: leader-only)
 	weakProposeChan chan fastrpc.Serializable
 	weakReplyChan   chan fastrpc.Serializable
+
+	// Causal command channels (CURP-HO: broadcast to all replicas)
+	causalProposeChan chan fastrpc.Serializable
+	causalReplyChan   chan fastrpc.Serializable
 
 	replyRPC     uint8
 	acceptRPC    uint8
@@ -197,9 +229,13 @@ type CommunicationSupply struct {
 	syncRPC      uint8
 	syncReplyRPC uint8
 
-	// Weak command RPCs
+	// Weak command RPCs (CURP-HT)
 	weakProposeRPC uint8
 	weakReplyRPC   uint8
+
+	// Causal command RPCs (CURP-HO)
+	causalProposeRPC uint8
+	causalReplyRPC   uint8
 }
 
 func initCs(cs *CommunicationSupply, t *fastrpc.Table) {
@@ -223,13 +259,21 @@ func initCs(cs *CommunicationSupply, t *fastrpc.Table) {
 	cs.syncRPC = t.Register(new(MSync), cs.syncChan)
 	cs.syncReplyRPC = t.Register(new(MSyncReply), cs.syncReplyChan)
 
-	// Initialize weak command channels
+	// Initialize weak command channels (CURP-HT: leader-only)
 	cs.weakProposeChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
 	cs.weakReplyChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
 
 	// Register weak command RPCs
 	cs.weakProposeRPC = t.Register(new(MWeakPropose), cs.weakProposeChan)
 	cs.weakReplyRPC = t.Register(new(MWeakReply), cs.weakReplyChan)
+
+	// Initialize causal command channels (CURP-HO: broadcast to all replicas)
+	cs.causalProposeChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
+	cs.causalReplyChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
+
+	// Register causal command RPCs
+	cs.causalProposeRPC = t.Register(new(MCausalPropose), cs.causalProposeChan)
+	cs.causalReplyRPC = t.Register(new(MCausalReply), cs.causalReplyChan)
 }
 
 type byteReader interface {
@@ -1176,6 +1220,195 @@ func (t *MWeakReply) Unmarshal(rr io.Reader) error {
 	t.Ballot = int32((uint32(bs[4]) | (uint32(bs[5]) << 8) | (uint32(bs[6]) << 16) | (uint32(bs[7]) << 24)))
 	t.CmdId.ClientId = int32((uint32(bs[8]) | (uint32(bs[9]) << 8) | (uint32(bs[10]) << 16) | (uint32(bs[11]) << 24)))
 	t.CmdId.SeqNum = int32((uint32(bs[12]) | (uint32(bs[13]) << 8) | (uint32(bs[14]) << 16) | (uint32(bs[15]) << 24)))
+	alen1, err := binary.ReadVarint(wire)
+	if err != nil {
+		return err
+	}
+	t.Rep = make([]byte, alen1)
+	for i := int64(0); i < alen1; i++ {
+		bs = b[:1]
+		if _, err := io.ReadAtLeast(wire, bs, 1); err != nil {
+			return err
+		}
+		t.Rep[i] = byte(bs[0])
+	}
+	return nil
+}
+
+// MCausalPropose serialization (same layout as MWeakPropose)
+func (t *MCausalPropose) BinarySize() (nbytes int, sizeKnown bool) {
+	return 0, false // Variable size due to Command
+}
+
+type MCausalProposeCache struct {
+	mu    sync.Mutex
+	cache []*MCausalPropose
+}
+
+func NewMCausalProposeCache() *MCausalProposeCache {
+	c := &MCausalProposeCache{}
+	c.cache = make([]*MCausalPropose, 0)
+	return c
+}
+
+func (p *MCausalProposeCache) Get() *MCausalPropose {
+	var t *MCausalPropose
+	p.mu.Lock()
+	if len(p.cache) > 0 {
+		t = p.cache[len(p.cache)-1]
+		p.cache = p.cache[0:(len(p.cache) - 1)]
+	}
+	p.mu.Unlock()
+	if t == nil {
+		t = &MCausalPropose{}
+	}
+	return t
+}
+
+func (p *MCausalProposeCache) Put(t *MCausalPropose) {
+	p.mu.Lock()
+	p.cache = append(p.cache, t)
+	p.mu.Unlock()
+}
+
+func (t *MCausalPropose) Marshal(wire io.Writer) {
+	var b [16]byte
+	var bs []byte
+	bs = b[:8]
+	tmp32 := t.CommandId
+	bs[0] = byte(tmp32)
+	bs[1] = byte(tmp32 >> 8)
+	bs[2] = byte(tmp32 >> 16)
+	bs[3] = byte(tmp32 >> 24)
+	tmp32 = t.ClientId
+	bs[4] = byte(tmp32)
+	bs[5] = byte(tmp32 >> 8)
+	bs[6] = byte(tmp32 >> 16)
+	bs[7] = byte(tmp32 >> 24)
+	wire.Write(bs)
+	t.Command.Marshal(wire)
+	bs = b[:12]
+	tmp64 := t.Timestamp
+	bs[0] = byte(tmp64)
+	bs[1] = byte(tmp64 >> 8)
+	bs[2] = byte(tmp64 >> 16)
+	bs[3] = byte(tmp64 >> 24)
+	bs[4] = byte(tmp64 >> 32)
+	bs[5] = byte(tmp64 >> 40)
+	bs[6] = byte(tmp64 >> 48)
+	bs[7] = byte(tmp64 >> 56)
+	tmp32 = t.CausalDep
+	bs[8] = byte(tmp32)
+	bs[9] = byte(tmp32 >> 8)
+	bs[10] = byte(tmp32 >> 16)
+	bs[11] = byte(tmp32 >> 24)
+	wire.Write(bs)
+}
+
+func (t *MCausalPropose) Unmarshal(wire io.Reader) error {
+	var b [16]byte
+	var bs []byte
+	bs = b[:8]
+	if _, err := io.ReadAtLeast(wire, bs, 8); err != nil {
+		return err
+	}
+	t.CommandId = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
+	t.ClientId = int32((uint32(bs[4]) | (uint32(bs[5]) << 8) | (uint32(bs[6]) << 16) | (uint32(bs[7]) << 24)))
+	t.Command.Unmarshal(wire)
+	bs = b[:12]
+	if _, err := io.ReadAtLeast(wire, bs, 12); err != nil {
+		return err
+	}
+	t.Timestamp = int64((uint64(bs[0]) | (uint64(bs[1]) << 8) | (uint64(bs[2]) << 16) | (uint64(bs[3]) << 24) | (uint64(bs[4]) << 32) | (uint64(bs[5]) << 40) | (uint64(bs[6]) << 48) | (uint64(bs[7]) << 56)))
+	t.CausalDep = int32((uint32(bs[8]) | (uint32(bs[9]) << 8) | (uint32(bs[10]) << 16) | (uint32(bs[11]) << 24)))
+	return nil
+}
+
+// MCausalReply serialization
+// Layout: Replica(4) + CmdId(8) + varint(len(Rep)) + Rep[...]
+// No Ballot field: causal replies don't participate in ballot-based voting.
+func (t *MCausalReply) BinarySize() (nbytes int, sizeKnown bool) {
+	return 0, false // Variable size due to Rep []byte
+}
+
+type MCausalReplyCache struct {
+	mu    sync.Mutex
+	cache []*MCausalReply
+}
+
+func NewMCausalReplyCache() *MCausalReplyCache {
+	c := &MCausalReplyCache{}
+	c.cache = make([]*MCausalReply, 0)
+	return c
+}
+
+func (p *MCausalReplyCache) Get() *MCausalReply {
+	var t *MCausalReply
+	p.mu.Lock()
+	if len(p.cache) > 0 {
+		t = p.cache[len(p.cache)-1]
+		p.cache = p.cache[0:(len(p.cache) - 1)]
+	}
+	p.mu.Unlock()
+	if t == nil {
+		t = &MCausalReply{}
+	}
+	return t
+}
+
+func (p *MCausalReplyCache) Put(t *MCausalReply) {
+	p.mu.Lock()
+	p.cache = append(p.cache, t)
+	p.mu.Unlock()
+}
+
+func (t *MCausalReply) Marshal(wire io.Writer) {
+	var b [12]byte
+	var bs []byte
+	bs = b[:12]
+	tmp32 := t.Replica
+	bs[0] = byte(tmp32)
+	bs[1] = byte(tmp32 >> 8)
+	bs[2] = byte(tmp32 >> 16)
+	bs[3] = byte(tmp32 >> 24)
+	tmp32 = t.CmdId.ClientId
+	bs[4] = byte(tmp32)
+	bs[5] = byte(tmp32 >> 8)
+	bs[6] = byte(tmp32 >> 16)
+	bs[7] = byte(tmp32 >> 24)
+	tmp32 = t.CmdId.SeqNum
+	bs[8] = byte(tmp32)
+	bs[9] = byte(tmp32 >> 8)
+	bs[10] = byte(tmp32 >> 16)
+	bs[11] = byte(tmp32 >> 24)
+	wire.Write(bs)
+	bs = b[:]
+	alen1 := int64(len(t.Rep))
+	if wlen := binary.PutVarint(bs, alen1); wlen >= 0 {
+		wire.Write(b[0:wlen])
+	}
+	for i := int64(0); i < alen1; i++ {
+		bs = b[:1]
+		bs[0] = byte(t.Rep[i])
+		wire.Write(bs)
+	}
+}
+
+func (t *MCausalReply) Unmarshal(rr io.Reader) error {
+	var wire byteReader
+	var ok bool
+	if wire, ok = rr.(byteReader); !ok {
+		wire = bufio.NewReader(rr)
+	}
+	var b [12]byte
+	var bs []byte
+	bs = b[:12]
+	if _, err := io.ReadAtLeast(wire, bs, 12); err != nil {
+		return err
+	}
+	t.Replica = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
+	t.CmdId.ClientId = int32((uint32(bs[4]) | (uint32(bs[5]) << 8) | (uint32(bs[6]) << 16) | (uint32(bs[7]) << 24)))
+	t.CmdId.SeqNum = int32((uint32(bs[8]) | (uint32(bs[9]) << 8) | (uint32(bs[10]) << 16) | (uint32(bs[11]) << 24)))
 	alen1, err := binary.ReadVarint(wire)
 	if err != nil {
 		return err

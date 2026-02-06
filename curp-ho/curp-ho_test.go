@@ -1935,3 +1935,380 @@ func TestStrongOpSeesWitnessFromBoundClient(t *testing.T) {
 		t.Errorf("val = %q, want causal-val", val)
 	}
 }
+
+// ============================================================================
+// Phase 22: Causal Op Message Protocol Tests
+// These tests verify the MCausalPropose and MCausalReply message types,
+// their serialization/deserialization, cache pooling, and RPC registration.
+// ============================================================================
+
+// --- MCausalPropose serialization tests ---
+
+func TestMCausalProposeSerialization(t *testing.T) {
+	original := &MCausalPropose{
+		CommandId: 42,
+		ClientId:  100,
+		Command: state.Command{
+			Op: state.PUT,
+			K:  state.Key(123),
+			V:  []byte("test-value"),
+		},
+		Timestamp: 1234567890,
+		CausalDep: 41,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	restored := &MCausalPropose{}
+	if err := restored.Unmarshal(&buf); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if restored.CommandId != original.CommandId {
+		t.Errorf("CommandId mismatch: got %d, want %d", restored.CommandId, original.CommandId)
+	}
+	if restored.ClientId != original.ClientId {
+		t.Errorf("ClientId mismatch: got %d, want %d", restored.ClientId, original.ClientId)
+	}
+	if restored.Timestamp != original.Timestamp {
+		t.Errorf("Timestamp mismatch: got %d, want %d", restored.Timestamp, original.Timestamp)
+	}
+	if restored.CausalDep != original.CausalDep {
+		t.Errorf("CausalDep mismatch: got %d, want %d", restored.CausalDep, original.CausalDep)
+	}
+	if restored.Command.Op != original.Command.Op {
+		t.Errorf("Command.Op mismatch: got %d, want %d", restored.Command.Op, original.Command.Op)
+	}
+	if !bytes.Equal(restored.Command.V, original.Command.V) {
+		t.Errorf("Command.V mismatch: got %v, want %v", restored.Command.V, original.Command.V)
+	}
+}
+
+func TestMCausalProposeWithEmptyCommand(t *testing.T) {
+	original := &MCausalPropose{
+		CommandId: 1,
+		ClientId:  1,
+		Command: state.Command{
+			Op: state.GET,
+			K:  state.Key(0),
+			V:  state.NIL(),
+		},
+		Timestamp: 0,
+		CausalDep: 0,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	restored := &MCausalPropose{}
+	if err := restored.Unmarshal(&buf); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if restored.Command.Op != state.GET {
+		t.Errorf("Command.Op mismatch: got %d, want GET", restored.Command.Op)
+	}
+	if restored.CausalDep != 0 {
+		t.Errorf("CausalDep should be 0, got %d", restored.CausalDep)
+	}
+}
+
+func TestMCausalProposeWithLargeValue(t *testing.T) {
+	largeValue := make([]byte, 1024)
+	for i := range largeValue {
+		largeValue[i] = byte(i % 256)
+	}
+
+	original := &MCausalPropose{
+		CommandId: 999,
+		ClientId:  500,
+		Command: state.Command{
+			Op: state.PUT,
+			K:  state.Key(42),
+			V:  largeValue,
+		},
+		Timestamp: 9876543210,
+		CausalDep: 998,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	restored := &MCausalPropose{}
+	if err := restored.Unmarshal(&buf); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if !bytes.Equal(restored.Command.V, original.Command.V) {
+		t.Error("Large value mismatch after serialization round-trip")
+	}
+}
+
+// --- MCausalReply serialization tests ---
+
+func TestMCausalReplySerialization(t *testing.T) {
+	original := &MCausalReply{
+		Replica: 1,
+		CmdId:   CommandId{ClientId: 100, SeqNum: 42},
+		Rep:     []byte("result-value"),
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	restored := &MCausalReply{}
+	if err := restored.Unmarshal(&buf); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if restored.Replica != original.Replica {
+		t.Errorf("Replica mismatch: got %d, want %d", restored.Replica, original.Replica)
+	}
+	if restored.CmdId != original.CmdId {
+		t.Errorf("CmdId mismatch: got %v, want %v", restored.CmdId, original.CmdId)
+	}
+	if !bytes.Equal(restored.Rep, original.Rep) {
+		t.Errorf("Rep mismatch: got %v, want %v", restored.Rep, original.Rep)
+	}
+}
+
+func TestMCausalReplyWithEmptyRep(t *testing.T) {
+	original := &MCausalReply{
+		Replica: 0,
+		CmdId:   CommandId{ClientId: 1, SeqNum: 1},
+		Rep:     []byte{},
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	restored := &MCausalReply{}
+	if err := restored.Unmarshal(&buf); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if len(restored.Rep) != 0 {
+		t.Errorf("Rep should be empty, got %v", restored.Rep)
+	}
+}
+
+func TestMCausalReplyNoBallot(t *testing.T) {
+	// MCausalReply intentionally has NO Ballot field (unlike MWeakReply).
+	// Verify this by checking that serialization only has Replica(4) + CmdId(8) + varint + Rep
+	reply := &MCausalReply{
+		Replica: 2,
+		CmdId:   CommandId{ClientId: 50, SeqNum: 10},
+		Rep:     []byte{}, // Empty rep for predictable size
+	}
+
+	var buf bytes.Buffer
+	reply.Marshal(&buf)
+
+	// Fixed header: Replica(4) + CmdId.ClientId(4) + CmdId.SeqNum(4) = 12 bytes
+	// Plus varint(0) = 1 byte for empty Rep
+	expectedSize := 12 + 1
+	if buf.Len() != expectedSize {
+		t.Errorf("MCausalReply size = %d, want %d (no Ballot field)", buf.Len(), expectedSize)
+	}
+}
+
+// --- BinarySize tests ---
+
+func TestMCausalProposeBinarySize(t *testing.T) {
+	m := &MCausalPropose{}
+	size, known := m.BinarySize()
+	if known {
+		t.Error("MCausalPropose size should not be known (variable due to Command)")
+	}
+	if size != 0 {
+		t.Errorf("size = %d, want 0", size)
+	}
+}
+
+func TestMCausalReplyBinarySize(t *testing.T) {
+	m := &MCausalReply{}
+	size, known := m.BinarySize()
+	if known {
+		t.Error("MCausalReply size should not be known (variable due to Rep)")
+	}
+	if size != 0 {
+		t.Errorf("size = %d, want 0", size)
+	}
+}
+
+// --- New() method tests ---
+
+func TestMCausalProposeNew(t *testing.T) {
+	m := &MCausalPropose{}
+	n := m.New()
+	if n == nil {
+		t.Error("MCausalPropose.New() returned nil")
+	}
+	if _, ok := n.(*MCausalPropose); !ok {
+		t.Error("MCausalPropose.New() returned wrong type")
+	}
+}
+
+func TestMCausalReplyNew(t *testing.T) {
+	m := &MCausalReply{}
+	n := m.New()
+	if n == nil {
+		t.Error("MCausalReply.New() returned nil")
+	}
+	if _, ok := n.(*MCausalReply); !ok {
+		t.Error("MCausalReply.New() returned wrong type")
+	}
+}
+
+// --- Cache pool tests ---
+
+func TestMCausalProposeCache(t *testing.T) {
+	cache := NewMCausalProposeCache()
+
+	// Get from empty cache
+	obj := cache.Get()
+	if obj == nil {
+		t.Fatal("Get from empty cache returned nil")
+	}
+
+	// Populate and put back
+	obj.CommandId = 123
+	obj.ClientId = 456
+	cache.Put(obj)
+
+	// Get reused object
+	obj2 := cache.Get()
+	if obj2 == nil {
+		t.Fatal("Get after Put returned nil")
+	}
+}
+
+func TestMCausalReplyCache(t *testing.T) {
+	cache := NewMCausalReplyCache()
+
+	// Get from empty cache
+	obj := cache.Get()
+	if obj == nil {
+		t.Fatal("Get from empty cache returned nil")
+	}
+
+	// Populate and put back
+	obj.Replica = 5
+	obj.Rep = []byte("cached-result")
+	cache.Put(obj)
+
+	// Get reused object
+	obj2 := cache.Get()
+	if obj2 == nil {
+		t.Fatal("Get after Put returned nil")
+	}
+}
+
+func TestMCausalProposeCacheMultiple(t *testing.T) {
+	cache := NewMCausalProposeCache()
+
+	// Put multiple objects
+	for i := 0; i < 5; i++ {
+		obj := &MCausalPropose{CommandId: int32(i)}
+		cache.Put(obj)
+	}
+
+	// Get all back
+	for i := 0; i < 5; i++ {
+		obj := cache.Get()
+		if obj == nil {
+			t.Fatalf("Get %d returned nil", i)
+		}
+	}
+
+	// Extra get should still return a new object (not nil)
+	obj := cache.Get()
+	if obj == nil {
+		t.Fatal("Get from depleted cache returned nil (should create new)")
+	}
+}
+
+// --- Comparison: MCausalPropose vs MWeakPropose field compatibility ---
+
+func TestCausalProposeMatchesWeakProposeFields(t *testing.T) {
+	// MCausalPropose should have the same fields as MWeakPropose
+	// This ensures protocol compatibility during transition
+	causal := &MCausalPropose{
+		CommandId: 42,
+		ClientId:  100,
+		Command: state.Command{
+			Op: state.PUT,
+			K:  state.Key(1),
+			V:  []byte("val"),
+		},
+		Timestamp: 12345,
+		CausalDep: 41,
+	}
+
+	weak := &MWeakPropose{
+		CommandId: causal.CommandId,
+		ClientId:  causal.ClientId,
+		Command:   causal.Command,
+		Timestamp: causal.Timestamp,
+		CausalDep: causal.CausalDep,
+	}
+
+	// Serialize both and compare
+	var causalBuf, weakBuf bytes.Buffer
+	causal.Marshal(&causalBuf)
+	weak.Marshal(&weakBuf)
+
+	if !bytes.Equal(causalBuf.Bytes(), weakBuf.Bytes()) {
+		t.Error("MCausalPropose and MWeakPropose should have identical wire format")
+	}
+}
+
+// --- Serialization round-trip with all zero values ---
+
+func TestMCausalProposeZeroValues(t *testing.T) {
+	original := &MCausalPropose{
+		CommandId: 0,
+		ClientId:  0,
+		Command: state.Command{
+			Op: 0,
+			K:  state.Key(0),
+			V:  state.NIL(),
+		},
+		Timestamp: 0,
+		CausalDep: 0,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	restored := &MCausalPropose{}
+	if err := restored.Unmarshal(&buf); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if restored.CommandId != 0 || restored.ClientId != 0 ||
+		restored.Timestamp != 0 || restored.CausalDep != 0 {
+		t.Error("Zero values not preserved in round-trip")
+	}
+}
+
+func TestMCausalReplyZeroValues(t *testing.T) {
+	original := &MCausalReply{
+		Replica: 0,
+		CmdId:   CommandId{ClientId: 0, SeqNum: 0},
+		Rep:     state.NIL(),
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	restored := &MCausalReply{}
+	if err := restored.Unmarshal(&buf); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if restored.Replica != 0 || restored.CmdId.ClientId != 0 || restored.CmdId.SeqNum != 0 {
+		t.Error("Zero values not preserved in round-trip")
+	}
+}
