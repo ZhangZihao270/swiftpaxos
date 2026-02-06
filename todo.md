@@ -107,7 +107,7 @@ See original todo.md for detailed history.
 
 # CURP-HO (Hybrid Optimal)
 
-## Status: 🔧 **IN PROGRESS** (Phase 20-21 Complete, Phase 22+ Planned)
+## Status: 🔧 **IN PROGRESS** (Phase 20-22 Complete, Phase 23+ Planned)
 
 ## Design Summary
 
@@ -323,38 +323,28 @@ Slow path:
 
 ---
 
-### Phase 22: Causal Op Message Protocol [HIGH PRIORITY]
+### Phase 22: Causal Op Message Protocol [COMPLETE]
 
 **Goal**: Define messages for causal ops (broadcast, reply from bound replica).
 
-- [ ] **22.1** Define MCausalPropose message in curp-ho/defs.go
-  ```go
-  type MCausalPropose struct {
-      CommandId int32
-      ClientId  int32
-      Command   state.Command
-      CausalDep int32  // Previous causal command seqnum
-      Timestamp int64
-  }
-  ```
+- [x] **22.1** Define MCausalPropose message in curp-ho/defs.go [26:02:06]
+  - Same fields as MWeakPropose: CommandId, ClientId, Command, Timestamp, CausalDep
+  - Identical wire format (verified by test: `TestCausalProposeMatchesWeakProposeFields`)
+  - Semantic difference: broadcast to ALL replicas (not leader-only)
 
-- [ ] **22.2** Define MCausalReply message
-  ```go
-  type MCausalReply struct {
-      Replica int32
-      CmdId   CommandId
-      Rep     []byte  // Speculative result
-  }
-  ```
+- [x] **22.2** Define MCausalReply message [26:02:06]
+  - Fields: Replica int32, CmdId CommandId, Rep []byte
+  - No Ballot field (causal replies don't participate in ballot-based voting)
+  - Sent by bound replica only after speculative execution
 
-- [ ] **22.3** Implement serialization methods
-  - BinarySize(), Marshal(), Unmarshal(), New()
-  - Add cache structures for object pooling
+- [x] **22.3** Implement serialization methods [26:02:06]
+  - BinarySize(), Marshal(), Unmarshal(), New() for both messages
+  - MCausalProposeCache, MCausalReplyCache for object pooling
 
-- [ ] **22.4** Register RPC channels in initCs()
-  - causalProposeChan, causalReplyChan
-  - Register RPCs with fastrpc table
-  - Plan: docs/dev/curp-ho/phase22-messages-plan.md
+- [x] **22.4** Register RPC channels in initCs() [26:02:06]
+  - causalProposeChan, causalReplyChan channels
+  - causalProposeRPC, causalReplyRPC registered with fastrpc table
+  - 18 new tests (100 total in curp-ho), all passing
 
 ---
 
