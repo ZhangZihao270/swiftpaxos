@@ -121,10 +121,10 @@ func (c *Client) initMsgSets(cmdId CommandId) {
 	}
 
 	if initAcks {
-		c.acks[cmdId] = c.acks[cmdId].ReinitMsgSet(c.Q, accept, func(interface{}) {}, c.handleAcks)
+		c.acks[cmdId] = c.acks[cmdId].ReinitMsgSet(c.Q, accept, func(interface{}) {}, c.handleFastPathAcks)
 	}
 	if initMacks {
-		c.macks[cmdId] = c.macks[cmdId].ReinitMsgSet(c.M, accept, func(interface{}) {}, c.handleAcks)
+		c.macks[cmdId] = c.macks[cmdId].ReinitMsgSet(c.M, accept, func(interface{}) {}, c.handleSlowPathAcks)
 	}
 }
 
@@ -239,7 +239,43 @@ func (c *Client) handleSyncReply(rep *MSyncReply) {
 	c.Println("Slow Paths:", c.slowPaths)
 }
 
-func (c *Client) handleAcks(leaderMsg interface{}, msgs []interface{}) {
+// handleFastPathAcks handles the fast path (3/4 quorum) with weakDep consistency check.
+// If weakDeps are consistent across all non-leader acks, the operation completes.
+// If inconsistent, the operation falls back to the slow path (via macks).
+func (c *Client) handleFastPathAcks(leaderMsg interface{}, msgs []interface{}) {
+	if leaderMsg == nil {
+		return
+	}
+
+	cmdId := leaderMsg.(*MRecordAck).CmdId
+
+	// Check weakDep consistency among non-leader acks
+	if !c.checkWeakDepConsistency(msgs) {
+		// Inconsistent weakDeps - cannot complete on fast path
+		c.mu.Lock()
+		if _, exists := c.alreadySlow[cmdId]; !exists {
+			c.alreadySlow[cmdId] = struct{}{}
+			c.slowPaths++
+		}
+		c.mu.Unlock()
+		return
+	}
+
+	// Consistent weakDeps - deliver on fast path
+	c.mu.Lock()
+	if _, exists := c.delivered[cmdId.SeqNum]; exists {
+		c.mu.Unlock()
+		return
+	}
+	c.delivered[cmdId.SeqNum] = struct{}{}
+	c.mu.Unlock()
+	c.RegisterReply(c.val, cmdId.SeqNum)
+	c.Println("Slow Paths:", c.slowPaths)
+}
+
+// handleSlowPathAcks handles the slow path (majority quorum).
+// No weakDep consistency check needed - the leader has ordered the command.
+func (c *Client) handleSlowPathAcks(leaderMsg interface{}, msgs []interface{}) {
 	if leaderMsg == nil {
 		return
 	}
@@ -249,7 +285,6 @@ func (c *Client) handleAcks(leaderMsg interface{}, msgs []interface{}) {
 		c.mu.Unlock()
 		return
 	}
-
 	c.delivered[leaderMsg.(*MRecordAck).CmdId.SeqNum] = struct{}{}
 	c.mu.Unlock()
 	c.RegisterReply(c.val, leaderMsg.(*MRecordAck).CmdId.SeqNum)
@@ -414,4 +449,33 @@ func (c *Client) sendMsgToAll(code uint8, msg fastrpc.Serializable) {
 // BoundReplica returns the ID of the replica this client is bound to.
 func (c *Client) BoundReplica() int32 {
 	return c.boundReplica
+}
+
+// weakDepEqual checks if two optional WeakDep pointers are equal.
+// Both nil = equal. One nil, one non-nil = not equal. Both non-nil = compare fields.
+func weakDepEqual(a, b *CommandId) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return a.ClientId == b.ClientId && a.SeqNum == b.SeqNum
+}
+
+// checkWeakDepConsistency checks if all non-leader acks have consistent weakDeps.
+// Returns true if all acks agree on the same weakDep (including all nil).
+func (c *Client) checkWeakDepConsistency(msgs []interface{}) bool {
+	if len(msgs) == 0 {
+		return true
+	}
+	firstAck := msgs[0].(*MRecordAck)
+	firstWeakDep := firstAck.WeakDep
+	for _, msg := range msgs[1:] {
+		ack := msg.(*MRecordAck)
+		if !weakDepEqual(firstWeakDep, ack.WeakDep) {
+			return false
+		}
+	}
+	return true
 }

@@ -3660,3 +3660,407 @@ func TestStrongWriteWithCausalWriteInWitnessPool(t *testing.T) {
 		t.Errorf("weakDep = %v, want %v", weakDep, causalId)
 	}
 }
+
+// ============================================================================
+// Phase 26: Client Fast Path with WeakDep Tests
+// ============================================================================
+
+// --- 26.2: weakDepEqual helper ---
+
+func TestWeakDepEqual(t *testing.T) {
+	tests := []struct {
+		name     string
+		a, b     *CommandId
+		expected bool
+	}{
+		{"both nil", nil, nil, true},
+		{"a nil b non-nil", nil, &CommandId{1, 1}, false},
+		{"a non-nil b nil", &CommandId{1, 1}, nil, false},
+		{"same values", &CommandId{1, 5}, &CommandId{1, 5}, true},
+		{"different client", &CommandId{1, 5}, &CommandId{2, 5}, false},
+		{"different seqnum", &CommandId{1, 5}, &CommandId{1, 6}, false},
+		{"both different", &CommandId{1, 5}, &CommandId{2, 6}, false},
+		{"zero values", &CommandId{0, 0}, &CommandId{0, 0}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := weakDepEqual(tt.a, tt.b)
+			if result != tt.expected {
+				t.Errorf("weakDepEqual(%v, %v) = %v, want %v", tt.a, tt.b, result, tt.expected)
+			}
+		})
+	}
+}
+
+// --- 26.2: checkWeakDepConsistency ---
+
+func TestCheckWeakDepConsistencyEmpty(t *testing.T) {
+	c := &Client{}
+	if !c.checkWeakDepConsistency(nil) {
+		t.Error("nil msgs should be consistent")
+	}
+	if !c.checkWeakDepConsistency([]interface{}{}) {
+		t.Error("empty slice should be consistent")
+	}
+}
+
+func TestCheckWeakDepConsistencyAllNil(t *testing.T) {
+	c := &Client{}
+	msgs := []interface{}{
+		&MRecordAck{Replica: 1, WeakDep: nil},
+		&MRecordAck{Replica: 2, WeakDep: nil},
+		&MRecordAck{Replica: 3, WeakDep: nil},
+	}
+	if !c.checkWeakDepConsistency(msgs) {
+		t.Error("all nil weakDeps should be consistent")
+	}
+}
+
+func TestCheckWeakDepConsistencyAllSame(t *testing.T) {
+	c := &Client{}
+	msgs := []interface{}{
+		&MRecordAck{Replica: 1, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
+		&MRecordAck{Replica: 2, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
+		&MRecordAck{Replica: 3, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
+	}
+	if !c.checkWeakDepConsistency(msgs) {
+		t.Error("all same weakDeps should be consistent")
+	}
+}
+
+func TestCheckWeakDepConsistencyMixedNilNonNil(t *testing.T) {
+	c := &Client{}
+	msgs := []interface{}{
+		&MRecordAck{Replica: 1, WeakDep: nil},
+		&MRecordAck{Replica: 2, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
+	}
+	if c.checkWeakDepConsistency(msgs) {
+		t.Error("mixed nil/non-nil should be inconsistent")
+	}
+}
+
+func TestCheckWeakDepConsistencyDifferentSeqNum(t *testing.T) {
+	c := &Client{}
+	msgs := []interface{}{
+		&MRecordAck{Replica: 1, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
+		&MRecordAck{Replica: 2, WeakDep: &CommandId{ClientId: 10, SeqNum: 6}},
+	}
+	if c.checkWeakDepConsistency(msgs) {
+		t.Error("different seqnums should be inconsistent")
+	}
+}
+
+func TestCheckWeakDepConsistencyDifferentClient(t *testing.T) {
+	c := &Client{}
+	msgs := []interface{}{
+		&MRecordAck{Replica: 1, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
+		&MRecordAck{Replica: 2, WeakDep: &CommandId{ClientId: 11, SeqNum: 5}},
+	}
+	if c.checkWeakDepConsistency(msgs) {
+		t.Error("different client IDs should be inconsistent")
+	}
+}
+
+func TestCheckWeakDepConsistencySingle(t *testing.T) {
+	c := &Client{}
+	msgs := []interface{}{
+		&MRecordAck{Replica: 1, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
+	}
+	if !c.checkWeakDepConsistency(msgs) {
+		t.Error("single message should be consistent")
+	}
+}
+
+func TestCheckWeakDepConsistencyThreeWayInconsistent(t *testing.T) {
+	c := &Client{}
+	// First two agree, third differs
+	msgs := []interface{}{
+		&MRecordAck{Replica: 1, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
+		&MRecordAck{Replica: 2, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
+		&MRecordAck{Replica: 3, WeakDep: &CommandId{ClientId: 10, SeqNum: 7}},
+	}
+	if c.checkWeakDepConsistency(msgs) {
+		t.Error("third ack differs, should be inconsistent")
+	}
+}
+
+// --- 26.3: handleFastPathAcks ---
+
+func TestHandleFastPathAcksNilLeader(t *testing.T) {
+	c := &Client{
+		delivered:   make(map[int32]struct{}),
+		alreadySlow: make(map[CommandId]struct{}),
+	}
+	// Should return without panic when leaderMsg is nil
+	c.handleFastPathAcks(nil, []interface{}{})
+	if len(c.delivered) != 0 {
+		t.Error("nil leader should not deliver")
+	}
+}
+
+func TestHandleFastPathAcksInconsistentWeakDeps(t *testing.T) {
+	c := &Client{
+		delivered:   make(map[int32]struct{}),
+		alreadySlow: make(map[CommandId]struct{}),
+	}
+	leaderMsg := &MRecordAck{
+		Replica: 0,
+		CmdId:   CommandId{ClientId: 1, SeqNum: 1},
+		Ok:      TRUE,
+	}
+	msgs := []interface{}{
+		&MRecordAck{Replica: 1, WeakDep: nil},
+		&MRecordAck{Replica: 2, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
+	}
+	c.handleFastPathAcks(leaderMsg, msgs)
+
+	// Should NOT deliver
+	if _, exists := c.delivered[1]; exists {
+		t.Error("inconsistent weakDeps should not deliver on fast path")
+	}
+	// Should increment slowPaths
+	if c.slowPaths != 1 {
+		t.Errorf("slowPaths = %d, want 1", c.slowPaths)
+	}
+	// Should mark as alreadySlow
+	cmdId := CommandId{ClientId: 1, SeqNum: 1}
+	if _, exists := c.alreadySlow[cmdId]; !exists {
+		t.Error("should be marked as alreadySlow")
+	}
+}
+
+func TestHandleFastPathAcksInconsistentNoDuplicateCount(t *testing.T) {
+	c := &Client{
+		delivered:   make(map[int32]struct{}),
+		alreadySlow: make(map[CommandId]struct{}),
+	}
+	leaderMsg := &MRecordAck{
+		Replica: 0,
+		CmdId:   CommandId{ClientId: 1, SeqNum: 1},
+		Ok:      TRUE,
+	}
+	msgs := []interface{}{
+		&MRecordAck{Replica: 1, WeakDep: nil},
+		&MRecordAck{Replica: 2, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
+	}
+	// Call twice (simulating quorum callback firing again)
+	c.handleFastPathAcks(leaderMsg, msgs)
+	c.handleFastPathAcks(leaderMsg, msgs)
+
+	// slowPaths should only be incremented once
+	if c.slowPaths != 1 {
+		t.Errorf("slowPaths = %d, want 1 (no duplicate counting)", c.slowPaths)
+	}
+}
+
+func TestHandleFastPathAcksAlreadyDelivered(t *testing.T) {
+	c := &Client{
+		delivered:   make(map[int32]struct{}),
+		alreadySlow: make(map[CommandId]struct{}),
+	}
+	// Pre-deliver
+	c.delivered[1] = struct{}{}
+
+	leaderMsg := &MRecordAck{
+		Replica: 0,
+		CmdId:   CommandId{ClientId: 1, SeqNum: 1},
+		Ok:      TRUE,
+	}
+	msgs := []interface{}{
+		&MRecordAck{Replica: 1, WeakDep: nil},
+		&MRecordAck{Replica: 2, WeakDep: nil},
+	}
+	// Consistent weakDeps but already delivered - should return without panic
+	c.handleFastPathAcks(leaderMsg, msgs)
+	// No additional delivery attempt (no panic from nil BufferClient)
+}
+
+func TestHandleFastPathAcksConsistentEmptyMsgs(t *testing.T) {
+	c := &Client{
+		delivered:   make(map[int32]struct{}),
+		alreadySlow: make(map[CommandId]struct{}),
+	}
+	// Pre-deliver to avoid calling RegisterReply
+	c.delivered[1] = struct{}{}
+
+	leaderMsg := &MRecordAck{
+		Replica: 0,
+		CmdId:   CommandId{ClientId: 1, SeqNum: 1},
+		Ok:      TRUE,
+	}
+	// Empty msgs is consistent
+	c.handleFastPathAcks(leaderMsg, []interface{}{})
+	// Should not mark as slow
+	if c.slowPaths != 0 {
+		t.Errorf("slowPaths = %d, want 0", c.slowPaths)
+	}
+}
+
+// --- 26.3: handleSlowPathAcks ---
+
+func TestHandleSlowPathAcksNilLeader(t *testing.T) {
+	c := &Client{
+		delivered: make(map[int32]struct{}),
+	}
+	c.handleSlowPathAcks(nil, []interface{}{})
+	if len(c.delivered) != 0 {
+		t.Error("nil leader should not deliver")
+	}
+}
+
+func TestHandleSlowPathAcksAlreadyDelivered(t *testing.T) {
+	c := &Client{
+		delivered: make(map[int32]struct{}),
+	}
+	c.delivered[1] = struct{}{}
+
+	leaderMsg := &MRecordAck{
+		Replica: 0,
+		CmdId:   CommandId{ClientId: 1, SeqNum: 1},
+	}
+	// Should return without panic (already delivered)
+	c.handleSlowPathAcks(leaderMsg, []interface{}{})
+}
+
+func TestHandleSlowPathIgnoresWeakDepInconsistency(t *testing.T) {
+	c := &Client{
+		delivered: make(map[int32]struct{}),
+	}
+	// Pre-deliver to avoid calling RegisterReply
+	c.delivered[1] = struct{}{}
+
+	leaderMsg := &MRecordAck{
+		Replica: 0,
+		CmdId:   CommandId{ClientId: 1, SeqNum: 1},
+	}
+	// Inconsistent weakDeps - slow path doesn't check, just delivers
+	msgs := []interface{}{
+		&MRecordAck{Replica: 1, WeakDep: nil},
+		&MRecordAck{Replica: 2, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
+	}
+	// Should not panic; already delivered so returns early
+	c.handleSlowPathAcks(leaderMsg, msgs)
+}
+
+// --- 26: Integration tests ---
+
+func TestFastPathSlowPathFallback(t *testing.T) {
+	c := &Client{
+		delivered:   make(map[int32]struct{}),
+		alreadySlow: make(map[CommandId]struct{}),
+	}
+	cmdId := CommandId{ClientId: 1, SeqNum: 1}
+	leaderMsg := &MRecordAck{
+		Replica: 0,
+		CmdId:   cmdId,
+		Ok:      TRUE,
+	}
+
+	// Step 1: Fast path fails due to inconsistent weakDeps
+	fastMsgs := []interface{}{
+		&MRecordAck{Replica: 1, WeakDep: nil},
+		&MRecordAck{Replica: 2, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
+	}
+	c.handleFastPathAcks(leaderMsg, fastMsgs)
+
+	// Verify: not delivered, marked slow
+	if _, exists := c.delivered[1]; exists {
+		t.Error("should not be delivered after fast path failure")
+	}
+	if c.slowPaths != 1 {
+		t.Errorf("slowPaths = %d, want 1", c.slowPaths)
+	}
+
+	// Step 2: Slow path delivers (we mark delivered manually to avoid RegisterReply)
+	c.delivered[1] = struct{}{} // Simulating slow path delivery
+
+	// Step 3: Fast path called again (e.g., more acks arrive) - should be no-op
+	c.handleFastPathAcks(leaderMsg, []interface{}{
+		&MRecordAck{Replica: 1, WeakDep: nil},
+		&MRecordAck{Replica: 2, WeakDep: nil},
+	})
+	// Should still be delivered, no change
+	if _, exists := c.delivered[1]; !exists {
+		t.Error("should still be delivered")
+	}
+}
+
+func TestMultipleCommandsIndependent(t *testing.T) {
+	c := &Client{
+		delivered:   make(map[int32]struct{}),
+		alreadySlow: make(map[CommandId]struct{}),
+	}
+
+	// Command 1: inconsistent (falls back to slow path)
+	cmd1Leader := &MRecordAck{Replica: 0, CmdId: CommandId{ClientId: 1, SeqNum: 1}, Ok: TRUE}
+	cmd1Msgs := []interface{}{
+		&MRecordAck{Replica: 1, WeakDep: nil},
+		&MRecordAck{Replica: 2, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
+	}
+	c.handleFastPathAcks(cmd1Leader, cmd1Msgs)
+
+	// Command 2: consistent (should be deliverable, but we pre-deliver to avoid RegisterReply)
+	c.delivered[2] = struct{}{}
+	cmd2Leader := &MRecordAck{Replica: 0, CmdId: CommandId{ClientId: 1, SeqNum: 2}, Ok: TRUE}
+	cmd2Msgs := []interface{}{
+		&MRecordAck{Replica: 1, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
+		&MRecordAck{Replica: 2, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
+	}
+	c.handleFastPathAcks(cmd2Leader, cmd2Msgs)
+
+	// Command 1 should NOT be delivered, command 2 should be (pre-set)
+	if _, exists := c.delivered[1]; exists {
+		t.Error("command 1 should not be delivered on fast path")
+	}
+	if c.slowPaths != 1 {
+		t.Errorf("slowPaths = %d, want 1 (only command 1 is slow)", c.slowPaths)
+	}
+}
+
+func TestInitMsgSetsSeparateHandlers(t *testing.T) {
+	c := &Client{
+		Q:           replica.NewThreeQuartersOf(3),
+		M:           replica.NewMajorityOf(3),
+		acks:        make(map[CommandId]*replica.MsgSet),
+		macks:       make(map[CommandId]*replica.MsgSet),
+		delivered:   make(map[int32]struct{}),
+		alreadySlow: make(map[CommandId]struct{}),
+	}
+
+	cmdId := CommandId{ClientId: 1, SeqNum: 1}
+	c.initMsgSets(cmdId)
+
+	// Verify both MsgSets are initialized
+	if c.acks[cmdId] == nil {
+		t.Error("acks MsgSet should be initialized")
+	}
+	if c.macks[cmdId] == nil {
+		t.Error("macks MsgSet should be initialized")
+	}
+}
+
+func TestInitMsgSetsIdempotent(t *testing.T) {
+	c := &Client{
+		Q:           replica.NewThreeQuartersOf(3),
+		M:           replica.NewMajorityOf(3),
+		acks:        make(map[CommandId]*replica.MsgSet),
+		macks:       make(map[CommandId]*replica.MsgSet),
+		delivered:   make(map[int32]struct{}),
+		alreadySlow: make(map[CommandId]struct{}),
+	}
+
+	cmdId := CommandId{ClientId: 1, SeqNum: 1}
+	c.initMsgSets(cmdId)
+	acks1 := c.acks[cmdId]
+	macks1 := c.macks[cmdId]
+
+	// Call again - should not reinitialize
+	c.initMsgSets(cmdId)
+	if c.acks[cmdId] != acks1 {
+		t.Error("acks MsgSet should not be reinitialized")
+	}
+	if c.macks[cmdId] != macks1 {
+		t.Error("macks MsgSet should not be reinitialized")
+	}
+}
