@@ -57,7 +57,11 @@ All phases completed successfully. See detailed tasks below.
 
 #### Optimization Candidates
 
-- [ ] **18.1** Increase MaxDescRoutines (500 → 10000)
+- [x] **18.1** Increase MaxDescRoutines (500 → 10000) [26:02:06]
+  - Changed default from 500 to 10000 in curp-ht/defs.go and curp-ho/defs.go
+  - Added `MaxDescRoutines` config parameter (configurable via config file)
+  - run.go now uses protocol defaults unless config overrides (removed hardcoded 100)
+  - Config value 0 = use protocol default (10000), >0 = override
 - [ ] **18.2** Remove weak command spin-wait overhead
 - [ ] **18.3** Increase client pipeline depth (pendings: 5 → 10/20)
 - [ ] **18.4** Reduce channel buffer contention

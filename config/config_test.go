@@ -650,3 +650,143 @@ func TestGetNumClientThreadsConcurrent(t *testing.T) {
 		<-done
 	}
 }
+
+// TestMaxDescRoutinesConfig tests parsing of maxDescRoutines configuration parameter
+func TestMaxDescRoutinesConfig(t *testing.T) {
+	content := `
+maxDescRoutines 5000
+`
+	f, err := os.CreateTemp("", "test_config_*.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name())
+
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	c, err := Read(f.Name(), "test")
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+
+	if c.MaxDescRoutines != 5000 {
+		t.Errorf("MaxDescRoutines = %d, want 5000", c.MaxDescRoutines)
+	}
+}
+
+// TestMaxDescRoutinesDefault tests default value of maxDescRoutines (should be 0)
+func TestMaxDescRoutinesDefault(t *testing.T) {
+	content := `
+writes 100
+`
+	f, err := os.CreateTemp("", "test_config_*.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name())
+
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	c, err := Read(f.Name(), "test")
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+
+	// Default should be 0 (use protocol default)
+	if c.MaxDescRoutines != 0 {
+		t.Errorf("Default MaxDescRoutines = %d, want 0", c.MaxDescRoutines)
+	}
+}
+
+// TestMaxDescRoutinesWithOtherParams tests maxDescRoutines with other config parameters
+func TestMaxDescRoutinesWithOtherParams(t *testing.T) {
+	content := `
+protocol curpht
+reqs 1000
+maxDescRoutines 10000
+weakRatio 50
+`
+	f, err := os.CreateTemp("", "test_config_*.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name())
+
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	c, err := Read(f.Name(), "test")
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+
+	if c.Protocol != "curpht" {
+		t.Errorf("Protocol = %s, want curpht", c.Protocol)
+	}
+	if c.Reqs != 1000 {
+		t.Errorf("Reqs = %d, want 1000", c.Reqs)
+	}
+	if c.MaxDescRoutines != 10000 {
+		t.Errorf("MaxDescRoutines = %d, want 10000", c.MaxDescRoutines)
+	}
+	if c.WeakRatio != 50 {
+		t.Errorf("WeakRatio = %d, want 50", c.WeakRatio)
+	}
+}
+
+// TestMaxDescRoutinesEdgeCases tests edge cases for maxDescRoutines
+func TestMaxDescRoutinesEdgeCases(t *testing.T) {
+	tests := []struct {
+		name            string
+		content         string
+		maxDescRoutines int
+	}{
+		{
+			name:            "value 0 means use protocol default",
+			content:         "maxDescRoutines 0",
+			maxDescRoutines: 0,
+		},
+		{
+			name:            "small value 100",
+			content:         "maxDescRoutines 100",
+			maxDescRoutines: 100,
+		},
+		{
+			name:            "large value 50000",
+			content:         "maxDescRoutines 50000",
+			maxDescRoutines: 50000,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f, err := os.CreateTemp("", "test_config_*.conf")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.Remove(f.Name())
+
+			if _, err := f.WriteString(tc.content); err != nil {
+				t.Fatal(err)
+			}
+			f.Close()
+
+			c, err := Read(f.Name(), "test")
+			if err != nil {
+				t.Fatalf("Read failed: %v", err)
+			}
+
+			if c.MaxDescRoutines != tc.maxDescRoutines {
+				t.Errorf("MaxDescRoutines = %d, want %d", c.MaxDescRoutines, tc.maxDescRoutines)
+			}
+		})
+	}
+}

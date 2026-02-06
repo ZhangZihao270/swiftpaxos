@@ -39,7 +39,7 @@ const (
 	ORDERED      = uint8(2)
 )
 
-var MaxDescRoutines = 500 // Increased from 100 to handle higher throughput
+var MaxDescRoutines = 10000 // Default concurrent goroutine limit; configurable via config
 
 type CommandId struct {
 	ClientId int32

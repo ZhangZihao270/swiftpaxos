@@ -39,7 +39,7 @@ const (
 	ORDERED      = uint8(2)
 )
 
-var MaxDescRoutines = 500 // Increased from 100 to handle higher throughput
+var MaxDescRoutines = 10000 // Default concurrent goroutine limit; configurable via config
 
 // UnsyncedEntry stores metadata for uncommitted commands in the witness pool.
 // Replaces the simple int value used in CURP-HT's unsynced map.

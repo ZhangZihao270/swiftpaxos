@@ -35,25 +35,33 @@ func runReplica(c *config.Config, logger *dlog.Logger) {
 	switch strings.ToLower(c.Protocol) {
 	case "swiftpaxos":
 		log.Println("Starting SwiftPaxos replica...")
-		swift.MaxDescRoutines = 100
+		if c.MaxDescRoutines > 0 {
+			swift.MaxDescRoutines = c.MaxDescRoutines
+		}
 		rep := swift.New(c.Alias, replicaId, nodeList, !c.Noop,
 			c.Optread, true, false, 1, f, c, logger, nil)
 		rpc.Register(rep)
 	case "curp":
 		log.Println("Starting optimized CURP replica...")
-		curp.MaxDescRoutines = 100
+		if c.MaxDescRoutines > 0 {
+			curp.MaxDescRoutines = c.MaxDescRoutines
+		}
 		rep := curp.New(c.Alias, replicaId, nodeList, !c.Noop,
 			1, f, true, c, logger)
 		rpc.Register(rep)
 	case "curpht":
 		log.Println("Starting CURP-HT (Hybrid Transparency) replica...")
-		curpht.MaxDescRoutines = 100
+		if c.MaxDescRoutines > 0 {
+			curpht.MaxDescRoutines = c.MaxDescRoutines
+		}
 		rep := curpht.New(c.Alias, replicaId, nodeList, !c.Noop,
 			1, f, true, c, logger)
 		rpc.Register(rep)
 	case "curpho":
 		log.Println("Starting CURP-HO (Hybrid Optimal) replica...")
-		curpho.MaxDescRoutines = 100
+		if c.MaxDescRoutines > 0 {
+			curpho.MaxDescRoutines = c.MaxDescRoutines
+		}
 		rep := curpho.New(c.Alias, replicaId, nodeList, !c.Noop,
 			1, f, true, c, logger)
 		rpc.Register(rep)

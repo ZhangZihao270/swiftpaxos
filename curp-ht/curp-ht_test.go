@@ -990,3 +990,26 @@ func TestComputeSpeculativeResultPUT(t *testing.T) {
 		t.Errorf("ComputeResult(PUT) should return NIL, got %v", result)
 	}
 }
+
+// TestMaxDescRoutinesDefault verifies the default MaxDescRoutines value
+func TestMaxDescRoutinesDefault(t *testing.T) {
+	if MaxDescRoutines != 10000 {
+		t.Errorf("MaxDescRoutines should be 10000, got %d", MaxDescRoutines)
+	}
+}
+
+// TestMaxDescRoutinesOverride verifies MaxDescRoutines can be overridden
+func TestMaxDescRoutinesOverride(t *testing.T) {
+	original := MaxDescRoutines
+	defer func() { MaxDescRoutines = original }()
+
+	MaxDescRoutines = 5000
+	if MaxDescRoutines != 5000 {
+		t.Errorf("MaxDescRoutines after override should be 5000, got %d", MaxDescRoutines)
+	}
+
+	MaxDescRoutines = 100
+	if MaxDescRoutines != 100 {
+		t.Errorf("MaxDescRoutines after second override should be 100, got %d", MaxDescRoutines)
+	}
+}

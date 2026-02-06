@@ -119,6 +119,12 @@ type Config struct {
 	// Values: 0=uniform, 0.99=moderate skew, 1.5=high skew
 	ZipfSkew float64
 
+	// Maximum number of concurrent command descriptor goroutines per replica.
+	// Controls the threshold for switching between parallel goroutine processing
+	// and sequential processing. Higher values allow more concurrency but increase
+	// memory and scheduling overhead. 0 = use protocol default (10000).
+	MaxDescRoutines int
+
 	// quorum config file
 	Quorum string
 
@@ -281,6 +287,9 @@ func Read(filename, alias string) (*Config, error) {
 				ok = true
 			case "zipfskew":
 				c.ZipfSkew, err = expectFloat64(words)
+				ok = true
+			case "maxdescroutines":
+				c.MaxDescRoutines, err = expectInt(words)
 				ok = true
 			}
 			if ok {
