@@ -147,6 +147,10 @@ func (c *Client) handleMsgs() {
 			rep := m.(*MWeakReply)
 			c.handleWeakReply(rep)
 
+		case m := <-c.cs.causalReplyChan:
+			rep := m.(*MCausalReply)
+			c.handleCausalReply(rep)
+
 		case needSync := <-c.t.c:
 			// FIXME
 			break
@@ -281,66 +285,6 @@ func (c *Client) handleWeakReply(rep *MWeakReply) {
 	c.RegisterReply(c.val, rep.CmdId.SeqNum)
 }
 
-// SendWeakWrite sends a weak consistency write operation to leader only
-func (c *Client) SendWeakWrite(key int64, value []byte) int32 {
-	seqnum := c.getNextSeqnum()
-
-	c.mu.Lock()
-	causalDep := c.lastWeakSeqNum
-	c.weakPending[seqnum] = struct{}{}
-	c.lastWeakSeqNum = seqnum
-	leader := c.leader
-	c.mu.Unlock()
-
-	p := &MWeakPropose{
-		CommandId: seqnum,
-		ClientId:  c.ClientId,
-		Command: state.Command{
-			Op: state.PUT,
-			K:  state.Key(key),
-			V:  value,
-		},
-		Timestamp: 0,
-		CausalDep: causalDep, // Depend on previous weak command
-	}
-
-	// Send only to leader
-	if leader != -1 {
-		c.SendMsg(leader, c.cs.weakProposeRPC, p)
-	}
-	return seqnum
-}
-
-// SendWeakRead sends a weak consistency read operation to leader only
-func (c *Client) SendWeakRead(key int64) int32 {
-	seqnum := c.getNextSeqnum()
-
-	c.mu.Lock()
-	causalDep := c.lastWeakSeqNum
-	c.weakPending[seqnum] = struct{}{}
-	c.lastWeakSeqNum = seqnum
-	leader := c.leader
-	c.mu.Unlock()
-
-	p := &MWeakPropose{
-		CommandId: seqnum,
-		ClientId:  c.ClientId,
-		Command: state.Command{
-			Op: state.GET,
-			K:  state.Key(key),
-			V:  state.NIL(),
-		},
-		Timestamp: 0,
-		CausalDep: causalDep, // Depend on previous weak command
-	}
-
-	// Send only to leader
-	if leader != -1 {
-		c.SendMsg(leader, c.cs.weakProposeRPC, p)
-	}
-	return seqnum
-}
-
 // getNextSeqnum returns the next sequence number from the base client.
 // This ensures weak commands use the same seqnum space as strong commands,
 // preventing conflicts when mixing strong and weak commands in HybridLoop.
@@ -367,6 +311,96 @@ func (c *Client) SendStrongRead(key int64) int32 {
 // SupportsWeak returns true since curp-ho supports weak consistency commands.
 func (c *Client) SupportsWeak() bool {
 	return true
+}
+
+// SendWeakWrite for CURP-HO broadcasts MCausalPropose to ALL replicas.
+// Overrides the CURP-HT version which only sends to leader.
+// Client completes when it receives MCausalReply from boundReplica (1-RTT).
+func (c *Client) SendWeakWrite(key int64, value []byte) int32 {
+	return c.SendCausalWrite(key, value)
+}
+
+// SendWeakRead for CURP-HO broadcasts MCausalPropose to ALL replicas.
+// Overrides the CURP-HT version which only sends to leader.
+func (c *Client) SendWeakRead(key int64) int32 {
+	return c.SendCausalRead(key)
+}
+
+// SendCausalWrite broadcasts a causal write to ALL replicas.
+// All replicas add to their witness pool. The bound replica replies immediately
+// with speculative result (1-RTT). Leader coordinates replication separately.
+func (c *Client) SendCausalWrite(key int64, value []byte) int32 {
+	seqnum := c.getNextSeqnum()
+
+	c.mu.Lock()
+	causalDep := c.lastWeakSeqNum
+	c.weakPending[seqnum] = struct{}{}
+	c.lastWeakSeqNum = seqnum
+	c.mu.Unlock()
+
+	p := &MCausalPropose{
+		CommandId: seqnum,
+		ClientId:  c.ClientId,
+		Command: state.Command{
+			Op: state.PUT,
+			K:  state.Key(key),
+			V:  value,
+		},
+		Timestamp: 0,
+		CausalDep: causalDep,
+	}
+
+	c.sendMsgToAll(c.cs.causalProposeRPC, p)
+	return seqnum
+}
+
+// SendCausalRead broadcasts a causal read to ALL replicas.
+// Similar to SendCausalWrite but with GET operation.
+func (c *Client) SendCausalRead(key int64) int32 {
+	seqnum := c.getNextSeqnum()
+
+	c.mu.Lock()
+	causalDep := c.lastWeakSeqNum
+	c.weakPending[seqnum] = struct{}{}
+	c.lastWeakSeqNum = seqnum
+	c.mu.Unlock()
+
+	p := &MCausalPropose{
+		CommandId: seqnum,
+		ClientId:  c.ClientId,
+		Command: state.Command{
+			Op: state.GET,
+			K:  state.Key(key),
+			V:  state.NIL(),
+		},
+		Timestamp: 0,
+		CausalDep: causalDep,
+	}
+
+	c.sendMsgToAll(c.cs.causalProposeRPC, p)
+	return seqnum
+}
+
+// handleCausalReply processes a causal reply from any replica.
+// Only the bound replica's reply completes the operation (1-RTT).
+// Replies from non-bound replicas are silently ignored.
+func (c *Client) handleCausalReply(rep *MCausalReply) {
+	// Only accept replies from bound replica
+	if rep.Replica != c.boundReplica {
+		return
+	}
+
+	c.mu.Lock()
+	if _, exists := c.delivered[rep.CmdId.SeqNum]; exists {
+		c.mu.Unlock()
+		return
+	}
+
+	c.val = state.Value(rep.Rep)
+	c.delivered[rep.CmdId.SeqNum] = struct{}{}
+	delete(c.weakPending, rep.CmdId.SeqNum)
+	c.mu.Unlock()
+	c.RegisterReply(c.val, rep.CmdId.SeqNum)
 }
 
 // sendMsgToAll broadcasts a message to all replicas.

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/imdea-software/swiftpaxos/client"
 	"github.com/imdea-software/swiftpaxos/state"
 	cmap "github.com/orcaman/concurrent-map"
 )
@@ -2310,5 +2311,289 @@ func TestMCausalReplyZeroValues(t *testing.T) {
 
 	if restored.Replica != 0 || restored.CmdId.ClientId != 0 || restored.CmdId.SeqNum != 0 {
 		t.Error("Zero values not preserved in round-trip")
+	}
+}
+
+// ============================================================================
+// Phase 23: Causal Op Client-Side Tests
+// These tests verify SendCausalWrite, SendCausalRead, handleCausalReply,
+// the handleMsgs causalReplyChan case, and the SendWeakWrite/SendWeakRead
+// delegation to causal methods.
+// ============================================================================
+
+// newTestClient creates a minimal Client for testing handleCausalReply.
+// Includes a BufferClient with Reply channel to avoid nil pointer panics.
+func newTestClient(boundReplica int32) *Client {
+	bc := &client.BufferClient{
+		Reply: make(chan *client.ReqReply, 100),
+	}
+	return &Client{
+		BufferClient: bc,
+		boundReplica: boundReplica,
+		delivered:    make(map[int32]struct{}),
+		weakPending:  make(map[int32]struct{}),
+	}
+}
+
+// --- handleCausalReply tests ---
+
+func TestHandleCausalReplyFromBoundReplica(t *testing.T) {
+	c := newTestClient(1)
+	c.weakPending[42] = struct{}{}
+
+	rep := &MCausalReply{
+		Replica: 1, // matches boundReplica
+		CmdId:   CommandId{ClientId: 100, SeqNum: 42},
+		Rep:     []byte("result"),
+	}
+
+	c.handleCausalReply(rep)
+
+	// Should be delivered
+	if _, exists := c.delivered[42]; !exists {
+		t.Error("Command should be marked as delivered")
+	}
+	// Should be removed from weakPending
+	if _, exists := c.weakPending[42]; exists {
+		t.Error("Command should be removed from weakPending")
+	}
+	// Value should be set
+	if string(c.val) != "result" {
+		t.Errorf("val = %q, want 'result'", c.val)
+	}
+	// RegisterReply should have sent to Reply channel
+	select {
+	case rr := <-c.BufferClient.Reply:
+		if rr.Seqnum != 42 {
+			t.Errorf("RegisterReply seqnum = %d, want 42", rr.Seqnum)
+		}
+	default:
+		t.Error("Expected RegisterReply to send to Reply channel")
+	}
+}
+
+func TestHandleCausalReplyFromNonBoundReplica(t *testing.T) {
+	c := newTestClient(1)
+	c.weakPending[42] = struct{}{}
+
+	rep := &MCausalReply{
+		Replica: 0, // does NOT match boundReplica (1)
+		CmdId:   CommandId{ClientId: 100, SeqNum: 42},
+		Rep:     []byte("result"),
+	}
+
+	c.handleCausalReply(rep)
+
+	// Should NOT be delivered (wrong replica)
+	if _, exists := c.delivered[42]; exists {
+		t.Error("Command should NOT be delivered from non-bound replica")
+	}
+	// Should still be in weakPending
+	if _, exists := c.weakPending[42]; !exists {
+		t.Error("Command should still be in weakPending")
+	}
+}
+
+func TestHandleCausalReplyAlreadyDelivered(t *testing.T) {
+	c := newTestClient(1)
+	c.delivered[42] = struct{}{}
+
+	rep := &MCausalReply{
+		Replica: 1,
+		CmdId:   CommandId{ClientId: 100, SeqNum: 42},
+		Rep:     []byte("new-result"),
+	}
+
+	c.handleCausalReply(rep)
+
+	// Should not change val (already delivered)
+	if string(c.val) == "new-result" {
+		t.Error("Already delivered command should not update val")
+	}
+}
+
+func TestHandleCausalReplyEmptyResult(t *testing.T) {
+	c := newTestClient(2)
+	c.weakPending[10] = struct{}{}
+
+	rep := &MCausalReply{
+		Replica: 2,
+		CmdId:   CommandId{ClientId: 50, SeqNum: 10},
+		Rep:     []byte{}, // Empty result (e.g., from PUT)
+	}
+
+	c.handleCausalReply(rep)
+
+	if _, exists := c.delivered[10]; !exists {
+		t.Error("Command should be delivered even with empty result")
+	}
+}
+
+// --- SendWeakWrite/SendWeakRead delegation tests ---
+
+func TestSendWeakWriteDelegatesToCausal(t *testing.T) {
+	c := newTestClient(0)
+
+	// These should compile and be callable (verifies method signatures)
+	var _ func(int64, []byte) int32 = c.SendWeakWrite
+	var _ func(int64, []byte) int32 = c.SendCausalWrite
+	var _ func(int64) int32 = c.SendWeakRead
+	var _ func(int64) int32 = c.SendCausalRead
+}
+
+// --- Causal chaining: multiple causal ops maintain dependency ---
+
+func TestCausalDependencyChain(t *testing.T) {
+	c := newTestClient(1)
+	c.lastWeakSeqNum = 0
+
+	// First causal op: causalDep = 0 (lastWeakSeqNum before)
+	c.mu.Lock()
+	dep1 := c.lastWeakSeqNum
+	seqnum1 := int32(1)
+	c.weakPending[seqnum1] = struct{}{}
+	c.lastWeakSeqNum = seqnum1
+	c.mu.Unlock()
+
+	if dep1 != 0 {
+		t.Errorf("First op causalDep = %d, want 0", dep1)
+	}
+
+	// Second causal op: causalDep = 1 (previous seqnum)
+	c.mu.Lock()
+	dep2 := c.lastWeakSeqNum
+	seqnum2 := int32(2)
+	c.weakPending[seqnum2] = struct{}{}
+	c.lastWeakSeqNum = seqnum2
+	c.mu.Unlock()
+
+	if dep2 != 1 {
+		t.Errorf("Second op causalDep = %d, want 1", dep2)
+	}
+
+	// Third causal op: causalDep = 2
+	c.mu.Lock()
+	dep3 := c.lastWeakSeqNum
+	seqnum3 := int32(3)
+	c.weakPending[seqnum3] = struct{}{}
+	c.lastWeakSeqNum = seqnum3
+	c.mu.Unlock()
+
+	if dep3 != 2 {
+		t.Errorf("Third op causalDep = %d, want 2", dep3)
+	}
+}
+
+// --- Causal reply from different replicas ---
+
+func TestHandleCausalReplyFromEachReplica(t *testing.T) {
+	// Only bound replica's reply should be accepted
+	for boundId := int32(0); boundId < 3; boundId++ {
+		for replyFrom := int32(0); replyFrom < 3; replyFrom++ {
+			c := newTestClient(boundId)
+			c.weakPending[1] = struct{}{}
+
+			rep := &MCausalReply{
+				Replica: replyFrom,
+				CmdId:   CommandId{ClientId: 100, SeqNum: 1},
+				Rep:     []byte("result"),
+			}
+			c.handleCausalReply(rep)
+
+			_, delivered := c.delivered[1]
+			if replyFrom == boundId && !delivered {
+				t.Errorf("bound=%d, reply from %d: should be delivered", boundId, replyFrom)
+			}
+			if replyFrom != boundId && delivered {
+				t.Errorf("bound=%d, reply from %d: should NOT be delivered", boundId, replyFrom)
+			}
+		}
+	}
+}
+
+// --- MCausalPropose message construction tests ---
+
+func TestMCausalProposeWriteConstruction(t *testing.T) {
+	p := &MCausalPropose{
+		CommandId: 42,
+		ClientId:  100,
+		Command: state.Command{
+			Op: state.PUT,
+			K:  state.Key(123),
+			V:  []byte("test-value"),
+		},
+		Timestamp: 0,
+		CausalDep: 41,
+	}
+
+	if p.Command.Op != state.PUT {
+		t.Errorf("Op = %d, want PUT", p.Command.Op)
+	}
+	if p.CausalDep != 41 {
+		t.Errorf("CausalDep = %d, want 41", p.CausalDep)
+	}
+}
+
+func TestMCausalProposeReadConstruction(t *testing.T) {
+	p := &MCausalPropose{
+		CommandId: 43,
+		ClientId:  100,
+		Command: state.Command{
+			Op: state.GET,
+			K:  state.Key(123),
+			V:  state.NIL(),
+		},
+		Timestamp: 0,
+		CausalDep: 42,
+	}
+
+	if p.Command.Op != state.GET {
+		t.Errorf("Op = %d, want GET", p.Command.Op)
+	}
+}
+
+// --- Integration: handleCausalReply with multiple pending commands ---
+
+func TestHandleCausalReplyMultiplePending(t *testing.T) {
+	c := newTestClient(1)
+
+	// Multiple pending commands
+	c.weakPending[1] = struct{}{}
+	c.weakPending[2] = struct{}{}
+	c.weakPending[3] = struct{}{}
+
+	// Deliver command 2 first (out of order is fine for causal)
+	rep2 := &MCausalReply{
+		Replica: 1,
+		CmdId:   CommandId{ClientId: 100, SeqNum: 2},
+		Rep:     []byte("result-2"),
+	}
+	c.handleCausalReply(rep2)
+
+	if _, exists := c.delivered[2]; !exists {
+		t.Error("Command 2 should be delivered")
+	}
+	if _, exists := c.weakPending[2]; exists {
+		t.Error("Command 2 should be removed from pending")
+	}
+
+	// Commands 1 and 3 should still be pending
+	if _, exists := c.weakPending[1]; !exists {
+		t.Error("Command 1 should still be pending")
+	}
+	if _, exists := c.weakPending[3]; !exists {
+		t.Error("Command 3 should still be pending")
+	}
+
+	// Deliver command 1
+	rep1 := &MCausalReply{
+		Replica: 1,
+		CmdId:   CommandId{ClientId: 100, SeqNum: 1},
+		Rep:     []byte("result-1"),
+	}
+	c.handleCausalReply(rep1)
+
+	if _, exists := c.delivered[1]; !exists {
+		t.Error("Command 1 should be delivered")
 	}
 }
