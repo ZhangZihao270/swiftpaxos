@@ -36,6 +36,12 @@ type Client struct {
 	weakPending    map[int32]struct{}
 	lastWeakSeqNum int32 // Track sequence number of last weak command for causal ordering
 
+	// CURP-HO: Bound replica for 1-RTT causal op completion.
+	// Client binds to closest replica (lowest latency) for fast causal replies.
+	// Causal ops are broadcast to all replicas, but client only waits for
+	// the bound replica's reply to complete in 1-RTT.
+	boundReplica int32
+
 	// Mutex for concurrent map access (needed for pipelining)
 	mu sync.Mutex
 }
@@ -74,6 +80,10 @@ func NewClient(b *client.BufferClient, repNum, reqNum, pclients int) *Client {
 		alreadySlow: make(map[CommandId]struct{}),
 
 		weakPending: make(map[int32]struct{}),
+
+		// CURP-HO: Bind to closest replica for 1-RTT causal op completion.
+		// ClosestId is computed by base client during Connect() via ping latency measurement.
+		boundReplica: int32(b.ClosestId),
 	}
 
 	c.lastCmdId = CommandId{
@@ -357,4 +367,17 @@ func (c *Client) SendStrongRead(key int64) int32 {
 // SupportsWeak returns true since curp-ho supports weak consistency commands.
 func (c *Client) SupportsWeak() bool {
 	return true
+}
+
+// sendMsgToAll broadcasts a message to all replicas.
+// Used by CURP-HO for causal op broadcast (all replicas act as witnesses).
+func (c *Client) sendMsgToAll(code uint8, msg fastrpc.Serializable) {
+	for i := 0; i < c.N; i++ {
+		c.SendMsg(int32(i), code, msg)
+	}
+}
+
+// BoundReplica returns the ID of the replica this client is bound to.
+func (c *Client) BoundReplica() int32 {
+	return c.boundReplica
 }

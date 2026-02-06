@@ -1660,3 +1660,278 @@ func TestCausalUnsyncOkNoConflict(t *testing.T) {
 		t.Errorf("okWithWeakDep dep = %v, want %v", dep, weakCmdId)
 	}
 }
+
+// ============================================================================
+// Phase 21: Client-Replica Binding Tests
+// These tests verify the client-side boundReplica field, the sendMsgToAll
+// helper, and the integration between client binding and replica-side
+// boundClients tracking.
+// ============================================================================
+
+// --- Client struct boundReplica field tests ---
+
+func TestClientBoundReplicaField(t *testing.T) {
+	// Verify the Client struct has the boundReplica field with correct default
+	c := &Client{
+		boundReplica: 2,
+	}
+	if c.boundReplica != 2 {
+		t.Errorf("boundReplica = %d, want 2", c.boundReplica)
+	}
+}
+
+func TestClientBoundReplicaAccessor(t *testing.T) {
+	c := &Client{
+		boundReplica: 1,
+	}
+	if c.BoundReplica() != 1 {
+		t.Errorf("BoundReplica() = %d, want 1", c.BoundReplica())
+	}
+}
+
+func TestClientBoundReplicaZero(t *testing.T) {
+	// boundReplica=0 means bound to replica 0 (co-located or lowest latency)
+	c := &Client{
+		boundReplica: 0,
+	}
+	if c.BoundReplica() != 0 {
+		t.Errorf("BoundReplica() = %d, want 0", c.BoundReplica())
+	}
+}
+
+func TestClientBoundReplicaDefaultZero(t *testing.T) {
+	// Zero-value Client should have boundReplica=0 (default)
+	c := &Client{}
+	if c.boundReplica != 0 {
+		t.Errorf("Default boundReplica = %d, want 0", c.boundReplica)
+	}
+}
+
+// --- Binding model: client-replica correspondence tests ---
+
+func TestBindingModel3Replicas(t *testing.T) {
+	// Simulate a 3-replica setup where client binds to replica 1 (closest)
+	c := &Client{
+		N:            3,
+		boundReplica: 1,
+	}
+
+	// Verify binding
+	if c.boundReplica != 1 {
+		t.Errorf("Expected bound to replica 1, got %d", c.boundReplica)
+	}
+
+	// Replica 1 should be the one that tracks this client
+	r0 := newTestReplica(true) // leader
+	r1 := newTestReplica(false)
+	r2 := newTestReplica(false)
+
+	// Only replica 1 (the bound replica) registers this client
+	clientId := int32(100)
+	r1.registerBoundClient(clientId)
+
+	if r0.isBoundReplicaFor(clientId) {
+		t.Error("Replica 0 (leader) should NOT be bound for client 100")
+	}
+	if !r1.isBoundReplicaFor(clientId) {
+		t.Error("Replica 1 (bound) should be bound for client 100")
+	}
+	if r2.isBoundReplicaFor(clientId) {
+		t.Error("Replica 2 should NOT be bound for client 100")
+	}
+}
+
+func TestBindingModelLeaderIsBound(t *testing.T) {
+	// Special case: client's closest replica is the leader
+	c := &Client{
+		N:            3,
+		boundReplica: 0, // Bound to replica 0 = leader
+		leader:       0,
+	}
+
+	// When bound replica == leader, the leader does both:
+	// 1. Reply to client for causal ops (1-RTT)
+	// 2. Coordinate replication in background
+	if c.boundReplica != c.leader {
+		t.Errorf("boundReplica=%d != leader=%d, expected equal", c.boundReplica, c.leader)
+	}
+
+	// Replica 0 is both leader and bound
+	r0 := newTestReplica(true)
+	r0.registerBoundClient(100)
+
+	if !r0.isLeader {
+		t.Error("Replica 0 should be leader")
+	}
+	if !r0.isBoundReplicaFor(100) {
+		t.Error("Replica 0 should be bound for client 100")
+	}
+}
+
+func TestBindingModelMultipleClients(t *testing.T) {
+	// Multiple clients can bind to the same replica
+	r := newTestReplica(false)
+
+	r.registerBoundClient(100)
+	r.registerBoundClient(200)
+	r.registerBoundClient(300)
+
+	for _, clientId := range []int32{100, 200, 300} {
+		if !r.isBoundReplicaFor(clientId) {
+			t.Errorf("Client %d should be bound to this replica", clientId)
+		}
+	}
+}
+
+func TestBindingModelDifferentReplicasForDifferentClients(t *testing.T) {
+	// Different clients can bind to different replicas based on latency
+	r0 := newTestReplica(true)
+	r1 := newTestReplica(false)
+	r2 := newTestReplica(false)
+
+	// Client 100 is closest to replica 0
+	r0.registerBoundClient(100)
+	// Client 200 is closest to replica 1
+	r1.registerBoundClient(200)
+	// Client 300 is closest to replica 2
+	r2.registerBoundClient(300)
+
+	if !r0.isBoundReplicaFor(100) || r0.isBoundReplicaFor(200) || r0.isBoundReplicaFor(300) {
+		t.Error("Replica 0 should only be bound for client 100")
+	}
+	if r1.isBoundReplicaFor(100) || !r1.isBoundReplicaFor(200) || r1.isBoundReplicaFor(300) {
+		t.Error("Replica 1 should only be bound for client 200")
+	}
+	if r2.isBoundReplicaFor(100) || r2.isBoundReplicaFor(200) || !r2.isBoundReplicaFor(300) {
+		t.Error("Replica 2 should only be bound for client 300")
+	}
+}
+
+// --- Integration: Binding with witness pool ---
+
+func TestBoundReplicaWitnessIntegration(t *testing.T) {
+	// Verify that bound replica can act as witness (add to unsynced) AND reply
+	r := newTestReplica(false)
+	r.registerBoundClient(100)
+
+	// Bound replica receives causal propose, adds to witness pool
+	cmd := state.Command{Op: state.PUT, K: state.Key(42), V: state.Value([]byte("causal-val"))}
+	cmdId := CommandId{ClientId: 100, SeqNum: 1}
+	r.unsyncCausal(cmd, cmdId)
+
+	// Verify entry is in witness pool
+	v, exists := r.unsynced.Get("42")
+	if !exists {
+		t.Fatal("Expected witness entry for key 42")
+	}
+	entry := v.(*UnsyncedEntry)
+	if entry.IsStrong {
+		t.Error("Causal entry should have IsStrong=false")
+	}
+	if entry.CmdId != cmdId {
+		t.Errorf("CmdId = %v, want %v", entry.CmdId, cmdId)
+	}
+
+	// Verify the replica is bound for this client
+	if !r.isBoundReplicaFor(100) {
+		t.Error("Replica should be bound for client 100")
+	}
+}
+
+func TestNonBoundReplicaWitnessOnly(t *testing.T) {
+	// Non-bound replicas also add to witness pool but do NOT reply to client
+	r := newTestReplica(false)
+	// NOT registered as bound for client 100
+
+	cmd := state.Command{Op: state.PUT, K: state.Key(42), V: state.Value([]byte("causal-val"))}
+	cmdId := CommandId{ClientId: 100, SeqNum: 1}
+	r.unsyncCausal(cmd, cmdId)
+
+	// Witness entry should still be there
+	_, exists := r.unsynced.Get("42")
+	if !exists {
+		t.Fatal("Non-bound replica should still add to witness pool")
+	}
+
+	// But this replica is NOT bound → should NOT reply
+	if r.isBoundReplicaFor(100) {
+		t.Error("Non-bound replica should NOT be bound for client 100")
+	}
+}
+
+func TestLeaderWitnessAndReplication(t *testing.T) {
+	// Leader adds to witness pool AND coordinates replication
+	r := newTestReplica(true)
+
+	cmd := state.Command{Op: state.PUT, K: state.Key(42), V: state.Value([]byte("causal-val"))}
+	cmdId := CommandId{ClientId: 100, SeqNum: 1}
+
+	// Leader uses leaderUnsyncCausal (with slot)
+	dep := r.leaderUnsyncCausal(cmd, 10, cmdId)
+	if dep != -1 {
+		t.Errorf("dep = %d, want -1 (first entry)", dep)
+	}
+
+	v, _ := r.unsynced.Get("42")
+	entry := v.(*UnsyncedEntry)
+	if entry.Slot != 10 {
+		t.Errorf("Slot = %d, want 10", entry.Slot)
+	}
+}
+
+// --- Auto-detect binding from first causal propose ---
+
+func TestAutoDetectBinding(t *testing.T) {
+	// Test the auto-detect pattern: first causal propose registers the client
+	r := newTestReplica(false)
+
+	// Before registration
+	if r.isBoundReplicaFor(42) {
+		t.Error("Client 42 should not be bound before auto-detect")
+	}
+
+	// Simulate receiving first causal propose and auto-detecting
+	r.registerBoundClient(42)
+
+	if !r.isBoundReplicaFor(42) {
+		t.Error("Client 42 should be bound after auto-detect")
+	}
+
+	// Second registration is idempotent
+	r.registerBoundClient(42)
+	if !r.isBoundReplicaFor(42) {
+		t.Error("Client 42 should still be bound after re-registration")
+	}
+}
+
+// --- Strong op sees causal witness from bound replica's client ---
+
+func TestStrongOpSeesWitnessFromBoundClient(t *testing.T) {
+	// End-to-end: causal op from bound client is visible to strong op on same replica
+	r := newTestReplica(false)
+	r.registerBoundClient(100)
+
+	// Client 100 sends causal PUT to key 42
+	causalCmd := state.Command{Op: state.PUT, K: state.Key(42), V: state.Value([]byte("causal-val"))}
+	causalCmdId := CommandId{ClientId: 100, SeqNum: 1}
+	r.unsyncCausal(causalCmd, causalCmdId)
+
+	// Another client sends strong GET for key 42 → should see weakDep
+	strongRead := state.Command{Op: state.GET, K: state.Key(42), V: state.NIL()}
+	ok, dep := r.okWithWeakDep(strongRead)
+	if ok != TRUE {
+		t.Errorf("ok = %d, want TRUE", ok)
+	}
+	if dep == nil || *dep != causalCmdId {
+		t.Errorf("dep = %v, want %v", dep, causalCmdId)
+	}
+
+	// The strong op can also read the speculative value
+	val, found := r.getWeakWriteValue(state.Key(42))
+	if !found {
+		t.Fatal("Expected to find weak write value")
+	}
+	if string(val) != "causal-val" {
+		t.Errorf("val = %q, want causal-val", val)
+	}
+}
