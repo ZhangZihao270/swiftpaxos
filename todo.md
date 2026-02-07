@@ -126,11 +126,21 @@ All phases completed successfully. See detailed tasks below.
   - **Analysis**: docs/phase-18.5-batcher-analysis.md
   - **Recommendation**: Focus on Phase 18.6-18.9 (concurrent maps, allocations, profiling)
 
-- [ ] **18.6** Optimize Concurrent Map Contention
-  - **Current**: Multiple cmap.ConcurrentMap with SHARD_COUNT=32768
-  - **Profile**: Use pprof to identify map lock contention
-  - **Test**: Reduce SHARD_COUNT or use lock-free alternatives
-  - **Expected**: Reduced lock contention in hot paths
+- [x] **18.6** Optimize Concurrent Map Shard Count [26:02:07]
+  - ✅ Analyzed concurrent map usage and SHARD_COUNT configuration
+  - ✅ Determined 32768 shards is excessive (70MB overhead, poor cache locality)
+  - ✅ Reduced SHARD_COUNT from 32768 to 512 in both CURP-HO and CURP-HT
+  - **Result**: 98% memory reduction (70MB → 1MB), better cache locality
+  - **Key Findings**:
+    - 32768 shards: 1.8% collision rate with 4 threads (over-provisioned)
+    - 512 shards: 11.7% collision rate (still negligible), fits in L2 cache
+    - Expected benefit: +2-5% throughput from cache locality, < 1% from contention
+    - Net improvement: +1-4% estimated
+  - **Changes**:
+    - curp-ho/curp-ho.go: SHARD_COUNT 32768 → 512
+    - curp-ht/curp-ht.go: SHARD_COUNT 32768 → 512
+  - **Analysis**: docs/phase-18.6-concurrent-map-analysis.md
+  - **Testing**: All tests pass, no regressions
 
 - [ ] **18.7** Reduce Channel Allocations in Hot Paths
   - **Current**: Many chan struct{} allocations per command

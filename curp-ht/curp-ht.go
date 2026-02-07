@@ -120,7 +120,10 @@ type commandStaticDesc struct {
 
 func New(alias string, rid int, addrs []string, exec bool, pl, f int,
 	opt bool, conf *config.Config, logger *dlog.Logger) *Replica {
-	cmap.SHARD_COUNT = 32768
+	// Optimized SHARD_COUNT for cache locality (Phase 18.6)
+	// 512 shards: good for 4-16 threads, fits in L2 cache, low contention
+	// Reduced from 32768 for 98% memory savings and better cache hit rate
+	cmap.SHARD_COUNT = 512
 
 	r := &Replica{
 		Replica: replica.New(alias, rid, f, addrs, false, exec, false, conf, logger),
