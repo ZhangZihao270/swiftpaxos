@@ -357,7 +357,7 @@ func (r *Replica) bcastCommit(instance int32, ballot int32, command []state.Comm
 
 func (r *Replica) handlePropose(propose *defs.GPropose) {
 	if !r.IsLeader {
-		preply := &defs.ProposeReplyTS{FALSE, -1, state.NIL(), 0}
+		preply := &defs.ProposeReplyTS{OK: FALSE, CommandId: -1, Value: state.NIL(), Timestamp: 0}
 		r.ReplyProposeTS(preply, propose.Reply, propose.Mutex)
 		return
 	}
@@ -658,10 +658,10 @@ func (r *Replica) handleAcceptReply(areply *AcceptReply) {
 		if lb.clientProposals != nil && !r.Dreply {
 			for i := 0; i < len(inst.cmds); i++ {
 				propreply := &defs.ProposeReplyTS{
-					TRUE,
-					lb.clientProposals[i].CommandId,
-					state.NIL(),
-					lb.clientProposals[i].Timestamp}
+					OK:        TRUE,
+					CommandId: lb.clientProposals[i].CommandId,
+					Value:     state.NIL(),
+					Timestamp: lb.clientProposals[i].Timestamp}
 				r.ReplyProposeTS(propreply, lb.clientProposals[i].Reply, lb.clientProposals[i].Mutex)
 			}
 		}
@@ -702,10 +702,10 @@ func (r *Replica) executeCommands() {
 					if r.Dreply && inst.lb != nil && inst.lb.clientProposals != nil {
 						val := inst.cmds[j].Execute(r.State)
 						propreply := &defs.ProposeReplyTS{
-							TRUE,
-							inst.lb.clientProposals[j].CommandId,
-							val,
-							inst.lb.clientProposals[j].Timestamp}
+							OK:        TRUE,
+							CommandId: inst.lb.clientProposals[j].CommandId,
+							Value:     val,
+							Timestamp: inst.lb.clientProposals[j].Timestamp}
 						r.ReplyProposeTS(propreply, inst.lb.clientProposals[j].Reply, inst.lb.clientProposals[j].Mutex)
 					} else if inst.cmds[j].Op == state.PUT {
 						inst.cmds[j].Execute(r.State)

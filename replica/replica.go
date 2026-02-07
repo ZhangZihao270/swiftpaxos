@@ -82,7 +82,7 @@ func New(alias string, id, f int, addrs []string, thrifty, exec, lread bool, con
 		State:       state.InitState(),
 		RPC:         fastrpc.NewTableId(defs.RPC_TABLE),
 		StableStore: nil,
-		Stats:       &defs.Stats{make(map[string]int)},
+		Stats:       &defs.Stats{M: make(map[string]int)},
 		Shutdown:    false,
 		Listener:    nil,
 		ProposeChan: make(chan *defs.GPropose, defs.CHAN_BUFFER_SIZE),

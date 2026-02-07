@@ -932,10 +932,10 @@ func (r *Replica) handlePreAcceptReply(pareply *PreAcceptReply) {
 			for i := 0; i < len(inst.lb.clientProposals); i++ {
 				r.ReplyProposeTS(
 					&defs.ProposeReplyTS{
-						TRUE,
-						inst.lb.clientProposals[i].CommandId,
-						state.NIL(),
-						inst.lb.clientProposals[i].Timestamp},
+						OK:        TRUE,
+						CommandId: inst.lb.clientProposals[i].CommandId,
+						Value:     state.NIL(),
+						Timestamp: inst.lb.clientProposals[i].Timestamp},
 					inst.lb.clientProposals[i].Reply,
 					inst.lb.clientProposals[i].Mutex)
 			}
@@ -1045,10 +1045,10 @@ func (r *Replica) handleAcceptReply(areply *AcceptReply) {
 			for i := 0; i < len(inst.lb.clientProposals); i++ {
 				r.ReplyProposeTS(
 					&defs.ProposeReplyTS{
-						TRUE,
-						inst.lb.clientProposals[i].CommandId,
-						state.NIL(),
-						inst.lb.clientProposals[i].Timestamp},
+						OK:        TRUE,
+						CommandId: inst.lb.clientProposals[i].CommandId,
+						Value:     state.NIL(),
+						Timestamp: inst.lb.clientProposals[i].Timestamp},
 					inst.lb.clientProposals[i].Reply,
 					inst.lb.clientProposals[i].Mutex)
 			}

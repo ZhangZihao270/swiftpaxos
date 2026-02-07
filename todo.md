@@ -1350,6 +1350,17 @@ Investigation needed before proceeding to optimization phases.
   - Fix: Removed dead code, kept `break` with comment explaining design decision
 - [x] Run `go vet ./...` — protocol packages now clean (remaining warnings are in paxos/epaxos/replica for unkeyed struct literals, pre-existing)
 
+#### Phase 33.4: Fix Remaining go vet Warnings (Unkeyed Struct Literals) [✅ COMPLETE]
+
+**Goal**: Fix all remaining `go vet` warnings across the entire codebase — unkeyed composite literals in paxos, epaxos, and replica packages.
+
+**Tasks**:
+- [x] Fix `Stats` literal in `replica/replica.go:85` — add `M:` field key
+- [x] Fix 3 `ProposeReplyTS` literals in `paxos/paxos.go:360,660,704` — add `OK:`, `CommandId:`, `Value:`, `Timestamp:` field keys
+- [x] Fix 2 `ProposeReplyTS` literals in `epaxos/epaxos.go:934,1047` — add field keys
+- [x] Fix 1 `ProposeReplyTS` literal in `epaxos/exec.go:132` — add field keys
+- [x] Run `go vet ./...` — **zero warnings, entire codebase clean**
+
 ---
 
 # Future Protocols

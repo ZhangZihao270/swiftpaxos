@@ -130,10 +130,10 @@ func (e *Exec) strongconnect(v *Instance, index *int) bool {
 					val := w.Cmds[idx].Execute(e.r.State)
 					e.r.ReplyProposeTS(
 						&defs.ProposeReplyTS{
-							TRUE,
-							w.lb.clientProposals[idx].CommandId,
-							val,
-							w.lb.clientProposals[idx].Timestamp},
+							OK:        TRUE,
+							CommandId: w.lb.clientProposals[idx].CommandId,
+							Value:     val,
+							Timestamp: w.lb.clientProposals[idx].Timestamp},
 						w.lb.clientProposals[idx].Reply,
 						w.lb.clientProposals[idx].Mutex)
 				} else if w.Cmds[idx].Op == state.PUT {
