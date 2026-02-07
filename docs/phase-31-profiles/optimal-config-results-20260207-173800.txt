@@ -1,0 +1,82 @@
+=== Phase 31.5d: Optimal Configuration Test ===
+Goal: Reach 23K ops/sec by combining optimal pendings + threads
+
+Testing optimal configurations...
+
+=== Configuration: pendings=15, threads=2, streams=4 ===
+  Iteration 1/5...
+    Throughput: 17937.71 ops/sec, Weak median: 1.92ms
+  Iteration 2/5...
+    Throughput: 15985.59 ops/sec, Weak median: 2.16ms
+  Iteration 3/5...
+    Throughput: 17748.77 ops/sec, Weak median: 1.90ms
+  Iteration 4/5...
+    Throughput: 18087.74 ops/sec, Weak median: 1.99ms
+  Iteration 5/5...
+    Throughput: 18669.88 ops/sec, Weak median: 1.72ms
+  Statistics:
+    Min: 15985.59 ops/sec
+    Max: 18669.88 ops/sec
+    Avg: 17685.93 ops/sec
+    Weak median avg: 1.93ms
+  
+
+=== Configuration: pendings=15, threads=4, streams=8 ===
+  Iteration 1/5...
+    Throughput: 12732.08 ops/sec, Weak median: 5.08ms
+  Iteration 2/5...
+    Throughput: 14236.40 ops/sec, Weak median: 3.25ms
+  Iteration 3/5...
+    Throughput: 16742.22 ops/sec, Weak median: 4.25ms
+  Iteration 4/5...
+    Throughput: 11952.85 ops/sec, Weak median: 4.67ms
+  Iteration 5/5...
+    Throughput: 13337.55 ops/sec, Weak median: 5.39ms
+  Statistics:
+    Min: 11952.85 ops/sec
+    Max: 16742.22 ops/sec
+    Avg: 13800.22 ops/sec
+    Weak median avg: 4.52ms
+   ✗ Latency constraint violated
+
+=== Configuration: pendings=12, threads=4, streams=8 ===
+  Iteration 1/5...
+    Throughput: 18164.28 ops/sec, Weak median: 3.20ms
+  Iteration 2/5...
+    Throughput: 11149.91 ops/sec, Weak median: 4.25ms
+  Iteration 3/5...
+    Throughput: 13089.18 ops/sec, Weak median: 3.01ms
+  Iteration 4/5...
+    Throughput: 11701.81 ops/sec, Weak median: 3.96ms
+  Iteration 5/5...
+    Throughput: 14100.70 ops/sec, Weak median: 2.33ms
+  Statistics:
+    Min: 11149.91 ops/sec
+    Max: 18164.28 ops/sec
+    Avg: 13641.17 ops/sec
+    Weak median avg: 3.35ms
+   ✗ Latency constraint violated
+
+=== Configuration: pendings=18, threads=2, streams=4 ===
+  Iteration 1/5...
+    Throughput: 13703.96 ops/sec, Weak median: 2.54ms
+  Iteration 2/5...
+    Throughput: 11242.07 ops/sec, Weak median: 2.75ms
+  Iteration 3/5...
+    Throughput: 18204.42 ops/sec, Weak median: 2.27ms
+  Iteration 4/5...
+    Throughput: 20441.31 ops/sec, Weak median: 2.15ms
+  Iteration 5/5...
+    Throughput: 18750.81 ops/sec, Weak median: 2.56ms
+  Statistics:
+    Min: 11242.07 ops/sec
+    Max: 20441.31 ops/sec
+    Avg: 16468.51 ops/sec
+    Weak median avg: 2.45ms
+   ✗ Latency constraint violated
+
+=== Final Summary ===
+
+Target: 23,000 ops/sec with weak median < 2.0ms
+
+Results saved to: /home/users/zihao/swiftpaxos/docs/phase-31-profiles/optimal-config-results-20260207-173800.txt

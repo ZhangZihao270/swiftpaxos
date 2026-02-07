@@ -1,0 +1,66 @@
+=== Phase 31.5c: Pendings Sweet Spot Test ===
+Goal: Find pendings value that reaches 23K ops/sec with weak latency < 2ms
+Configuration: 2 clients × 2 threads = 4 streams (optimal from Phase 31.5)
+Test parameters:
+  - Requests per client: 10000
+  - Iterations per config: 3
+  - MaxDescRoutines: 500 (from Phase 31.5b)
+  - Timestamp: 20260207-173140
+
+Starting pendings sweep...
+
+=== Testing: pendings=10 ===
+  Iteration 1/3...
+    Throughput: 19082.45 ops/sec, Weak median: 1.11ms
+  Iteration 2/3...
+    Throughput: 15974.93 ops/sec, Weak median: 1.39ms
+  Iteration 3/3...
+    Throughput: 18717.86 ops/sec, Weak median: 1.16ms
+  Average: 17925.08 ops/sec (weak median: 1.22ms)
+
+=== Testing: pendings=12 ===
+  Iteration 1/3...
+    Throughput: 19970.64 ops/sec, Weak median: 1.31ms
+  Iteration 2/3...
+    Throughput: 17578.20 ops/sec, Weak median: 1.32ms
+  Iteration 3/3...
+    Throughput: 19171.02 ops/sec, Weak median: 1.49ms
+  Average: 18906.62 ops/sec (weak median: 1.37ms)
+
+=== Testing: pendings=15 ===
+  Iteration 1/3...
+    Throughput: 19290.62 ops/sec, Weak median: 1.67ms
+  Iteration 2/3...
+    Throughput: 18935.14 ops/sec, Weak median: 2.02ms
+  Iteration 3/3...
+    Throughput: 20093.89 ops/sec, Weak median: 1.69ms
+  Average: 19439.88 ops/sec (weak median: 1.79ms)
+
+=== Testing: pendings=18 ===
+  Iteration 1/3...
+    Throughput: 18459.86 ops/sec, Weak median: 2.25ms
+  Iteration 2/3...
+    Throughput: 19658.70 ops/sec, Weak median: 2.27ms
+  Iteration 3/3...
+    Throughput: 20270.94 ops/sec, Weak median: 2.00ms
+  Average: 19463.16 ops/sec (weak median: 2.17ms) ✗ Latency constraint violated
+
+=== Testing: pendings=20 ===
+  Iteration 1/3...
+    Throughput: 20762.56 ops/sec, Weak median: 2.03ms
+  Iteration 2/3...
+    Throughput: 19960.04 ops/sec, Weak median: 2.38ms
+  Iteration 3/3...
+    Throughput: 18606.66 ops/sec, Weak median: 2.49ms
+  Average: 19776.42 ops/sec (weak median: 2.30ms) ✗ Latency constraint violated
+
+=== Summary ===
+
+Target: 23,000 ops/sec with weak median < 2ms
+
+Results saved to: /home/users/zihao/swiftpaxos/docs/phase-31-profiles/pendings-sweep-results-20260207-173140.txt
+
+Next steps:
+  1. Review results and identify optimal pendings value
+  2. If target met, update multi-client.conf and validate
+  3. If not met, proceed to network batching optimization (Phase 31.4)
