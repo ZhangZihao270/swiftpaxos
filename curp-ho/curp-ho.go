@@ -182,6 +182,11 @@ func New(alias string, rid int, addrs []string, exec bool, pl, f int,
 	r.sender = replica.NewSender(r.Replica)
 	r.batcher = NewBatcher(r, 128) // Increased from 8 for better batching
 
+	// Apply batch delay from config (Phase 31.4)
+	if conf.BatchDelayUs > 0 {
+		r.batcher.SetBatchDelay(int64(conf.BatchDelayUs * 1000)) // Convert μs to ns
+	}
+
 	// Initialize pre-allocated closed channel for immediate notifications
 	r.closedChan = make(chan struct{})
 	close(r.closedChan)

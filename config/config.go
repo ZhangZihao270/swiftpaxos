@@ -125,6 +125,13 @@ type Config struct {
 	// memory and scheduling overhead. 0 = use protocol default (10000).
 	MaxDescRoutines int
 
+	// Batching delay in microseconds for network message batching.
+	// 0 = immediate send (zero-delay batching, optimal latency)
+	// 50 = wait 50μs for more messages (balanced)
+	// 100 = wait 100μs for more messages (maximum throughput)
+	// Trade-off: Higher values increase batch sizes (reduce syscalls) but add latency.
+	BatchDelayUs int
+
 	// quorum config file
 	Quorum string
 
@@ -290,6 +297,9 @@ func Read(filename, alias string) (*Config, error) {
 				ok = true
 			case "maxdescroutines":
 				c.MaxDescRoutines, err = expectInt(words)
+				ok = true
+			case "batchdelayus":
+				c.BatchDelayUs, err = expectInt(words)
 				ok = true
 			}
 			if ok {

@@ -1,0 +1,29 @@
+=== Phase 31.4: Validate batchDelayUs=150 Configuration ===
+Goal: Confirm 23K ops/sec target achievement
+
+Running 5 iterations...
+
+Iteration 1/5...
+  Throughput: 20468.62 ops/sec, Weak median: 1.90ms
+Iteration 2/5...
+  Throughput: 22983.63 ops/sec, Weak median: 0.97ms
+Iteration 3/5...
+  Throughput: 21487.79 ops/sec, Weak median: 1.98ms
+Iteration 4/5...
+  Throughput: 18828.04 ops/sec, Weak median: 1.11ms
+Iteration 5/5...
+  Throughput: 20561.38 ops/sec, Weak median: 1.13ms
+
+=== Results Summary ===
+Configuration: pendings=15, 4 streams, batchDelayUs=150
+
+Throughput:
+  Min: 18828.04 ops/sec
+  Max: 22983.63 ops/sec
+  Avg: 20865.89 ops/sec
+
+Weak Median Latency: 1.41ms
+
+✗ Target not met (gap: 2134.11 ops/sec)
+
+Results saved to: /home/users/zihao/swiftpaxos/docs/phase-31-profiles/batch-delay-150-validation-20260207-175928.txt

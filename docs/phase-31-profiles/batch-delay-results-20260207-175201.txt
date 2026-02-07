@@ -1,0 +1,75 @@
+=== Phase 31.4: Batch Delay Optimization Test ===
+Goal: Find optimal batch delay to reach 23K ops/sec
+Configuration: pendings=15, 4 streams (optimal from Phase 31.5c)
+
+Test parameters:
+  - Requests per client: 10000
+  - Iterations per config: 3
+  - Timestamp: 20260207-175201
+
+Starting batch delay sweep...
+
+=== Testing: batchDelayUs=0 ===
+  Iteration 1/3...
+    Throughput: 15669.50 ops/sec, Weak: 2.09ms, Strong: 4.52ms
+  Iteration 2/3...
+    Throughput: 15944.36 ops/sec, Weak: 2.06ms, Strong: 3.83ms
+  Iteration 3/3...
+    Throughput: 16385.71 ops/sec, Weak: 2.04ms, Strong: 3.56ms
+  Average: 15999.85 ops/sec (weak: 2.06ms, strong: 3.97ms) ✗ Latency constraint violated
+
+=== Testing: batchDelayUs=25 ===
+  Iteration 1/3...
+    Throughput: 20765.29 ops/sec, Weak: 1.94ms, Strong: 2.70ms
+  Iteration 2/3...
+    Throughput: 18671.12 ops/sec, Weak: 2.23ms, Strong: 3.15ms
+  Iteration 3/3...
+    Throughput: 19051.24 ops/sec, Weak: 2.12ms, Strong: 3.09ms
+  Average: 19495.88 ops/sec (weak: 2.09ms, strong: 2.98ms) ✗ Latency constraint violated
+
+=== Testing: batchDelayUs=50 ===
+  Iteration 1/3...
+    Throughput: 21213.06 ops/sec, Weak: 1.98ms, Strong: 2.68ms
+  Iteration 2/3...
+    Throughput: 20824.43 ops/sec, Weak: 1.21ms, Strong: 3.67ms
+  Iteration 3/3...
+    Throughput: 23907.34 ops/sec, Weak: 1.79ms, Strong: 2.38ms
+  Average: 21981.61 ops/sec (weak: 1.66ms, strong: 2.91ms)
+
+=== Testing: batchDelayUs=75 ===
+  Iteration 1/3...
+    Throughput: 24537.16 ops/sec, Weak: 0.96ms, Strong: 2.96ms
+  Iteration 2/3...
+    Throughput: 21996.50 ops/sec, Weak: 2.04ms, Strong: 2.25ms
+  Iteration 3/3...
+    Throughput: 20515.22 ops/sec, Weak: 2.01ms, Strong: 2.73ms
+  Average: 22349.62 ops/sec (weak: 1.67ms, strong: 2.64ms)
+
+=== Testing: batchDelayUs=100 ===
+  Iteration 1/3...
+    Throughput: 19765.47 ops/sec, Weak: 2.00ms, Strong: 2.71ms
+  Iteration 2/3...
+    Throughput: 19519.14 ops/sec, Weak: 1.20ms, Strong: 3.79ms
+  Iteration 3/3...
+    Throughput: 19784.60 ops/sec, Weak: 1.94ms, Strong: 2.71ms
+  Average: 19689.73 ops/sec (weak: 1.71ms, strong: 3.07ms)
+
+=== Testing: batchDelayUs=150 ===
+  Iteration 1/3...
+    Throughput: 23597.63 ops/sec, Weak: 1.73ms, Strong: 2.38ms
+  Iteration 2/3...
+    Throughput: 21333.26 ops/sec, Weak: 1.10ms, Strong: 3.51ms
+  Iteration 3/3...
+    Throughput: 23502.97 ops/sec, Weak: 1.85ms, Strong: 2.40ms
+  Average: 22811.28 ops/sec (weak: 1.56ms, strong: 2.76ms)
+
+=== Summary ===
+
+Target: 23,000 ops/sec with weak median < 2.0ms
+
+Results saved to: /home/users/zihao/swiftpaxos/docs/phase-31-profiles/batch-delay-results-20260207-175201.txt
+
+Next steps:
+  1. Review results and identify optimal batch delay
+  2. If target met, update multi-client.conf with optimal value
+  3. Document findings in docs/phase-31.4-network-batching.md
