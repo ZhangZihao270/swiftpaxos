@@ -1,0 +1,108 @@
+============================================
+  Phase 19.5: CURP-HT Optimization Benchmark
+============================================
+Config: curpht-optimized.conf
+Iterations: 3
+Results: results/phase-19.5-curpht-optimized
+
+Optimization Settings:
+protocol: curpht
+maxDescRoutines: 200   // Ported from CURP-HO Phase 18.4 optimization (Phase 19.4)
+pendings:    20      // Max in-flight commands per thread (optimized in Phase 18.3)
+clientThreads: 2      // Threads per client server (1 = single thread)
+reqs:        10000
+
+[0;34m========================================[0m
+[0;34mIteration 1 of 3[0m
+[0;34m========================================[0m
+Running benchmark... (output: results/phase-19.5-curpht-optimized/iteration-1-20260207-155033.log)
+[0;32mResults for iteration 1:[0m
+  Throughput: 21810.45 ops/sec
+  Duration: 1.87s
+  Strong - Median: 3.51ms, P99: 3.51ms
+  Weak   - Median: 2.97ms, P99: 2.97ms
+
+[0;34m========================================[0m
+[0;34mIteration 2 of 3[0m
+[0;34m========================================[0m
+Running benchmark... (output: results/phase-19.5-curpht-optimized/iteration-2-20260207-155033.log)
+[0;32mResults for iteration 2:[0m
+  Throughput: 19038.20 ops/sec
+  Duration: 2.12s
+  Strong - Median: 4.16ms, P99: 4.16ms
+  Weak   - Median: 3.53ms, P99: 3.53ms
+
+[0;34m========================================[0m
+[0;34mIteration 3 of 3[0m
+[0;34m========================================[0m
+Running benchmark... (output: results/phase-19.5-curpht-optimized/iteration-3-20260207-155033.log)
+[0;32mResults for iteration 3:[0m
+  Throughput: 22592.49 ops/sec
+  Duration: 1.77s
+  Strong - Median: 3.43ms, P99: 3.43ms
+  Weak   - Median: 2.90ms, P99: 2.90ms
+
+[1;33m⚠️  30K Target: NOT ACHIEVED (avg: 21147.05 ops/sec, 70.0% of target)[0m
+
+============================================
+  Benchmark Summary
+============================================
+CURP-HT Optimization Benchmark - 20260207-155033
+===========================================
+
+Configuration:
+protocol: curpht
+maxDescRoutines: 200   // Ported from CURP-HO Phase 18.4 optimization (Phase 19.4)
+pendings:    20      // Max in-flight commands per thread (optimized in Phase 18.3)
+reqs:        10000
+clientThreads: 2      // Threads per client server (1 = single thread)
+weakRatio:   50      // 10% weak, 90% strong
+
+Optimizations Applied:
+  - Phase 19.1: String caching (sync.Map)
+  - Phase 19.2: Pre-allocated closed channel
+  - Phase 19.3: Faster spin-wait (10μs polling)
+  - Phase 19.4: Config optimizations (maxDescRoutines=200, pendings=20)
+
+Benchmark Results:
+==================
+Iteration 1:
+  Throughput: 21810.45 ops/sec
+  Duration: 1.87s
+  Strong - Median: 3.51ms, P99: 3.51ms
+  Weak   - Median: 2.97ms, P99: 2.97ms
+
+Iteration 2:
+  Throughput: 19038.20 ops/sec
+  Duration: 2.12s
+  Strong - Median: 4.16ms, P99: 4.16ms
+  Weak   - Median: 3.53ms, P99: 3.53ms
+
+Iteration 3:
+  Throughput: 22592.49 ops/sec
+  Duration: 1.77s
+  Strong - Median: 3.43ms, P99: 3.43ms
+  Weak   - Median: 2.90ms, P99: 2.90ms
+
+
+Statistical Summary:
+====================
+Throughput:
+  Min: 19038.20 ops/sec
+  Max: 22592.49 ops/sec
+  Avg: 21147.05 ops/sec
+
+Latency (Average across iterations):
+  Strong - Median: 3.70ms, P99: 3.70ms
+  Weak   - Median: 3.13ms, P99: 3.13ms
+
+Comparison to Baseline:
+  Baseline: 26000 ops/sec (CURP-HT before Phase 19)
+  Optimized: 21147.05 ops/sec
+  Improvement: -10.0%
+
+⚠️  30K Target: NOT ACHIEVED (avg: 21147.05 ops/sec, 70.0% of target)
+
+Full results saved to: results/phase-19.5-curpht-optimized
+Summary: results/phase-19.5-curpht-optimized/benchmark-summary-20260207-155033.txt
+============================================
