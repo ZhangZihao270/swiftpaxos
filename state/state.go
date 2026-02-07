@@ -226,54 +226,54 @@ func (t *Command) Unmarshal(r io.Reader) error {
 }
 
 func (t *Operation) Marshal(w io.Writer) {
-	bs := make([]byte, 1)
-	bs[0] = byte(*t)
-	w.Write(bs)
+	var b [1]byte
+	b[0] = byte(*t)
+	w.Write(b[:])
 }
 
 func (t *Operation) Unmarshal(r io.Reader) error {
-	bs := make([]byte, 1)
-	if _, err := io.ReadFull(r, bs); err != nil {
+	var b [1]byte
+	if _, err := io.ReadFull(r, b[:]); err != nil {
 		return err
 	}
-	*t = Operation(bs[0])
+	*t = Operation(b[0])
 	return nil
 }
 
 func (t *Key) Marshal(w io.Writer) {
-	bs := make([]byte, 8)
-	binary.LittleEndian.PutUint64(bs, uint64(*t))
-	w.Write(bs)
+	var b [8]byte
+	binary.LittleEndian.PutUint64(b[:], uint64(*t))
+	w.Write(b[:])
 }
 
 func (t *Key) Unmarshal(r io.Reader) error {
-	bs := make([]byte, 8)
-	if _, err := io.ReadFull(r, bs); err != nil {
+	var b [8]byte
+	if _, err := io.ReadFull(r, b[:]); err != nil {
 		return err
 	}
-	*t = Key(binary.LittleEndian.Uint64(bs))
+	*t = Key(binary.LittleEndian.Uint64(b[:]))
 	return nil
 }
 
 func (t *Value) Marshal(w io.Writer) {
-	bs := make([]byte, 4)
+	var b [4]byte
 	if t == nil {
-		binary.LittleEndian.PutUint16(bs, 0)
-		w.Write(bs)
+		binary.LittleEndian.PutUint16(b[:], 0)
+		w.Write(b[:])
 	} else {
-		binary.LittleEndian.PutUint16(bs, uint16(len(*t)))
-		w.Write(bs)
+		binary.LittleEndian.PutUint16(b[:], uint16(len(*t)))
+		w.Write(b[:])
 		w.Write(*t)
 	}
 }
 
 func (t *Value) Unmarshal(r io.Reader) error {
-	bs := make([]byte, 4)
-	if _, err := io.ReadFull(r, bs); err != nil {
+	var b [4]byte
+	if _, err := io.ReadFull(r, b[:]); err != nil {
 		return err
 	}
-	len := binary.LittleEndian.Uint16(bs)
-	bs = make([]byte, len)
+	n := binary.LittleEndian.Uint16(b[:])
+	bs := make([]byte, n)
 	if _, err := io.ReadFull(r, bs); err != nil {
 		return err
 	}

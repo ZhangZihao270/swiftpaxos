@@ -1120,33 +1120,41 @@ Investigation needed before proceeding to optimization phases.
 
 ---
 
-#### Phase 31.7: Serialization Optimization [DEFERRED - NOT NEEDED]
+#### Phase 31.7: Serialization Optimization [✅ COMPLETE]
 
 **Goal**: Reduce serialization/deserialization overhead (likely a top CPU consumer).
 
-**Status**: Deferred - Phase 31 target (23K ops/sec) already achieved without this optimization.
+**Status**: Complete - Two key optimizations applied across all protocol packages.
 
 **Tasks**:
-- [ ] Profile Marshal/Unmarshal functions (from Phase 31.2 results)
-  - Measure: % CPU in defs.go Marshal/Unmarshal
-  - Identify: most frequently serialized messages
-- [ ] Optimize hot message types
-  - MAccept, MReply, MCausalPropose, MCausalReply
-  - Consider: reduce varint overhead, pre-compute sizes
+- [x] Profile Marshal/Unmarshal functions (from Phase 31.2 results)
+  - Identified: byte-by-byte loop serialization for Rep []byte fields
+  - Identified: heap allocations for temporary buffers in state/state.go
+- [x] Optimize hot message types
+  - Replaced byte-loop Rep serialization with single wire.Write(t.Rep) in:
+    curp-ht (MReply, MSyncReply, MWeakReply), curp-ho (MReply, MSyncReply, MWeakReply, MCausalReply),
+    curp (MReply, MSyncReply), swift (MAccept, MReply)
+  - Replaced byte-loop Unmarshal with single io.ReadFull(wire, t.Rep)
+- [x] Eliminate heap allocations in state/state.go
+  - Operation/Key/Value Marshal: replaced make([]byte,N) with stack-allocated [N]byte
+  - Operation/Key Unmarshal: replaced make([]byte,N) with stack-allocated [N]byte
 - [ ] Implement zero-copy deserialization (if feasible)
-  - Avoid intermediate byte slice allocations
-  - Use unsafe pointers for fixed-size fields (unsafe but fast)
+  - Deferred: would require unsafe pointers, diminishing returns
 - [ ] Add message size caching
-  - Cache BinarySize() results for repeated messages
-  - Avoid re-computing sizes on retransmission
-- [ ] Benchmark serialization speedup
-  - Measure: throughput improvement per 10% serialization speedup
-- [ ] Document in docs/phase-31.7-serialization.md
+  - Deferred: not a bottleneck after byte-loop elimination
+- [x] Benchmark serialization speedup
+  - MReply Marshal: 117ns/op (single write vs N writes for Rep)
+  - MReply Unmarshal: 528ns/op (single ReadFull vs N ReadAtLeast)
+  - Command Marshal: 160ns/op, 3 allocs (down from 6+)
+  - MCommit Marshal: 76ns/op (fixed-size, baseline)
+- [x] Document in docs/phase-31.7-serialization.md
 
-**Expected Results**:
-- Serialization speedup: 1.3-1.5x faster
-- CPU reduction: -5-10% CPU usage
-- Throughput improvement: +1.5-2.5K ops/sec
+**Benchmark Results** (AMD EPYC 7702P, 128 cores):
+- MReply Marshal: 117ns/op, 1 alloc (was N+1 Write calls for N-byte Rep)
+- MReply RoundTrip: 513ns/op, 3 allocs
+- MAccept Marshal: 254ns/op, 4 allocs
+- Command Marshal: 160ns/op, 3 allocs (heap allocs eliminated for temp buffers)
+- Command Unmarshal: 419ns/op, 5 allocs
 
 **Output**: docs/phase-31.7-serialization.md
 

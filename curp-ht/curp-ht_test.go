@@ -7,6 +7,351 @@ import (
 	"github.com/imdea-software/swiftpaxos/state"
 )
 
+// ============================================================================
+// Phase 31.7: Serialization Optimization Tests
+// ============================================================================
+
+// TestMReplySerialization tests MReply Marshal/Unmarshal round-trip
+func TestMReplySerialization(t *testing.T) {
+	original := &MReply{
+		Replica: 2,
+		Ballot:  10,
+		CmdId:   CommandId{ClientId: 100, SeqNum: 42},
+		Rep:     []byte("test-reply-data"),
+		Ok:      TRUE,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	restored := &MReply{}
+	err := restored.Unmarshal(&buf)
+	if err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if restored.Replica != original.Replica {
+		t.Errorf("Replica mismatch: got %d, want %d", restored.Replica, original.Replica)
+	}
+	if restored.Ballot != original.Ballot {
+		t.Errorf("Ballot mismatch: got %d, want %d", restored.Ballot, original.Ballot)
+	}
+	if restored.CmdId != original.CmdId {
+		t.Errorf("CmdId mismatch: got %v, want %v", restored.CmdId, original.CmdId)
+	}
+	if !bytes.Equal(restored.Rep, original.Rep) {
+		t.Errorf("Rep mismatch: got %v, want %v", restored.Rep, original.Rep)
+	}
+	if restored.Ok != original.Ok {
+		t.Errorf("Ok mismatch: got %d, want %d", restored.Ok, original.Ok)
+	}
+}
+
+// TestMReplyEmptyRep tests MReply with empty Rep field
+func TestMReplyEmptyRep(t *testing.T) {
+	original := &MReply{
+		Replica: 1,
+		Ballot:  5,
+		CmdId:   CommandId{ClientId: 1, SeqNum: 1},
+		Rep:     []byte{},
+		Ok:      FALSE,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	restored := &MReply{}
+	err := restored.Unmarshal(&buf)
+	if err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if len(restored.Rep) != 0 {
+		t.Errorf("Rep should be empty, got %v", restored.Rep)
+	}
+	if restored.Ok != FALSE {
+		t.Errorf("Ok should be FALSE, got %d", restored.Ok)
+	}
+}
+
+// TestMReplyLargeRep tests MReply with a large Rep payload
+func TestMReplyLargeRep(t *testing.T) {
+	largeRep := make([]byte, 4096)
+	for i := range largeRep {
+		largeRep[i] = byte(i % 256)
+	}
+
+	original := &MReply{
+		Replica: 0,
+		Ballot:  999,
+		CmdId:   CommandId{ClientId: 50, SeqNum: 200},
+		Rep:     largeRep,
+		Ok:      TRUE,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	restored := &MReply{}
+	err := restored.Unmarshal(&buf)
+	if err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if !bytes.Equal(restored.Rep, original.Rep) {
+		t.Errorf("Large Rep mismatch (len got=%d, want=%d)", len(restored.Rep), len(original.Rep))
+	}
+}
+
+// TestMSyncReplySerialization tests MSyncReply Marshal/Unmarshal round-trip
+func TestMSyncReplySerialization(t *testing.T) {
+	original := &MSyncReply{
+		Replica: 1,
+		Ballot:  7,
+		CmdId:   CommandId{ClientId: 200, SeqNum: 99},
+		Rep:     []byte("sync-reply-data"),
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	restored := &MSyncReply{}
+	err := restored.Unmarshal(&buf)
+	if err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if restored.Replica != original.Replica || restored.Ballot != original.Ballot {
+		t.Error("Fixed fields mismatch")
+	}
+	if restored.CmdId != original.CmdId {
+		t.Errorf("CmdId mismatch")
+	}
+	if !bytes.Equal(restored.Rep, original.Rep) {
+		t.Errorf("Rep mismatch: got %v, want %v", restored.Rep, original.Rep)
+	}
+}
+
+// TestMAcceptSerialization tests MAccept Marshal/Unmarshal with embedded Command
+func TestMAcceptSerialization(t *testing.T) {
+	original := &MAccept{
+		Replica: 0,
+		Ballot:  3,
+		Cmd: state.Command{
+			Op: state.PUT,
+			K:  state.Key(42),
+			V:  state.Value([]byte("accept-value")),
+		},
+		CmdId:   CommandId{ClientId: 10, SeqNum: 5},
+		CmdSlot: 100,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	restored := &MAccept{}
+	err := restored.Unmarshal(&buf)
+	if err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if restored.Replica != original.Replica || restored.Ballot != original.Ballot {
+		t.Error("Fixed fields mismatch")
+	}
+	if restored.Cmd.Op != original.Cmd.Op || restored.Cmd.K != original.Cmd.K {
+		t.Error("Command fields mismatch")
+	}
+	if !bytes.Equal(restored.Cmd.V, original.Cmd.V) {
+		t.Error("Command.V mismatch")
+	}
+	if restored.CmdSlot != original.CmdSlot {
+		t.Errorf("CmdSlot mismatch: got %d, want %d", restored.CmdSlot, original.CmdSlot)
+	}
+}
+
+// TestMCommitSerialization tests MCommit fixed-size serialization
+func TestMCommitSerialization(t *testing.T) {
+	original := &MCommit{
+		Replica: 2,
+		Ballot:  15,
+		CmdSlot: 12345678,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	if buf.Len() != 16 {
+		t.Errorf("MCommit should serialize to 16 bytes, got %d", buf.Len())
+	}
+
+	restored := &MCommit{}
+	err := restored.Unmarshal(&buf)
+	if err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if *restored != *original {
+		t.Errorf("MCommit mismatch: got %+v, want %+v", restored, original)
+	}
+}
+
+// TestMAAcksSerialization tests MAAcks with nested Acks and Accepts
+func TestMAAcksSerialization(t *testing.T) {
+	original := &MAAcks{
+		Acks: []MAcceptAck{
+			{Replica: 0, Ballot: 1, CmdSlot: 10},
+			{Replica: 1, Ballot: 1, CmdSlot: 10},
+		},
+		Accepts: []MAccept{
+			{Replica: 0, Ballot: 1, Cmd: state.Command{Op: state.PUT, K: state.Key(1), V: []byte("v1")}, CmdId: CommandId{ClientId: 1, SeqNum: 1}, CmdSlot: 10},
+		},
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	restored := &MAAcks{}
+	err := restored.Unmarshal(&buf)
+	if err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if len(restored.Acks) != 2 {
+		t.Fatalf("Acks count: got %d, want 2", len(restored.Acks))
+	}
+	if restored.Acks[0].CmdSlot != 10 || restored.Acks[1].CmdSlot != 10 {
+		t.Error("Acks CmdSlot mismatch")
+	}
+	if len(restored.Accepts) != 1 {
+		t.Fatalf("Accepts count: got %d, want 1", len(restored.Accepts))
+	}
+}
+
+// --- Serialization Benchmarks ---
+
+func BenchmarkMReplyMarshal(b *testing.B) {
+	msg := &MReply{
+		Replica: 1,
+		Ballot:  5,
+		CmdId:   CommandId{ClientId: 100, SeqNum: 42},
+		Rep:     make([]byte, 100),
+		Ok:      TRUE,
+	}
+	var buf bytes.Buffer
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		buf.Reset()
+		msg.Marshal(&buf)
+	}
+}
+
+func BenchmarkMReplyUnmarshal(b *testing.B) {
+	msg := &MReply{
+		Replica: 1,
+		Ballot:  5,
+		CmdId:   CommandId{ClientId: 100, SeqNum: 42},
+		Rep:     make([]byte, 100),
+		Ok:      TRUE,
+	}
+	var buf bytes.Buffer
+	msg.Marshal(&buf)
+	data := buf.Bytes()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		restored := &MReply{}
+		restored.Unmarshal(bytes.NewReader(data))
+	}
+}
+
+func BenchmarkMReplyRoundTrip(b *testing.B) {
+	msg := &MReply{
+		Replica: 1,
+		Ballot:  5,
+		CmdId:   CommandId{ClientId: 100, SeqNum: 42},
+		Rep:     make([]byte, 100),
+		Ok:      TRUE,
+	}
+	var buf bytes.Buffer
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		buf.Reset()
+		msg.Marshal(&buf)
+		restored := &MReply{}
+		restored.Unmarshal(&buf)
+	}
+}
+
+func BenchmarkMCommitMarshal(b *testing.B) {
+	msg := &MCommit{Replica: 1, Ballot: 5, CmdSlot: 100}
+	var buf bytes.Buffer
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		buf.Reset()
+		msg.Marshal(&buf)
+	}
+}
+
+func BenchmarkMAcceptMarshal(b *testing.B) {
+	msg := &MAccept{
+		Replica: 1,
+		Ballot:  5,
+		Cmd:     state.Command{Op: state.PUT, K: state.Key(100), V: []byte("value")},
+		CmdId:   CommandId{ClientId: 10, SeqNum: 1},
+		CmdSlot: 50,
+	}
+	var buf bytes.Buffer
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		buf.Reset()
+		msg.Marshal(&buf)
+	}
+}
+
+func BenchmarkMWeakReplyMarshal(b *testing.B) {
+	msg := &MWeakReply{
+		Replica: 1,
+		Ballot:  5,
+		CmdId:   CommandId{ClientId: 100, SeqNum: 42},
+		Rep:     make([]byte, 100),
+	}
+	var buf bytes.Buffer
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		buf.Reset()
+		msg.Marshal(&buf)
+	}
+}
+
+func BenchmarkCommandMarshal(b *testing.B) {
+	cmd := state.Command{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("benchvalue"))}
+	var buf bytes.Buffer
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		buf.Reset()
+		cmd.Marshal(&buf)
+	}
+}
+
+func BenchmarkCommandUnmarshal(b *testing.B) {
+	cmd := state.Command{Op: state.PUT, K: state.Key(100), V: state.Value([]byte("benchvalue"))}
+	var buf bytes.Buffer
+	cmd.Marshal(&buf)
+	data := buf.Bytes()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var restored state.Command
+		restored.Unmarshal(bytes.NewReader(data))
+	}
+}
+
 // TestMWeakProposeSerialization tests MWeakPropose Marshal/Unmarshal
 func TestMWeakProposeSerialization(t *testing.T) {
 	original := &MWeakPropose{

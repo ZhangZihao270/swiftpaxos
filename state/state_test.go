@@ -422,6 +422,46 @@ func BenchmarkComputeResultGET(b *testing.B) {
 	}
 }
 
+// BenchmarkCommandMarshal benchmarks Command serialization (allocation-free)
+func BenchmarkCommandMarshal(b *testing.B) {
+	cmd := Command{Op: PUT, K: Key(100), V: Value([]byte("benchvalue"))}
+	var buf bytes.Buffer
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		buf.Reset()
+		cmd.Marshal(&buf)
+	}
+}
+
+// BenchmarkCommandUnmarshal benchmarks Command deserialization
+func BenchmarkCommandUnmarshal(b *testing.B) {
+	cmd := Command{Op: PUT, K: Key(100), V: Value([]byte("benchvalue"))}
+	var buf bytes.Buffer
+	cmd.Marshal(&buf)
+	data := buf.Bytes()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var restored Command
+		restored.Unmarshal(bytes.NewReader(data))
+	}
+}
+
+// BenchmarkCommandRoundTrip benchmarks full Marshal+Unmarshal cycle
+func BenchmarkCommandRoundTrip(b *testing.B) {
+	cmd := Command{Op: PUT, K: Key(100), V: Value([]byte("benchvalue"))}
+	var buf bytes.Buffer
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		buf.Reset()
+		cmd.Marshal(&buf)
+		var restored Command
+		restored.Unmarshal(&buf)
+	}
+}
+
 // BenchmarkStateScaling benchmarks GET/PUT at different state sizes
 func BenchmarkStateScaling(b *testing.B) {
 	for _, size := range []int{100, 1000, 10000, 100000} {
