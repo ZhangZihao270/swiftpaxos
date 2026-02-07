@@ -70,6 +70,9 @@ type Replica struct {
 	// String conversion cache to avoid repeated strconv.FormatInt calls
 	// Key: int32, Value: string representation
 	stringCache sync.Map
+
+	// Pre-allocated closed channel for immediate notifications (avoids repeated allocations)
+	closedChan chan struct{}
 }
 
 // pendingWrite tracks an uncommitted write for speculative read computation
@@ -169,6 +172,10 @@ func New(alias string, rid int, addrs []string, exec bool, pl, f int,
 	r.Q = replica.NewMajorityOf(r.N)
 	r.sender = replica.NewSender(r.Replica)
 	r.batcher = NewBatcher(r, 128) // Increased from 8 for better batching
+
+	// Initialize pre-allocated closed channel for immediate notifications
+	r.closedChan = make(chan struct{})
+	close(r.closedChan)
 
 	_, leaderIds, err := replica.NewQuorumsFromFile(conf.Quorum, r.Replica)
 	if err == nil && len(leaderIds) != 0 {
@@ -1059,10 +1066,8 @@ func (r *Replica) getOrCreateCommitNotify(slot int) chan struct{} {
 
 	// Check if already committed
 	if r.committed.Has(strconv.Itoa(slot)) {
-		// Return a closed channel
-		ch := make(chan struct{})
-		close(ch)
-		return ch
+		// Return pre-allocated closed channel (avoids allocation)
+		return r.closedChan
 	}
 
 	// Get or create notification channel
@@ -1092,10 +1097,8 @@ func (r *Replica) getOrCreateExecuteNotify(slot int) chan struct{} {
 
 	// Check if already executed
 	if r.executed.Has(strconv.Itoa(slot)) {
-		// Return a closed channel
-		ch := make(chan struct{})
-		close(ch)
-		return ch
+		// Return pre-allocated closed channel (avoids allocation)
+		return r.closedChan
 	}
 
 	// Get or create notification channel

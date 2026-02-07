@@ -184,14 +184,17 @@ All phases completed successfully. See detailed tasks below.
   - **Analysis**: docs/phase-19.1-curp-ht-string-caching.md
   - **Result**: Successfully ported string caching from CURP-HO Phase 18.2
 
-- [ ] **19.2** Port Pre-allocated Closed Channel to CURP-HT
-  - Add `closedChan chan struct{}` field to Replica struct
-  - Initialize in NewReplica: `close(closedChan)`
-  - Update getOrCreateCommitNotify to return closedChan for committed slots
-  - Update getOrCreateExecuteNotify to return closedChan for executed slots
-  - Update newTestReplicaForDesc in tests
-  - **Files**: curp-ht/curp-ht.go, curp-ht/curp-ht_test.go
-  - **Expected**: Reduced allocations, minor throughput gain
+- [x] **19.2** Port Pre-allocated Closed Channel to CURP-HT [26:02:07]
+  - ✅ Added `closedChan chan struct{}` field to Replica struct
+  - ✅ Initialized in New(): create channel and close it immediately
+  - ✅ Updated getOrCreateCommitNotify to return closedChan for committed slots
+  - ✅ Updated getOrCreateExecuteNotify to return closedChan for executed slots
+  - ✅ All tests pass (go test ./curp-ht/)
+  - **Files**: curp-ht/curp-ht.go
+  - **Changes**: 4 locations modified (~10 lines total)
+  - **Analysis**: docs/phase-19.2-curp-ht-closed-channel.md
+  - **Result**: Successfully ported pre-allocated closed channel from CURP-HO Phase 18.2
+  - **Benefit**: Eliminates repeated channel allocations in hot paths, reduces GC pressure
 
 - [ ] **19.3** Optimize CURP-HT Spin-Wait (if applicable)
   - Review waitForWeakDep or similar blocking patterns in CURP-HT
