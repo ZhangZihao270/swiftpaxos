@@ -297,6 +297,87 @@ All phases completed successfully. See detailed tasks below.
 
 ---
 
+### Phase 32: Port Network Batching to CURP-HT [PENDING]
+
+**Goal**: Port the successful Phase 31.4 network batching optimization from CURP-HO to CURP-HT to reduce syscall overhead and improve throughput.
+
+**Background**: Phase 31.4 added configurable batch delay to CURP-HO, achieving +18.6% peak throughput (16.0K → 22.8K) by reducing syscalls by ~75%. This optimization was NOT applied to CURP-HT.
+
+**Expected Impact**: CURP-HT throughput 18.96K → 22-23K peak (+15-21%)
+
+**Hypothesis**: CURP-HT has the same I/O bottleneck as CURP-HO (syscall overhead), so network batching should provide similar gains.
+
+**Status**: Phase 32 PENDING - Ready to implement
+
+#### Tasks
+
+- [x] **32.1** Baseline Measurement [26:02:07]
+  - Run CURP-HT benchmark (pendings=20, maxDescRoutines=200)
+  - Measure: throughput, latency, slow path rate
+  - **Result: 21.1K ops/sec average (19.0-22.6K range)** ✓ Better than expected!
+  - Used Phase 19.5 results as baseline (same configuration)
+  - Output: docs/phase-32-baseline.md ✓
+
+- [ ] **32.2** CPU Profiling (Optional)
+  - Enable pprof in CURP-HT replica
+  - Collect 30s CPU profile under load
+  - Verify: % CPU in syscalls (expected: 30-40%)
+  - Decision: If syscall % high, proceed with batching
+  - Output: docs/phase-32.2-cpu-profile.md
+
+- [ ] **32.3** Port Network Batching to CURP-HT
+  - Add `batchDelay time.Duration` field to Batcher struct
+  - Add `SetBatchDelay(ns int64)` method
+  - Modify batcher run loop to add delay before sending
+  - Apply batch delay from config in New() initialization
+  - Files: curp-ht/batcher.go, curp-ht/curp-ht.go
+  - Lines: ~50 LOC
+  - Verification: Tests pass, no regressions with batchDelayUs=0
+
+- [ ] **32.4** Test Network Batching
+  - Test batch delays: 0, 50, 75, 100, 125, 150, 200μs
+  - Measure throughput and latency at each delay
+  - Find optimal delay (expected: 150μs like CURP-HO)
+  - Expected results:
+    - batchDelayUs=0: 17-19K (baseline)
+    - batchDelayUs=50: 20-21K
+    - batchDelayUs=150: 22-23K (optimal)
+  - Output: docs/phase-32.4-network-batching-results.md
+
+- [ ] **32.5** Validation
+  - Run 10 iterations with optimal batchDelayUs
+  - Calculate min/max/avg/stddev
+  - Success criteria: ≥21K sustained, 22-23K peak
+  - Output: docs/phase-32.5-validation-results.md
+
+- [ ] **32.6** Final Documentation
+  - Update todo.md with Phase 32 completion
+  - Document optimal configuration
+  - Create phase-32-summary.md
+  - Update CURP-HT status
+
+**Expected Final Configuration**:
+```yaml
+Protocol: curpht
+MaxDescRoutines: 200
+BatchDelayUs: 150      # NEW - Phase 32 optimization
+Pendings: 20
+ClientThreads: 2
+Clients: 2
+
+Expected Performance:
+  Throughput: 21-23K ops/sec (sustained-peak)
+  Strong Median: 5-6ms
+  Weak Median: 2-3ms
+```
+
+**Effort**: 8-14 hours (1-2 days)
+**Risk**: Low (proven optimization, backward compatible)
+
+**Plan**: docs/phase-32-curp-ht-optimization-plan.md
+
+---
+
 ## Detailed Task History
 
 <details>
