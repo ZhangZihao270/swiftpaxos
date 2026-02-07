@@ -1,0 +1,115 @@
+==================================================================
+   Phase 31.10: 23K Target Validation
+==================================================================
+
+Configuration:
+  - Protocol: CURP-HO (curpho)
+  - Pendings: 15
+  - MaxDescRoutines: 500
+  - BatchDelayUs: 150
+  - Clients: 2 × 2 threads = 4 streams
+  - Requests per run: 10000 per client (20000 total)
+  - Iterations: 10
+
+Target: 23,000 ops/sec with weak median < 2.0ms
+
+Starting validation at Sat Feb  7 06:08:02 PM UTC 2026
+
+Verifying configuration...
+✓ Configuration verified
+
+=== Iteration 1/10 ===
+  Throughput: 5673.64 ops/sec
+  Weak:   median=0.60ms, P99=6.62ms
+  Strong: median=18.06ms, P99=61.39ms
+   ✗ Target not met
+
+=== Iteration 2/10 ===
+  Throughput: 5718.54 ops/sec
+  Weak:   median=3.83ms, P99=60.86ms
+  Strong: median=5.54ms, P99=62.56ms
+   ✗ Target not met
+
+=== Iteration 3/10 ===
+  Throughput: 5377.28 ops/sec
+  Weak:   median=4.95ms, P99=50.06ms
+  Strong: median=6.58ms, P99=53.56ms
+   ✗ Target not met
+
+=== Iteration 4/10 ===
+  Throughput: 5308.38 ops/sec
+  Weak:   median=0.53ms, P99=6.06ms
+  Strong: median=19.12ms, P99=76.29ms
+   ✗ Target not met
+
+=== Iteration 5/10 ===
+  Throughput: 5477.55 ops/sec
+  Weak:   median=5.37ms, P99=51.26ms
+  Strong: median=6.95ms, P99=55.09ms
+   ✗ Target not met
+
+=== Iteration 6/10 ===
+  Throughput: 5329.97 ops/sec
+  Weak:   median=0.52ms, P99=6.41ms
+  Strong: median=19.41ms, P99=67.66ms
+   ✗ Target not met
+
+=== Iteration 7/10 ===
+  Throughput: 5966.44 ops/sec
+  Weak:   median=0.59ms, P99=5.52ms
+  Strong: median=17.24ms, P99=57.24ms
+   ✗ Target not met
+
+=== Iteration 8/10 ===
+  Throughput: 6091.92 ops/sec
+  Weak:   median=4.77ms, P99=41.72ms
+  Strong: median=6.27ms, P99=45.10ms
+   ✗ Target not met
+
+=== Iteration 9/10 ===
+  Throughput: 5703.84 ops/sec
+  Weak:   median=0.61ms, P99=7.57ms
+  Strong: median=17.79ms, P99=62.73ms
+   ✗ Target not met
+
+=== Iteration 10/10 ===
+  Throughput: 5753.74 ops/sec
+  Weak:   median=0.59ms, P99=7.03ms
+  Strong: median=18.00ms, P99=59.64ms
+   ✗ Target not met
+
+
+==================================================================
+   Statistical Analysis
+==================================================================
+
+Throughput Statistics:
+  Min:    5308.38 ops/sec
+  Max:    6091.92 ops/sec
+  Avg:    5640.13 ops/sec
+  StdDev: 252.31 ops/sec
+  CV:     4.00%
+
+Weak Median Latency:
+  Min: 0.52ms
+  Max: 5.37ms
+  Avg: 2.236ms
+
+==================================================================
+   Validation Results
+==================================================================
+
+Runs meeting target: 0 / 10 (0%)
+
+✗ VALIDATION FAILED: Target not consistently achieved
+
+Gap to target: 17359.87 ops/sec
+
+Validation completed at Sat Feb  7 06:23:24 PM UTC 2026
+
+Results saved to: /home/users/zihao/swiftpaxos/docs/phase-31-profiles/validation-23k-20260207-180802.txt
+
+Next steps:
+  1. Review detailed statistics above
+  2. Document final configuration in docs/phase-31-final-config.md
+  3. Create Phase 31 summary document
