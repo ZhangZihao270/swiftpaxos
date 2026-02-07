@@ -623,23 +623,14 @@ r.sender.SendToClient(propose.ClientId, rep, r.cs.causalReplyRPC)
 ### Current Configuration (multi-client.conf)
 
 ```yaml
-protocol: curpht  # ⚠️ INCONSISTENCY DETECTED!
+protocol: curpho        # ✅ Correct
 maxDescRoutines: 500
 batchDelayUs: 150
-pendings: 10      # ⚠️ INCONSISTENCY: docs say 15 optimal
+pendings: 15            # ✅ Correct (Phase 31.5c optimal)
 clientThreads: 2
 ```
 
-**Issues Found**:
-1. **protocol: curpht** instead of **curpho**
-   - Config file has wrong protocol value!
-   - Should be `protocol: curpho` for CURP-HO
-
-2. **pendings: 10** instead of **15**
-   - Phase 31.5c found pendings=15 optimal
-   - Config reverted to 10 (original constraint)
-
-**Status**: ⚠️ **Configuration drift** - config file doesn't match documented optimal settings
+**Status**: ✅ **Configuration matches documented optimal settings**
 
 ---
 
@@ -669,26 +660,20 @@ clientThreads: 2
 | Dual slow-path completion | Faster completion | Enhancement |
 | Single entry per key | Limited multi-client metadata | Documented (Phase 20) |
 
-### ⚠️ **Configuration Issues**
+### ✅ **Configuration** (verified correct)
 
-| Issue | Current | Should Be |
-|-------|---------|-----------|
-| Protocol setting | curpht | curpho |
-| Pendings setting | 10 | 15 (optimal) |
+| Setting | Value | Status |
+|---------|-------|--------|
+| Protocol | curpho | ✅ Correct |
+| Pendings | 15 | ✅ Optimal (Phase 31.5c) |
 
 ---
 
 ## Recommendations
 
-### 1. Fix Configuration File ⚠️ **URGENT**
+### 1. ~~Fix Configuration File~~ ✅ Already correct
 
-```bash
-# Update multi-client.conf
-protocol: curpho      # Change from curpht
-pendings: 15          # Change from 10 (Phase 31.5c optimal)
-```
-
-**Reason**: Configuration doesn't match Phase 31 achievements
+Configuration already has `protocol: curpho` and `pendings: 15`.
 
 ### 2. Optional: Cleanup Dead Code
 
@@ -718,6 +703,6 @@ The CURP-HO implementation is **highly consistent** with the protocol specificat
 ✅ **Client binding**: Automatic binding to closest replica
 ✅ **Optimizations**: String caching, batching, pre-allocated channels all present
 
-**Minor deviations** are documented and deliberate design decisions. The most significant issue is the **configuration file inconsistency** (protocol: curpht instead of curpho), which should be corrected immediately.
+**Minor deviations** are documented and deliberate design decisions. Configuration is verified correct.
 
 **Overall Assessment**: ✅ **Protocol implementation is correct and well-optimized.**
