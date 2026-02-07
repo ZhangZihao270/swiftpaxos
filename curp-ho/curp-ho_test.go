@@ -748,8 +748,9 @@ func TestPendingWriteKey(t *testing.T) {
 		{0, state.Key(0), "0:0"},
 	}
 
+	r := newTestReplica(false)
 	for _, tt := range tests {
-		got := pendingWriteKey(tt.clientId, tt.key)
+		got := r.pendingWriteKey(tt.clientId, tt.key)
 		if got != tt.expected {
 			t.Errorf("pendingWriteKey(%d, %d) = %q, want %q",
 				tt.clientId, tt.key, got, tt.expected)
@@ -774,12 +775,13 @@ func TestPendingWriteStruct(t *testing.T) {
 
 // TestCrossClientIsolation verifies different clients have different pending write keys
 func TestCrossClientIsolation(t *testing.T) {
+	r := newTestReplica(false)
 	clientA := int32(100)
 	clientB := int32(200)
 	key := state.Key(1)
 
-	keyA := pendingWriteKey(clientA, key)
-	keyB := pendingWriteKey(clientB, key)
+	keyA := r.pendingWriteKey(clientA, key)
+	keyB := r.pendingWriteKey(clientB, key)
 
 	if keyA == keyB {
 		t.Error("Different clients should have different pending write keys")
@@ -2639,6 +2641,11 @@ func newTestReplicaForDesc(isLeader bool) *Replica {
 		routineCount: 0,
 	}
 	r.Q = replica.NewMajorityOf(3)
+
+	// Initialize pre-allocated closed channel
+	r.closedChan = make(chan struct{})
+	close(r.closedChan)
+
 	return r
 }
 

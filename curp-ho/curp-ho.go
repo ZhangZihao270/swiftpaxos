@@ -71,6 +71,13 @@ type Replica struct {
 	commitNotify  map[int]chan struct{} // slot -> notification channel for commit
 	executeNotify map[int]chan struct{} // slot -> notification channel for execution
 	notifyMu      sync.Mutex            // protects commitNotify and executeNotify
+
+	// String conversion cache to avoid repeated strconv.FormatInt calls
+	// Key: int32, Value: string representation
+	stringCache sync.Map
+
+	// Pre-allocated closed channel for immediate notifications (avoids repeated allocations)
+	closedChan chan struct{}
 }
 
 // pendingWrite tracks an uncommitted write for speculative read computation
@@ -171,6 +178,10 @@ func New(alias string, rid int, addrs []string, exec bool, pl, f int,
 	r.Q = replica.NewMajorityOf(r.N)
 	r.sender = replica.NewSender(r.Replica)
 	r.batcher = NewBatcher(r, 128) // Increased from 8 for better batching
+
+	// Initialize pre-allocated closed channel for immediate notifications
+	r.closedChan = make(chan struct{})
+	close(r.closedChan)
 
 	_, leaderIds, err := replica.NewQuorumsFromFile(conf.Quorum, r.Replica)
 	if err == nil && len(leaderIds) != 0 {
@@ -482,7 +493,7 @@ func (r *Replica) sync(cmdId CommandId, cmd state.Command) {
 	if r.isLeader {
 		return
 	}
-	key := strconv.FormatInt(int64(cmd.K), 10)
+	key := r.int32ToString(int32(cmd.K))
 	r.unsynced.Upsert(key, nil,
 		func(exists bool, mapV, _ interface{}) interface{} {
 			if exists {
@@ -519,7 +530,7 @@ func (r *Replica) sync(cmdId CommandId, cmd state.Command) {
 // For the leader, unsynced entries track the latest slot. After execution, we
 // remove the entry only if this command's slot matches (no newer op has taken over).
 func (r *Replica) syncLeader(cmdId CommandId, cmd state.Command) {
-	key := strconv.FormatInt(int64(cmd.K), 10)
+	key := r.int32ToString(int32(cmd.K))
 	v, exists := r.unsynced.Get(key)
 	if !exists {
 		return
@@ -534,7 +545,7 @@ func (r *Replica) syncLeader(cmdId CommandId, cmd state.Command) {
 // unsyncStrong adds a strong (linearizable) op to the unsynced map on non-leaders.
 // On non-leaders, entry.Slot is used as a count of pending ops for this key.
 func (r *Replica) unsyncStrong(cmd state.Command, cmdId CommandId) {
-	key := strconv.FormatInt(int64(cmd.K), 10)
+	key := r.int32ToString(int32(cmd.K))
 	r.unsynced.Upsert(key, nil,
 		func(exists bool, mapV, _ interface{}) interface{} {
 			if exists {
@@ -564,7 +575,7 @@ func (r *Replica) unsyncStrong(cmd state.Command, cmdId CommandId) {
 // unsyncCausal adds a causal (weak) op to the unsynced map (witness pool).
 // Called by ALL replicas when receiving a causal propose.
 func (r *Replica) unsyncCausal(cmd state.Command, cmdId CommandId) {
-	key := strconv.FormatInt(int64(cmd.K), 10)
+	key := r.int32ToString(int32(cmd.K))
 	r.unsynced.Upsert(key, nil,
 		func(exists bool, mapV, _ interface{}) interface{} {
 			if exists {
@@ -596,7 +607,7 @@ func (r *Replica) unsyncCausal(cmd state.Command, cmdId CommandId) {
 // Returns the previous slot (dependency) or -1 if no dependency.
 func (r *Replica) leaderUnsyncStrong(cmd state.Command, slot int, cmdId CommandId) int {
 	depSlot := -1
-	key := strconv.FormatInt(int64(cmd.K), 10)
+	key := r.int32ToString(int32(cmd.K))
 	r.unsynced.Upsert(key, nil,
 		func(exists bool, mapV, _ interface{}) interface{} {
 			if exists {
@@ -624,7 +635,7 @@ func (r *Replica) leaderUnsyncStrong(cmd state.Command, slot int, cmdId CommandI
 // Returns the previous slot (dependency) or -1 if no dependency.
 func (r *Replica) leaderUnsyncCausal(cmd state.Command, slot int, cmdId CommandId) int {
 	depSlot := -1
-	key := strconv.FormatInt(int64(cmd.K), 10)
+	key := r.int32ToString(int32(cmd.K))
 	r.unsynced.Upsert(key, nil,
 		func(exists bool, mapV, _ interface{}) interface{} {
 			if exists {
@@ -652,7 +663,7 @@ func (r *Replica) leaderUnsyncCausal(cmd state.Command, slot int, cmdId CommandI
 // Returns TRUE if no conflict, FALSE if there's a strong write conflict.
 // In CURP-HO, this is used by non-leaders when processing strong proposes.
 func (r *Replica) ok(cmd state.Command) uint8 {
-	key := strconv.FormatInt(int64(cmd.K), 10)
+	key := r.int32ToString(int32(cmd.K))
 	v, exists := r.unsynced.Get(key)
 	if !exists {
 		return TRUE
@@ -678,7 +689,7 @@ func (r *Replica) ok(cmd state.Command) uint8 {
 // Used by non-leaders in CURP-HO when processing strong proposes.
 // weakDep is non-nil if there's an uncommitted weak write on the same key.
 func (r *Replica) okWithWeakDep(cmd state.Command) (uint8, *CommandId) {
-	key := strconv.FormatInt(int64(cmd.K), 10)
+	key := r.int32ToString(int32(cmd.K))
 	v, exists := r.unsynced.Get(key)
 	if !exists {
 		return TRUE, nil
@@ -706,7 +717,7 @@ func (r *Replica) okWithWeakDep(cmd state.Command) (uint8, *CommandId) {
 // checkStrongWriteConflict checks if there's a pending strong write on the given key.
 // Used in CURP-HO strong op handling to detect write-write conflicts.
 func (r *Replica) checkStrongWriteConflict(key state.Key) bool {
-	keyStr := strconv.FormatInt(int64(key), 10)
+	keyStr := r.int32ToString(int32(key))
 	if v, exists := r.unsynced.Get(keyStr); exists {
 		entry := v.(*UnsyncedEntry)
 		return entry.Slot > 0 && entry.IsStrong && entry.Op == state.PUT
@@ -717,7 +728,7 @@ func (r *Replica) checkStrongWriteConflict(key state.Key) bool {
 // getWeakWriteDep returns the CmdId of a pending weak write on the given key, if any.
 // Used in CURP-HO to track weak write dependencies for strong reads.
 func (r *Replica) getWeakWriteDep(key state.Key) *CommandId {
-	keyStr := strconv.FormatInt(int64(key), 10)
+	keyStr := r.int32ToString(int32(key))
 	if v, exists := r.unsynced.Get(keyStr); exists {
 		entry := v.(*UnsyncedEntry)
 		if entry.Slot > 0 && !entry.IsStrong && entry.Op == state.PUT {
@@ -731,7 +742,7 @@ func (r *Replica) getWeakWriteDep(key state.Key) *CommandId {
 // getWeakWriteValue returns the value of a pending weak write on the given key.
 // Used for speculative execution: strong reads can see uncommitted weak writes.
 func (r *Replica) getWeakWriteValue(key state.Key) (state.Value, bool) {
-	keyStr := strconv.FormatInt(int64(key), 10)
+	keyStr := r.int32ToString(int32(key))
 	if v, exists := r.unsynced.Get(keyStr); exists {
 		entry := v.(*UnsyncedEntry)
 		if entry.Slot > 0 && !entry.IsStrong && entry.Op == state.PUT {
@@ -1300,32 +1311,35 @@ func (r *Replica) asyncReplicateCausal(desc *commandDesc, slot int, clientId int
 
 // waitForWeakDep waits for a causal dependency to be executed
 // This ensures that weak commands from the same client execute in order
+// Optimized with shorter sleep intervals and string caching
 func (r *Replica) waitForWeakDep(clientId int32, depSeqNum int32) {
-	clientKey := strconv.FormatInt(int64(clientId), 10)
+	clientKey := r.int32ToString(clientId)
 
-	// Spin wait with brief sleeps until dependency is executed
-	// In production, this could use channels/conditions for efficiency
-	for i := 0; i < 1000; i++ { // Max ~100ms wait (100 iterations * 100us)
+	// Optimized spin-wait with 10x faster polling (10us instead of 100us)
+	// This reduces latency while still avoiding busy-waiting
+	for i := 0; i < 10000; i++ { // Max ~100ms wait (10000 * 10us)
 		if lastExec, exists := r.weakExecuted.Get(clientKey); exists {
 			if lastExec.(int32) >= depSeqNum {
 				return // Dependency satisfied
 			}
 		}
-		// Brief sleep to avoid busy-waiting
-		time.Sleep(100 * time.Microsecond)
+		// Brief sleep to avoid busy-waiting (10us)
+		time.Sleep(10 * time.Microsecond)
 	}
 	// Timeout: proceed anyway to avoid deadlock
-	// In production, might want to log a warning here
 }
 
 // markWeakExecuted marks a weak command as executed for causal ordering
 func (r *Replica) markWeakExecuted(clientId int32, seqNum int32) {
-	clientKey := strconv.FormatInt(int64(clientId), 10)
+	clientKey := r.int32ToString(clientId)
+
+	// Update the executed seqNum
 	r.weakExecuted.Upsert(clientKey, nil,
 		func(exists bool, mapV, _ interface{}) interface{} {
 			if exists {
+				prevSeqNum := mapV.(int32)
 				// Only update if this seqNum is newer
-				if seqNum > mapV.(int32) {
+				if seqNum > prevSeqNum {
 					return seqNum
 				}
 				return mapV
@@ -1334,14 +1348,26 @@ func (r *Replica) markWeakExecuted(clientId int32, seqNum int32) {
 		})
 }
 
+// int32ToString converts an int32 to string using a cache to avoid repeated conversions
+func (r *Replica) int32ToString(val int32) string {
+	// Try to load from cache first
+	if cached, ok := r.stringCache.Load(val); ok {
+		return cached.(string)
+	}
+	// Not in cache, convert and store
+	str := strconv.FormatInt(int64(val), 10)
+	r.stringCache.Store(val, str)
+	return str
+}
+
 // pendingWriteKey creates a unique key for pending writes: "clientId:key"
-func pendingWriteKey(clientId int32, key state.Key) string {
-	return strconv.FormatInt(int64(clientId), 10) + ":" + strconv.FormatInt(int64(key), 10)
+func (r *Replica) pendingWriteKey(clientId int32, key state.Key) string {
+	return r.int32ToString(clientId) + ":" + r.int32ToString(int32(key))
 }
 
 // addPendingWrite tracks an uncommitted write for speculative read computation
 func (r *Replica) addPendingWrite(clientId int32, key state.Key, seqNum int32, value state.Value) {
-	pwKey := pendingWriteKey(clientId, key)
+	pwKey := r.pendingWriteKey(clientId, key)
 	r.pendingWrites.Upsert(pwKey, nil,
 		func(exists bool, mapV, _ interface{}) interface{} {
 			if exists {
@@ -1358,7 +1384,7 @@ func (r *Replica) addPendingWrite(clientId int32, key state.Key, seqNum int32, v
 
 // removePendingWrite removes a pending write after it's been committed and executed
 func (r *Replica) removePendingWrite(clientId int32, key state.Key, seqNum int32) {
-	pwKey := pendingWriteKey(clientId, key)
+	pwKey := r.pendingWriteKey(clientId, key)
 	// Only remove if the seqNum matches (don't remove a newer pending write)
 	if pw, exists := r.pendingWrites.Get(pwKey); exists {
 		if pw.(*pendingWrite).seqNum == seqNum {
@@ -1369,7 +1395,7 @@ func (r *Replica) removePendingWrite(clientId int32, key state.Key, seqNum int32
 
 // getPendingWrite returns the pending write value if it exists and satisfies the causal dependency
 func (r *Replica) getPendingWrite(clientId int32, key state.Key, causalDep int32) *pendingWrite {
-	pwKey := pendingWriteKey(clientId, key)
+	pwKey := r.pendingWriteKey(clientId, key)
 	if pw, exists := r.pendingWrites.Get(pwKey); exists {
 		pending := pw.(*pendingWrite)
 		// Only return if this pending write is the one we're looking for (seqNum <= causalDep)
@@ -1439,10 +1465,8 @@ func (r *Replica) getOrCreateCommitNotify(slot int) chan struct{} {
 
 	// Check if already committed
 	if r.committed.Has(strconv.Itoa(slot)) {
-		// Return a closed channel
-		ch := make(chan struct{})
-		close(ch)
-		return ch
+		// Return pre-allocated closed channel (avoids allocation)
+		return r.closedChan
 	}
 
 	// Get or create notification channel
@@ -1472,10 +1496,8 @@ func (r *Replica) getOrCreateExecuteNotify(slot int) chan struct{} {
 
 	// Check if already executed
 	if r.executed.Has(strconv.Itoa(slot)) {
-		// Return a closed channel
-		ch := make(chan struct{})
-		close(ch)
-		return ch
+		// Return pre-allocated closed channel (avoids allocation)
+		return r.closedChan
 	}
 
 	// Get or create notification channel
