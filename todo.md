@@ -297,7 +297,7 @@ All phases completed successfully. See detailed tasks below.
 
 ---
 
-### Phase 32: Port Network Batching to CURP-HT [PENDING]
+### Phase 32: Port Network Batching to CURP-HT [IN PROGRESS - 3/6 tasks complete]
 
 **Goal**: Port the successful Phase 31.4 network batching optimization from CURP-HO to CURP-HT to reduce syscall overhead and improve throughput.
 
@@ -307,7 +307,7 @@ All phases completed successfully. See detailed tasks below.
 
 **Hypothesis**: CURP-HT has the same I/O bottleneck as CURP-HO (syscall overhead), so network batching should provide similar gains.
 
-**Status**: Phase 32 PENDING - Ready to implement
+**Status**: Phase 32 IN PROGRESS - Network batching ported and partially tested
 
 #### Tasks
 
@@ -335,15 +335,15 @@ All phases completed successfully. See detailed tasks below.
   - Verification: All tests pass ✓, backward compatible with batchDelayUs=0 ✓
   - **Result**: Network batching successfully ported from CURP-HO to CURP-HT
 
-- [ ] **32.4** Test Network Batching
-  - Test batch delays: 0, 50, 75, 100, 125, 150, 200μs
-  - Measure throughput and latency at each delay
-  - Find optimal delay (expected: 150μs like CURP-HO)
-  - Expected results:
-    - batchDelayUs=0: 17-19K (baseline)
-    - batchDelayUs=50: 20-21K
-    - batchDelayUs=150: 22-23K (optimal)
-  - Output: docs/phase-32.4-network-batching-results.md
+- [~] **32.4** Test Network Batching [26:02:07 - Partial]
+  - Created test scripts: ✓
+    - scripts/phase-32.4-batch-delay-sweep.sh (full: 7 delays × 3 iter)
+    - scripts/phase-32.4-quick-test.sh (quick: 4 delays × 3 iter)
+  - **Partial Results**: docs/phase-32.4-network-batching-partial.md ✓
+  - **Baseline measured: 24.1K ops/sec** (14% above Phase 32.1 expectation!)
+  - Full sweep interrupted by environment issues (exit code 144, SIGTERM)
+  - **Status**: Test infrastructure ready, awaiting stable environment
+  - **Next**: Run batch delay sweep when environment stable
 
 - [ ] **32.5** Validation
   - Run 10 iterations with optimal batchDelayUs
