@@ -196,12 +196,17 @@ All phases completed successfully. See detailed tasks below.
   - **Result**: Successfully ported pre-allocated closed channel from CURP-HO Phase 18.2
   - **Benefit**: Eliminates repeated channel allocations in hot paths, reduces GC pressure
 
-- [ ] **19.3** Optimize CURP-HT Spin-Wait (if applicable)
-  - Review waitForWeakDep or similar blocking patterns in CURP-HT
-  - Apply faster polling (100μs → 10μs) where beneficial
-  - **Note**: CURP-HT has different weak command flow (leader-only)
-  - **Files**: curp-ht/curp-ht.go
-  - **Expected**: Lower latency for weak ops
+- [x] **19.3** Optimize CURP-HT Spin-Wait [26:02:07]
+  - ✅ Reviewed waitForWeakDep blocking pattern in CURP-HT
+  - ✅ Applied faster polling: 100μs → 10μs (10x improvement)
+  - ✅ Updated iteration count: 1000 → 10000 (maintains ~100ms timeout)
+  - ✅ All tests pass (go test ./curp-ht/)
+  - **Note**: CURP-HT has leader-only weak commands, same causal dependency mechanism
+  - **Files**: curp-ht/curp-ht.go (waitForWeakDep function, ~line 941)
+  - **Changes**: 1 function, 4 lines modified
+  - **Analysis**: docs/phase-19.3-curp-ht-spin-wait.md
+  - **Result**: Successfully ported spin-wait optimization from CURP-HO Phase 18.2
+  - **Benefit**: 10x faster causal dependency detection, lower latency for weak ops
 
 - [ ] **19.4** Port Additional Optimizations from Phase 18.3-18.9
   - Apply pipeline depth, MaxDescRoutines, batcher, and profiling-driven fixes

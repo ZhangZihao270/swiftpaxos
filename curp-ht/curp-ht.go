@@ -938,22 +938,22 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 
 // waitForWeakDep waits for a causal dependency to be executed
 // This ensures that weak commands from the same client execute in order
+// Optimized with shorter sleep intervals for faster response
 func (r *Replica) waitForWeakDep(clientId int32, depSeqNum int32) {
 	clientKey := r.int32ToString(clientId)
 
-	// Spin wait with brief sleeps until dependency is executed
-	// In production, this could use channels/conditions for efficiency
-	for i := 0; i < 1000; i++ { // Max ~100ms wait (100 iterations * 100us)
+	// Optimized spin-wait with shorter intervals (10us instead of 100us)
+	// This provides 10x faster response time while still avoiding busy-waiting
+	for i := 0; i < 10000; i++ { // Max ~100ms wait (10000 iterations * 10us)
 		if lastExec, exists := r.weakExecuted.Get(clientKey); exists {
 			if lastExec.(int32) >= depSeqNum {
 				return // Dependency satisfied
 			}
 		}
-		// Brief sleep to avoid busy-waiting
-		time.Sleep(100 * time.Microsecond)
+		// Very brief sleep to avoid busy-waiting (10us)
+		time.Sleep(10 * time.Microsecond)
 	}
 	// Timeout: proceed anyway to avoid deadlock
-	// In production, might want to log a warning here
 }
 
 // markWeakExecuted marks a weak command as executed for causal ordering
