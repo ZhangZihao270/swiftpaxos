@@ -1,0 +1,14 @@
+=== Phase 31.1: Baseline Performance Measurement ===
+Configuration:
+  - Protocol: curpho
+  - Pendings: 10 (target constraint)
+  - MaxDescRoutines: 200
+  - Clients: 2 × 2 threads = 4 total streams
+  - Requests per run: 100000
+  - Iterations: 5
+  - Timestamp: 20260207-164759
+
+Checking multi-client.conf...
+✓ Configuration verified
+
+=== Iteration 1/5 ===

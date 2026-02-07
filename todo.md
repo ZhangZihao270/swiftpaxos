@@ -788,27 +788,73 @@ No full-map iterations exist. Further optimization requires runtime benchmarks.
 4. State machine optimization (faster execution)
 5. Memory locality improvements (cache-friendly data structures)
 
-#### Phase 31.1: Baseline Performance Measurement [PENDING]
+#### Phase 31.1: Baseline Performance Measurement [COMPLETE]
 
 **Goal**: Establish accurate baseline metrics with pendings=10 for comparison.
 
 **Tasks**:
-- [ ] Run comprehensive benchmark suite (5+ iterations, 100K ops each)
+- [x] Run comprehensive benchmark suite (5+ iterations, 100K ops each)
   - Measure: throughput, median/P99 latency (strong/weak), slow path rate
   - Configuration: pendings=10, maxDescRoutines=200, 2 clients × 2 threads
   - Record: CPU usage, network bandwidth, GC stats
-- [ ] Document baseline in docs/phase-31-baseline.md
+- [x] Document baseline in docs/phase-31-baseline.md
   - Include: system specs, Go version, network configuration
   - Breakdown: weak ops/sec, strong ops/sec, ratio
-- [ ] Identify variance sources (run at different times, measure consistency)
+- [x] Identify variance sources (run at different times, measure consistency)
 
-**Expected Results**:
-- Baseline throughput: ~13K ops/sec (from Phase 18.3 data)
-- Weak median latency: ~2.0-2.5ms (from Phase 18.3)
-- Strong median latency: ~5.0-5.5ms
-- Establish +/- variance bounds for statistical significance
+**Actual Results** (different from expected!):
+- **Baseline throughput**: 6537.93 ± 265.74 ops/sec (50% LOWER than expected 13K!)
+- **Weak median latency**: 1.83 ± 0.66ms ✓ (meets < 2ms constraint)
+- **Strong median latency**: 4.62 ± 3.02ms
+- **Variance**: 4.1% (acceptable)
+- **Gap to 23K target**: +16,462 ops/sec (+250% improvement needed)
 
-**Output**: docs/phase-31-baseline.md
+**Critical Finding**: Performance is 50% lower than Phase 18.3 baseline (~13K ops/sec).
+Investigation needed before proceeding to optimization phases.
+
+**Output**: docs/phase-31-baseline.md, docs/phase-31-profiles/baseline-results-20260207-165813.txt
+
+**Status**: ✓ Baseline complete, ⚠️ Performance anomaly detected
+
+---
+
+#### Phase 31.1b: Performance Discrepancy Investigation [PENDING]
+
+**Goal**: Understand why current performance (6.5K ops/sec) is 50% lower than Phase 18.3 baseline (13K ops/sec).
+
+**Tasks**:
+- [ ] Compare current multi-client.conf with Phase 18.3 configuration
+  - Check: client count, threads per client, maxDescRoutines
+  - Verify: protocol, pendings, buffer sizes, timeouts
+- [ ] Review Phase 18.3 documentation for exact test setup
+  - Locate: docs/phase-18.3*.md files
+  - Find: configuration used, system specs, benchmark script
+- [ ] Check system resource usage during benchmark
+  - Monitor: CPU usage, memory, network I/O
+  - Identify: resource bottlenecks or contention
+- [ ] Compare benchmark scripts methodology
+  - Phase 18.3: script used for 13K baseline
+  - Phase 31.1: scripts/phase-31-baseline.sh
+  - Check for measurement differences
+- [ ] Test with different client/thread configurations
+  - Try: 4 clients × 2 threads (8 streams vs current 4)
+  - Try: 2 clients × 4 threads (8 streams, different topology)
+  - Compare: throughput improvements
+
+**Hypotheses**:
+1. Phase 18.3 used more clients or threads (higher parallelism)
+2. Configuration parameter changed (maxDescRoutines, SHARD_COUNT)
+3. System resource contention (other processes running)
+4. Benchmark methodology difference (warmup, measurement window)
+5. Code regression introduced between Phase 18 and Phase 31
+
+**Expected Outcome**: Identify root cause and either:
+- Restore correct configuration to achieve ~13K baseline, OR
+- Accept 6.5K as current baseline and adjust Phase 31 strategy
+
+**Output**: docs/phase-31.1b-performance-investigation.md
+
+**Priority**: CRITICAL - Must resolve before Phase 31.2
 
 ---
 

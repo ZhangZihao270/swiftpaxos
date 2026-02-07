@@ -1,0 +1,71 @@
+=== Phase 31.1: Baseline Performance Measurement ===
+Configuration:
+  - Protocol: curpho
+  - Pendings: 10 (target constraint)
+  - MaxDescRoutines: 200
+  - Clients: 2 × 2 threads = 4 total streams
+  - Requests per run: 100000
+  - Iterations: 5
+  - Timestamp: 20260207-165813
+
+Checking multi-client.conf...
+✓ Configuration verified
+
+=== Iteration 1/5 ===
+  Throughput: 6735.54 ops/sec
+  Strong latency: median 3.00ms, p99 34.46ms
+  Weak latency: median 1.99ms, p99 31.34ms
+  Slow paths: N/A
+
+=== Iteration 2/5 ===
+  Throughput: 6458.67 ops/sec
+  Strong latency: median 3.11ms, p99 35.12ms
+  Weak latency: median 2.21ms, p99 31.32ms
+  Slow paths: N/A
+
+=== Iteration 3/5 ===
+  Throughput: 6825.45 ops/sec
+  Strong latency: median 3.45ms, p99 29.60ms
+  Weak latency: median 2.42ms, p99 27.17ms
+  Slow paths: N/A
+
+=== Iteration 4/5 ===
+  Throughput: 6602.14 ops/sec
+  Strong latency: median 2.91ms, p99 38.12ms
+  Weak latency: median 2.00ms, p99 37.23ms
+  Slow paths: N/A
+
+=== Iteration 5/5 ===
+  Throughput: 6067.85 ops/sec
+  Strong latency: median 10.66ms, p99 41.03ms
+  Weak latency: median 0.53ms, p99 4.87ms
+  Slow paths: N/A
+
+=== Baseline Performance Summary ===
+
+Throughput (ops/sec):
+  Min:    6067.85
+  Max:    6825.45
+  Avg:    6537.93 ± 265.74
+
+Strong Latency (ms):
+  Median: 2.91 - 10.66 (avg: 4.62 ± 3.02)
+  P99:    29.60 - 41.03 (avg: 35.66 ± 3.82)
+
+Weak Latency (ms):
+  Median: 0.53 - 2.42 (avg: 1.83 ± .66)
+  P99:    4.87 - 37.23 (avg: 26.38 ± 11.22)
+
+✓ Weak median latency constraint MET (< 2ms)
+
+=== Target Analysis ===
+Current baseline:  6537.93 ops/sec
+Target throughput: 23000 ops/sec
+Gap:               16462.07 ops/sec (+250.0% needed)
+
+=== Recommendations ===
+Gap is large (>50%). Recommended approach:
+  1. Profile CPU/memory to find bottlenecks (Phase 31.2-31.3)
+  2. Increase client parallelism (4 clients × 3 threads) (Phase 31.5)
+  3. Optimize hot paths identified in profiling (Phase 31.6-31.8)
+

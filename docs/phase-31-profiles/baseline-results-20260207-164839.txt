@@ -1,0 +1,70 @@
+=== Phase 31.1: Baseline Performance Measurement ===
+Configuration:
+  - Protocol: curpho
+  - Pendings: 10 (target constraint)
+  - MaxDescRoutines: 200
+  - Clients: 2 × 2 threads = 4 total streams
+  - Requests per run: 100000
+  - Iterations: 5
+  - Timestamp: 20260207-164839
+
+Checking multi-client.conf...
+✓ Configuration verified
+
+=== Iteration 1/5 ===
+  Throughput:  ops/sec
+  Strong latency: median ms, p99 ms
+  Weak latency: median ms, p99 ms
+  Slow paths: 
+
+=== Iteration 2/5 ===
+  Throughput:  ops/sec
+  Strong latency: median ms, p99 ms
+  Weak latency: median ms, p99 ms
+  Slow paths: 
+
+=== Iteration 3/5 ===
+  Throughput:  ops/sec
+  Strong latency: median ms, p99 ms
+  Weak latency: median ms, p99 ms
+  Slow paths: 
+
+=== Iteration 4/5 ===
+  Throughput:  ops/sec
+  Strong latency: median ms, p99 ms
+  Weak latency: median ms, p99 ms
+  Slow paths: 
+
+=== Iteration 5/5 ===
+  Throughput:  ops/sec
+  Strong latency: median ms, p99 ms
+  Weak latency: median ms, p99 ms
+  Slow paths: 
+
+=== Baseline Performance Summary ===
+
+Throughput (ops/sec):
+  Min:    
+  Max:    
+  Avg:     ± 
+
+Strong Latency (ms):
+  Median:  -  (avg:  ± )
+  P99:     -  (avg:  ± )
+
+Weak Latency (ms):
+  Median:  -  (avg:  ± )
+  P99:     -  (avg:  ± )
+
+✗ Weak median latency constraint VIOLATED (>= 2ms)
+
+=== Target Analysis ===
+Current baseline:   ops/sec
+Target throughput: 23000 ops/sec
+Gap:                ops/sec (+% needed)
+
+=== Recommendations ===
+Gap is small (<20%). Recommended approach:
+  1. Fine-tune existing parameters (maxDescRoutines, SHARD_COUNT)
+  2. Increase client threads slightly (2 clients × 3 threads)
+

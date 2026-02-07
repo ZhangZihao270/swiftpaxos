@@ -58,22 +58,25 @@ for i in $(seq 1 $ITERATIONS); do
     echo "=== Iteration $i/$ITERATIONS ===" | tee -a "$RESULT_FILE"
 
     # Update reqs in config temporarily
-    sed -i.bak "s/^reqs:.*/reqs:        $REQUESTS/" "$PROJECT_ROOT/multi-client.conf"
+    # Note: multi-client.conf has 2 clients, so divide total requests by 2
+    REQS_PER_CLIENT=$((REQUESTS / 2))
+    sed -i.bak "s/^reqs:.*/reqs:        $REQS_PER_CLIENT/" "$PROJECT_ROOT/multi-client.conf"
 
     # Run benchmark
     cd "$PROJECT_ROOT"
-    OUTPUT=$(make run-hybrid 2>&1)
+    OUTPUT=$(timeout 180 ./run-multi-client.sh -c multi-client.conf 2>&1)
 
     # Restore original config
     mv "$PROJECT_ROOT/multi-client.conf.bak" "$PROJECT_ROOT/multi-client.conf"
 
-    # Extract metrics
-    THROUGHPUT=$(echo "$OUTPUT" | grep -oP 'Total:\s+\K[0-9.]+(?=\s+ops/sec)' | tail -1)
-    STRONG_MEDIAN=$(echo "$OUTPUT" | grep "Strong latency" | grep -oP 'median:\s+\K[0-9.]+' | head -1)
-    STRONG_P99=$(echo "$OUTPUT" | grep "Strong latency" | grep -oP 'p99:\s+\K[0-9.]+' | head -1)
-    WEAK_MEDIAN=$(echo "$OUTPUT" | grep "Weak latency" | grep -oP 'median:\s+\K[0-9.]+' | head -1)
-    WEAK_P99=$(echo "$OUTPUT" | grep "Weak latency" | grep -oP 'p99:\s+\K[0-9.]+' | head -1)
-    SLOW_PATH=$(echo "$OUTPUT" | grep "Slow Paths:" | grep -oP 'Slow Paths:\s+\K[0-9]+' | head -1)
+    # Extract metrics (from run-multi-client.sh merged output)
+    THROUGHPUT=$(echo "$OUTPUT" | grep -oP 'Aggregate throughput:\s+\K[0-9.]+' | tail -1)
+    STRONG_MEDIAN=$(echo "$OUTPUT" | grep "Strong Operations:" -A 2 | grep -oP 'Avg median:\s+\K[0-9.]+' | head -1)
+    STRONG_P99=$(echo "$OUTPUT" | grep "Strong Operations:" -A 2 | grep -oP 'Max P99:\s+\K[0-9.]+' | head -1)
+    WEAK_MEDIAN=$(echo "$OUTPUT" | grep "Weak Operations:" -A 2 | grep -oP 'Avg median:\s+\K[0-9.]+' | head -1)
+    WEAK_P99=$(echo "$OUTPUT" | grep "Weak Operations:" -A 2 | grep -oP 'Max P99:\s+\K[0-9.]+' | head -1)
+    # Slow path count not directly available in merged output
+    SLOW_PATH="N/A"
 
     # Store results
     throughputs+=("$THROUGHPUT")
