@@ -1304,6 +1304,39 @@ Investigation needed before proceeding to optimization phases.
 
 ---
 
+### Phase 33: Protocol Compliance & Code Quality [✅ COMPLETE]
+
+**Goal**: Fix protocol deviations identified during code-vs-spec verification, commit verification documentation.
+
+#### Phase 33.1: Fix okWithWeakDep Spec Deviation [✅ COMPLETE]
+
+**Goal**: Make `okWithWeakDep` in CURP-HO match protocol spec — only return weakDep for strong READs, not strong WRITEs.
+
+**Background**: Protocol verification (docs/curp-ho-protocol-verification.md) found that `okWithWeakDep` returns `weakDep` for ANY strong op when a causal write is pending. The spec says only strong reads should get weakDep (writes don't need to track uncommitted weak write dependencies).
+
+**Impact**: Low — functionally correct before, but unnecessary weakDep on strong writes could cause spurious slow-path fallbacks if replicas have asymmetric views of pending weak writes per key.
+
+**Tasks**:
+- [x] Fix `okWithWeakDep` to only return weakDep when `cmd.Op == state.GET`
+  - Added `cmd.Op == state.GET` guard in the causal-write-pending branch
+  - Strong PUTs and SCANs now correctly get `weakDep=nil`
+- [x] Update existing tests to match corrected behavior
+  - Updated `TestCausalUnsyncOkNoConflict`: strong write now expects `dep=nil`
+  - Updated `TestStrongWriteWithCausalWriteInWitnessPool`: expects `weakDep=nil`
+- [x] Add new tests verifying spec-correct behavior for both GET and PUT
+  - Added `TestOkWithWeakDepStrongReadVsWriteWithCausalWrite`: tests GET, PUT, and SCAN
+- [x] Run full test suite — all tests pass, no regressions
+
+#### Phase 33.2: Commit Protocol Verification Documentation [✅ COMPLETE]
+
+**Goal**: Commit the two untracked documentation files created during protocol verification.
+
+**Tasks**:
+- [x] Commit docs/curp-ho-protocol-verification.md
+- [x] Commit docs/phase-31-current-status.md
+
+---
+
 # Future Protocols
 
 ## Candidates for Implementation

@@ -1656,8 +1656,19 @@ func TestCausalUnsyncOkNoConflict(t *testing.T) {
 		t.Errorf("ok = %d, want TRUE (causal write should not block strong write)", result)
 	}
 
-	// okWithWeakDep should return the causal write as a dependency
+	// okWithWeakDep for a strong WRITE should return TRUE but no weakDep.
+	// Per protocol spec, weakDep is only for strong READs.
 	ok, dep := r.okWithWeakDep(strongWrite)
+	if ok != TRUE {
+		t.Errorf("okWithWeakDep ok = %d, want TRUE", ok)
+	}
+	if dep != nil {
+		t.Errorf("okWithWeakDep dep = %v, want nil (strong writes don't get weakDep)", dep)
+	}
+
+	// okWithWeakDep for a strong READ should return TRUE + weakDep
+	strongRead := state.Command{Op: state.GET, K: state.Key(100), V: state.NIL()}
+	ok, dep = r.okWithWeakDep(strongRead)
 	if ok != TRUE {
 		t.Errorf("okWithWeakDep ok = %d, want TRUE", ok)
 	}
@@ -3502,6 +3513,48 @@ func TestOkWithWeakDepCausalReadNoDep(t *testing.T) {
 	}
 }
 
+// TestOkWithWeakDepStrongReadVsWriteWithCausalWrite verifies that per protocol spec,
+// only strong READs get weakDep when a causal write is pending on the same key.
+// Strong WRITEs should get ok=TRUE but weakDep=nil.
+func TestOkWithWeakDepStrongReadVsWriteWithCausalWrite(t *testing.T) {
+	r := newTestReplica(false)
+
+	// Add a causal write to unsynced
+	causalCmd := state.Command{Op: state.PUT, K: state.Key(200), V: state.Value([]byte("pending"))}
+	causalId := CommandId{ClientId: 20, SeqNum: 10}
+	r.unsyncCausal(causalCmd, causalId)
+
+	// Strong READ should get weakDep
+	ok, weakDep := r.okWithWeakDep(state.Command{Op: state.GET, K: state.Key(200)})
+	if ok != TRUE {
+		t.Errorf("strong GET: ok = %d, want TRUE", ok)
+	}
+	if weakDep == nil {
+		t.Fatal("strong GET: weakDep should not be nil when causal write is pending")
+	}
+	if *weakDep != causalId {
+		t.Errorf("strong GET: weakDep = %v, want %v", *weakDep, causalId)
+	}
+
+	// Strong WRITE should NOT get weakDep (per protocol spec)
+	ok, weakDep = r.okWithWeakDep(state.Command{Op: state.PUT, K: state.Key(200)})
+	if ok != TRUE {
+		t.Errorf("strong PUT: ok = %d, want TRUE", ok)
+	}
+	if weakDep != nil {
+		t.Errorf("strong PUT: weakDep = %v, want nil (writes don't need weakDep)", weakDep)
+	}
+
+	// SCAN should also NOT get weakDep
+	ok, weakDep = r.okWithWeakDep(state.Command{Op: state.SCAN, K: state.Key(200)})
+	if ok != TRUE {
+		t.Errorf("strong SCAN: ok = %d, want TRUE", ok)
+	}
+	if weakDep != nil {
+		t.Errorf("strong SCAN: weakDep = %v, want nil (only GETs get weakDep)", weakDep)
+	}
+}
+
 // --- computeSpeculativeResultWithUnsynced tests ---
 
 func TestSpeculativeWithUnsyncedGETSeesWeakWrite(t *testing.T) {
@@ -3658,13 +3711,13 @@ func TestStrongWriteWithCausalWriteInWitnessPool(t *testing.T) {
 	r.unsyncCausal(causalCmd, causalId)
 
 	// Strong write on same key - should NOT conflict (causal != strong conflict)
+	// Per protocol spec, strong writes don't get weakDep (only strong reads do)
 	ok, weakDep := r.okWithWeakDep(state.Command{Op: state.PUT, K: state.Key(100)})
 	if ok != TRUE {
 		t.Errorf("ok = %d, want TRUE (causal write doesn't conflict with strong write)", ok)
 	}
-	// WeakDep should be set since there's a pending causal write
-	if weakDep == nil || *weakDep != causalId {
-		t.Errorf("weakDep = %v, want %v", weakDep, causalId)
+	if weakDep != nil {
+		t.Errorf("weakDep = %v, want nil (strong writes don't get weakDep per spec)", weakDep)
 	}
 }
 

@@ -695,7 +695,7 @@ func (r *Replica) ok(cmd state.Command) uint8 {
 
 // okWithWeakDep checks unsynced for conflicts and returns both ok status and weakDep.
 // Used by non-leaders in CURP-HO when processing strong proposes.
-// weakDep is non-nil if there's an uncommitted weak write on the same key.
+// weakDep is non-nil only for strong READs when there's an uncommitted weak write on the same key.
 func (r *Replica) okWithWeakDep(cmd state.Command) (uint8, *CommandId) {
 	key := r.int32ToString(int32(cmd.K))
 	v, exists := r.unsynced.Get(key)
@@ -714,10 +714,15 @@ func (r *Replica) okWithWeakDep(cmd state.Command) (uint8, *CommandId) {
 	if entry.IsStrong {
 		return FALSE, nil
 	}
-	// Causal (weak) write pending → return weakDep
+	// Causal (weak) write pending → return weakDep only for strong reads.
+	// Per protocol spec: strong reads need weakDep to track uncommitted weak write
+	// dependencies for fast-path consistency checking. Strong writes don't need it.
 	if !entry.IsStrong && entry.Op == state.PUT {
-		dep := entry.CmdId
-		return TRUE, &dep
+		if cmd.Op == state.GET {
+			dep := entry.CmdId
+			return TRUE, &dep
+		}
+		return TRUE, nil
 	}
 	return TRUE, nil
 }
