@@ -340,7 +340,7 @@ See original todo.md for detailed history.
 
 # CURP-HO (Hybrid Optimal)
 
-## Status: 🔧 **IN PROGRESS** (Phase 20-28 Complete, 29 Analyzed, Phase 30 Planned)
+## Status: 🔧 **IN PROGRESS** (Phase 20-28 Complete, 29 Analyzed, Phase 31 In Progress - 23K Target)
 
 ## Design Summary
 
@@ -763,6 +763,360 @@ No full-map iterations exist. Further optimization requires runtime benchmarks.
   - Performance with varying number of replicas
   - Performance with varying client distribution
   - Plan: docs/dev/curp-ho/phase30-evaluation-plan.md
+
+---
+
+### Phase 31: 23K Throughput Target with Pendings=10 [IN PROGRESS]
+
+**Goal**: Achieve 23,000 ops/sec throughput with pendings=10 while maintaining median weak latency < 2ms.
+
+**Baseline Performance** (current configuration, pendings=10):
+- Configuration: 2 clients × 2 threads, protocol=curpho, maxDescRoutines=200
+- Current throughput: ~13K ops/sec (from Phase 18.3)
+- Target throughput: 23K ops/sec (+77% increase)
+- Latency constraint: Median weak < 2ms
+
+**Performance Gap Analysis**:
+- Current: 13K ops/sec with pendings=10
+- With pendings=20: 17.35K ops/sec (Phase 18.3) → still 5.65K short of target
+- Required improvement: +10K ops/sec from current pendings=10 baseline
+
+**Strategy**: Multi-dimensional optimization approach
+1. Profile-driven CPU optimization (identify hot paths)
+2. Increase client parallelism (more clients/threads)
+3. Network stack optimization (reduce serialization overhead)
+4. State machine optimization (faster execution)
+5. Memory locality improvements (cache-friendly data structures)
+
+#### Phase 31.1: Baseline Performance Measurement [PENDING]
+
+**Goal**: Establish accurate baseline metrics with pendings=10 for comparison.
+
+**Tasks**:
+- [ ] Run comprehensive benchmark suite (5+ iterations, 100K ops each)
+  - Measure: throughput, median/P99 latency (strong/weak), slow path rate
+  - Configuration: pendings=10, maxDescRoutines=200, 2 clients × 2 threads
+  - Record: CPU usage, network bandwidth, GC stats
+- [ ] Document baseline in docs/phase-31-baseline.md
+  - Include: system specs, Go version, network configuration
+  - Breakdown: weak ops/sec, strong ops/sec, ratio
+- [ ] Identify variance sources (run at different times, measure consistency)
+
+**Expected Results**:
+- Baseline throughput: ~13K ops/sec (from Phase 18.3 data)
+- Weak median latency: ~2.0-2.5ms (from Phase 18.3)
+- Strong median latency: ~5.0-5.5ms
+- Establish +/- variance bounds for statistical significance
+
+**Output**: docs/phase-31-baseline.md
+
+---
+
+#### Phase 31.2: CPU Profiling - Identify Hotspots [PENDING]
+
+**Goal**: Use pprof to identify CPU bottlenecks preventing higher throughput.
+
+**Tasks**:
+- [ ] Enable CPU profiling in replica and client
+  - Add pprof HTTP endpoints: `import _ "net/http/pprof"`
+  - Run benchmark with `GODEBUG=gctrace=1` for GC stats
+- [ ] Collect CPU profiles (30-60 second samples under load)
+  - Replica profile: `curl localhost:6060/debug/pprof/profile?seconds=30 > replica-cpu.prof`
+  - Client profile: `curl localhost:6061/debug/pprof/profile?seconds=30 > client-cpu.prof`
+- [ ] Analyze top CPU consumers: `go tool pprof -top replica-cpu.prof`
+  - Identify functions using > 5% CPU
+  - Focus on: serialization, map operations, channel ops, lock contention
+- [ ] Generate flame graph: `go tool pprof -http=:8080 replica-cpu.prof`
+- [ ] Document findings in docs/phase-31.2-cpu-profile.md
+  - List: top 10 functions by CPU%, call chains
+  - Categorize: hot paths (serialization, consensus, state machine, GC)
+
+**Expected Bottlenecks** (hypotheses to validate):
+- Message serialization/deserialization (Marshal/Unmarshal)
+- ConcurrentMap operations (Get/Set/Upsert)
+- Channel send/receive operations
+- String conversions (despite caching, may still be high)
+- State machine Execute() calls
+- GC overhead (allocation rate vs collection rate)
+
+**Success Criteria**: Identify top 3-5 bottlenecks consuming > 50% total CPU
+
+**Output**: docs/phase-31.2-cpu-profile.md, *.prof files
+
+---
+
+#### Phase 31.3: Memory Profiling - Allocation Analysis [PENDING]
+
+**Goal**: Identify allocation hotspots causing GC pressure.
+
+**Tasks**:
+- [ ] Collect memory allocation profile
+  - `curl localhost:6060/debug/pprof/allocs > replica-allocs.prof`
+  - `go tool pprof -top -alloc_space replica-allocs.prof`
+- [ ] Analyze allocation sources
+  - Message structure allocations (MAccept, MReply, etc.)
+  - Command descriptor allocations
+  - String/byte slice allocations
+  - Map/channel allocations
+- [ ] Measure allocation rate: GODEBUG=gctrace=1 output analysis
+  - Target: < 10 MB/sec allocation rate (< 20% of GC capacity)
+  - Current estimate: 6-8 MB/sec (from Phase 18.9)
+- [ ] Identify candidates for object pooling
+  - High-frequency allocations (> 1000/sec)
+  - Large objects (> 1KB)
+  - Objects with short lifetimes (< 10ms)
+- [ ] Document in docs/phase-31.3-memory-profile.md
+
+**Output**: docs/phase-31.3-memory-profile.md, allocation profile analysis
+
+---
+
+#### Phase 31.4: Network Optimization - Message Batching [PENDING]
+
+**Goal**: Reduce network overhead by improving message batching efficiency.
+
+**Tasks**:
+- [ ] Analyze current batcher performance
+  - Measure: batch sizes, batching latency, network utilization
+  - Tool: Add instrumentation to batcher.go (log batch size histogram)
+- [ ] Optimize Accept message batching
+  - Current: MAAcks batches multiple MAcceptAck messages
+  - Proposal: Increase batch window from immediate to 50-100μs for higher batching
+  - Trade-off: +0.05-0.1ms latency for 2-3x larger batches
+- [ ] Implement adaptive batching
+  - Under high load: increase batch size (more throughput)
+  - Under low load: decrease batch size (lower latency)
+  - Heuristic: if channel buffer > 50%, batch for 50μs; else send immediately
+- [ ] Test batching impact on throughput
+  - Measure: batch size increase vs throughput improvement
+  - Target: +10-15% throughput from better batching
+- [ ] Document in docs/phase-31.4-network-batching.md
+
+**Expected Results**:
+- Larger batch sizes: 2-5 messages → 5-10 messages per batch
+- Reduced network overhead: fewer RPC calls, better amortization
+- Throughput improvement: +1-2K ops/sec
+
+**Output**: docs/phase-31.4-network-batching.md
+
+---
+
+#### Phase 31.5: Increase Client Parallelism [PENDING]
+
+**Goal**: Increase request parallelism without increasing per-thread pipeline depth.
+
+**Rationale**:
+- Current: 2 clients × 2 threads = 4 total request streams
+- Pendings=10 per thread → 40 max in-flight ops total
+- More threads = more parallelism WITHOUT increasing pendings per thread
+
+**Tasks**:
+- [ ] Test clientThreads scaling (pendings=10 fixed)
+  - Baseline: 2 clients × 2 threads (4 streams)
+  - Test: 2 clients × 4 threads (8 streams)
+  - Test: 2 clients × 6 threads (12 streams)
+  - Test: 4 clients × 2 threads (8 streams)
+  - Test: 4 clients × 3 threads (12 streams)
+- [ ] Measure throughput vs thread count
+  - Plot: total throughput vs total threads (2,4,6,8,12)
+  - Measure: median latency at each thread count
+  - Identify: sweet spot (max throughput, latency < 2ms)
+- [ ] Test with more client machines (if available)
+  - 4 clients × 3 threads = 12 streams (vs 2 clients × 2 threads = 4 streams)
+  - Expected: 3x more parallelism → 1.5-2x throughput boost
+- [ ] Document in docs/phase-31.5-client-parallelism.md
+
+**Expected Results**:
+- 2x thread count → 1.5-1.8x throughput improvement
+- Latency increase: < 0.5ms (due to increased contention)
+- Optimal: 4 clients × 3 threads = 12 streams → ~20K ops/sec
+
+**Trade-offs**:
+- More threads = more Go scheduler overhead
+- More clients = more network connections
+- Diminishing returns after ~12-16 threads (contention limits)
+
+**Output**: docs/phase-31.5-client-parallelism.md, test-client-parallelism.sh
+
+---
+
+#### Phase 31.6: State Machine Optimization [PENDING]
+
+**Goal**: Reduce state machine execution time for faster command processing.
+
+**Tasks**:
+- [ ] Profile state machine operations
+  - Measure: Execute() time per operation (GET, PUT, SCAN)
+  - Identify: slow operations in state/state.go
+- [ ] Optimize GET operation
+  - Current: map lookup in r.State
+  - Consider: read-optimized data structure (read-write lock? cache?)
+- [ ] Optimize PUT operation
+  - Current: map write in r.State
+  - Consider: write buffering, batch state updates
+- [ ] Optimize key generation in client
+  - Current: GetClientKey() called per operation
+  - Consider: pre-generate batch of keys, cache Zipf samples
+- [ ] Measure state machine % of total latency
+  - Target: < 15% of total latency (< 0.3ms per op)
+- [ ] Document in docs/phase-31.6-state-machine.md
+
+**Expected Results**:
+- State machine speedup: 1.5-2x faster Execute()
+- Throughput improvement: +1-2K ops/sec
+- Latency reduction: -0.2-0.3ms
+
+**Output**: docs/phase-31.6-state-machine.md
+
+---
+
+#### Phase 31.7: Serialization Optimization [PENDING]
+
+**Goal**: Reduce serialization/deserialization overhead (likely a top CPU consumer).
+
+**Tasks**:
+- [ ] Profile Marshal/Unmarshal functions (from Phase 31.2 results)
+  - Measure: % CPU in defs.go Marshal/Unmarshal
+  - Identify: most frequently serialized messages
+- [ ] Optimize hot message types
+  - MAccept, MReply, MCausalPropose, MCausalReply
+  - Consider: reduce varint overhead, pre-compute sizes
+- [ ] Implement zero-copy deserialization (if feasible)
+  - Avoid intermediate byte slice allocations
+  - Use unsafe pointers for fixed-size fields (unsafe but fast)
+- [ ] Add message size caching
+  - Cache BinarySize() results for repeated messages
+  - Avoid re-computing sizes on retransmission
+- [ ] Benchmark serialization speedup
+  - Measure: throughput improvement per 10% serialization speedup
+- [ ] Document in docs/phase-31.7-serialization.md
+
+**Expected Results**:
+- Serialization speedup: 1.3-1.5x faster
+- CPU reduction: -5-10% CPU usage
+- Throughput improvement: +1.5-2.5K ops/sec
+
+**Output**: docs/phase-31.7-serialization.md
+
+---
+
+#### Phase 31.8: Lock Contention Analysis [PENDING]
+
+**Goal**: Identify and reduce lock contention bottlenecks.
+
+**Tasks**:
+- [ ] Collect mutex profile
+  - `curl localhost:6060/debug/pprof/mutex > replica-mutex.prof`
+  - `go tool pprof -top replica-mutex.prof`
+- [ ] Analyze contention hotspots
+  - ConcurrentMap shard locks (SHARD_COUNT tuning)
+  - notifyMu in commit/execute notification
+  - descPool mutex
+  - Sender locks
+- [ ] Reduce critical section sizes
+  - Move work outside locks where possible
+  - Use atomic operations instead of mutexes (where applicable)
+- [ ] Test SHARD_COUNT tuning
+  - Current: 512 shards (from Phase 18.6)
+  - Test: 256, 512, 1024, 2048 shards
+  - Find: optimal for 4-12 threads
+- [ ] Document in docs/phase-31.8-lock-contention.md
+
+**Expected Results**:
+- Reduced contention: < 5% time blocked on locks
+- Throughput improvement: +1-2K ops/sec
+
+**Output**: docs/phase-31.8-lock-contention.md
+
+---
+
+#### Phase 31.9: Combined Optimization Testing [PENDING]
+
+**Goal**: Apply best optimizations from 31.2-31.8 and measure combined impact.
+
+**Tasks**:
+- [ ] Implement top 3-5 optimizations with highest ROI
+  - Based on profiling results from 31.2-31.8
+  - Focus on: easiest wins with biggest impact
+- [ ] Test combined configuration
+  - Apply: all selected optimizations together
+  - Measure: total throughput improvement
+- [ ] Validate latency constraint
+  - Ensure: weak median latency < 2ms
+  - Measure: P99 latency for both strong and weak
+- [ ] Document optimization summary
+  - List: each optimization + individual impact
+  - Show: combined multiplicative effect
+- [ ] Create final configuration file
+  - Save: multi-client-23k.conf with all settings
+- [ ] Document in docs/phase-31.9-combined-results.md
+
+**Success Criteria**:
+- Throughput: ≥ 23K ops/sec sustained
+- Weak median latency: < 2ms
+- Strong median latency: < 6ms (acceptable)
+- Configuration: pendings=10 (as required)
+
+**Output**: docs/phase-31.9-combined-results.md, multi-client-23k.conf
+
+---
+
+#### Phase 31.10: Validation and Documentation [PENDING]
+
+**Goal**: Validate 23K target achieved and document final configuration.
+
+**Tasks**:
+- [ ] Run extended validation tests (10+ iterations, 200K ops each)
+  - Measure: throughput stability (min/max/avg/stddev)
+  - Measure: latency percentiles (P50, P95, P99, P999)
+  - Measure: slow path rate
+- [ ] Stress test under sustained load
+  - Run: 1M ops continuous (2-3 minutes)
+  - Monitor: performance degradation over time
+  - Check: no memory leaks, stable GC
+- [ ] Document final configuration in docs/phase-31-final-config.md
+  - List: all parameter values
+  - Explain: each optimization and its contribution
+  - Provide: reproduction instructions
+- [ ] Update README with 23K achievement
+  - Add: performance section with benchmark results
+  - Include: configuration recommendations
+- [ ] Create summary in docs/phase-31-summary.md
+  - Show: baseline vs final (improvement %)
+  - List: key optimizations ranked by impact
+  - Provide: lessons learned for future protocols
+
+**Success Criteria**:
+- 10 validation runs: all ≥ 23K ops/sec
+- Weak median: all runs < 2ms
+- Variance: < 5% between runs
+- Documentation: complete and reproducible
+
+**Output**: docs/phase-31-final-config.md, docs/phase-31-summary.md
+
+---
+
+## Phase 31 Summary
+
+**Optimization Strategy**:
+1. **Profile-first approach**: Measure before optimizing (31.2-31.3)
+2. **Multi-dimensional gains**: Client parallelism (31.5), network (31.4), CPU (31.6-31.8)
+3. **Latency constraint**: Keep weak median < 2ms while increasing throughput
+4. **Pendings=10 constraint**: Increase throughput via other dimensions (threads, batching, CPU)
+
+**Expected Improvement Breakdown**:
+- Client parallelism (3x threads): +5-6K ops/sec (largest gain)
+- Network batching: +1-2K ops/sec
+- State machine optimization: +1-2K ops/sec
+- Serialization optimization: +1.5-2.5K ops/sec
+- Lock contention reduction: +1-2K ops/sec
+- **Total expected**: 13K → 23K+ ops/sec (+77% improvement)
+
+**Risk Mitigation**:
+- Profile at each step (avoid premature optimization)
+- Test individual optimizations before combining
+- Monitor latency at every step (ensure < 2ms constraint)
+- Document variance and reproducibility
 
 ---
 
