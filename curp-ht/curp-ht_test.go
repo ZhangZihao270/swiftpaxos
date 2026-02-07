@@ -821,13 +821,15 @@ func TestMixedStrongWeakSlotOrdering(t *testing.T) {
 
 // TestPendingWriteKey verifies the key generation for pending writes
 func TestPendingWriteKey(t *testing.T) {
-	key1 := pendingWriteKey(100, state.Key(42))
+	r := &Replica{} // Create minimal replica for testing
+
+	key1 := r.pendingWriteKey(100, state.Key(42))
 	expected := "100:42"
 	if key1 != expected {
 		t.Errorf("pendingWriteKey(100, 42) = %q, want %q", key1, expected)
 	}
 
-	key2 := pendingWriteKey(200, state.Key(999))
+	key2 := r.pendingWriteKey(200, state.Key(999))
 	expected2 := "200:999"
 	if key2 != expected2 {
 		t.Errorf("pendingWriteKey(200, 999) = %q, want %q", key2, expected2)
@@ -905,13 +907,14 @@ func TestCrossClientIsolation(t *testing.T) {
 	// Client A (100) has pending write on key 1
 	// Client B (200) reads key 1 - should NOT see A's pending write
 
+	r := &Replica{} // Create minimal replica for testing
 	clientA := int32(100)
 	clientB := int32(200)
 	key := state.Key(1)
 
 	// Client A's pending write
-	keyA := pendingWriteKey(clientA, key)
-	keyB := pendingWriteKey(clientB, key)
+	keyA := r.pendingWriteKey(clientA, key)
+	keyB := r.pendingWriteKey(clientB, key)
 
 	// Keys should be different
 	if keyA == keyB {

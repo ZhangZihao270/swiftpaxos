@@ -66,6 +66,10 @@ type Replica struct {
 	commitNotify  map[int]chan struct{} // slot -> notification channel for commit
 	executeNotify map[int]chan struct{} // slot -> notification channel for execution
 	notifyMu      sync.Mutex            // protects commitNotify and executeNotify
+
+	// String conversion cache to avoid repeated strconv.FormatInt calls
+	// Key: int32, Value: string representation
+	stringCache sync.Map
 }
 
 // pendingWrite tracks an uncommitted write for speculative read computation
@@ -468,7 +472,7 @@ func (r *Replica) sync(cmdId CommandId, cmd state.Command) {
 	if r.isLeader {
 		return
 	}
-	key := strconv.FormatInt(int64(cmd.K), 10)
+	key := r.int32ToString(int32(cmd.K))
 	r.unsynced.Upsert(key, nil,
 		func(exists bool, mapV, _ interface{}) interface{} {
 			if exists {
@@ -488,7 +492,7 @@ func (r *Replica) sync(cmdId CommandId, cmd state.Command) {
 }
 
 func (r *Replica) unsync(cmd state.Command) {
-	key := strconv.FormatInt(int64(cmd.K), 10)
+	key := r.int32ToString(int32(cmd.K))
 	r.unsynced.Upsert(key, nil,
 		func(exists bool, mapV, _ interface{}) interface{} {
 			if exists {
@@ -500,7 +504,7 @@ func (r *Replica) unsync(cmd state.Command) {
 
 func (r *Replica) leaderUnsync(cmd state.Command, slot int) int {
 	depSlot := -1
-	key := strconv.FormatInt(int64(cmd.K), 10)
+	key := r.int32ToString(int32(cmd.K))
 	r.unsynced.Upsert(key, nil,
 		func(exists bool, mapV, _ interface{}) interface{} {
 			if exists {
@@ -516,7 +520,7 @@ func (r *Replica) leaderUnsync(cmd state.Command, slot int) int {
 }
 
 func (r *Replica) ok(cmd state.Command) uint8 {
-	key := strconv.FormatInt(int64(cmd.K), 10)
+	key := r.int32ToString(int32(cmd.K))
 	v, exists := r.unsynced.Get(key)
 	if exists && v.(int) > 0 {
 		return FALSE
@@ -928,7 +932,7 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 // waitForWeakDep waits for a causal dependency to be executed
 // This ensures that weak commands from the same client execute in order
 func (r *Replica) waitForWeakDep(clientId int32, depSeqNum int32) {
-	clientKey := strconv.FormatInt(int64(clientId), 10)
+	clientKey := r.int32ToString(clientId)
 
 	// Spin wait with brief sleeps until dependency is executed
 	// In production, this could use channels/conditions for efficiency
@@ -947,7 +951,7 @@ func (r *Replica) waitForWeakDep(clientId int32, depSeqNum int32) {
 
 // markWeakExecuted marks a weak command as executed for causal ordering
 func (r *Replica) markWeakExecuted(clientId int32, seqNum int32) {
-	clientKey := strconv.FormatInt(int64(clientId), 10)
+	clientKey := r.int32ToString(clientId)
 	r.weakExecuted.Upsert(clientKey, nil,
 		func(exists bool, mapV, _ interface{}) interface{} {
 			if exists {
@@ -961,14 +965,26 @@ func (r *Replica) markWeakExecuted(clientId int32, seqNum int32) {
 		})
 }
 
+// int32ToString converts an int32 to string using a cache to avoid repeated conversions
+func (r *Replica) int32ToString(val int32) string {
+	// Try to load from cache first
+	if cached, ok := r.stringCache.Load(val); ok {
+		return cached.(string)
+	}
+	// Not in cache, convert and store
+	str := strconv.FormatInt(int64(val), 10)
+	r.stringCache.Store(val, str)
+	return str
+}
+
 // pendingWriteKey creates a unique key for pending writes: "clientId:key"
-func pendingWriteKey(clientId int32, key state.Key) string {
-	return strconv.FormatInt(int64(clientId), 10) + ":" + strconv.FormatInt(int64(key), 10)
+func (r *Replica) pendingWriteKey(clientId int32, key state.Key) string {
+	return r.int32ToString(clientId) + ":" + r.int32ToString(int32(key))
 }
 
 // addPendingWrite tracks an uncommitted write for speculative read computation
 func (r *Replica) addPendingWrite(clientId int32, key state.Key, seqNum int32, value state.Value) {
-	pwKey := pendingWriteKey(clientId, key)
+	pwKey := r.pendingWriteKey(clientId, key)
 	r.pendingWrites.Upsert(pwKey, nil,
 		func(exists bool, mapV, _ interface{}) interface{} {
 			if exists {
@@ -985,7 +1001,7 @@ func (r *Replica) addPendingWrite(clientId int32, key state.Key, seqNum int32, v
 
 // removePendingWrite removes a pending write after it's been committed and executed
 func (r *Replica) removePendingWrite(clientId int32, key state.Key, seqNum int32) {
-	pwKey := pendingWriteKey(clientId, key)
+	pwKey := r.pendingWriteKey(clientId, key)
 	// Only remove if the seqNum matches (don't remove a newer pending write)
 	if pw, exists := r.pendingWrites.Get(pwKey); exists {
 		if pw.(*pendingWrite).seqNum == seqNum {
@@ -996,7 +1012,7 @@ func (r *Replica) removePendingWrite(clientId int32, key state.Key, seqNum int32
 
 // getPendingWrite returns the pending write value if it exists and satisfies the causal dependency
 func (r *Replica) getPendingWrite(clientId int32, key state.Key, causalDep int32) *pendingWrite {
-	pwKey := pendingWriteKey(clientId, key)
+	pwKey := r.pendingWriteKey(clientId, key)
 	if pw, exists := r.pendingWrites.Get(pwKey); exists {
 		pending := pw.(*pendingWrite)
 		// Only return if this pending write is the one we're looking for (seqNum <= causalDep)

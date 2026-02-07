@@ -170,13 +170,19 @@ All phases completed successfully. See detailed tasks below.
 
 #### Tasks
 
-- [ ] **19.1** Port String Caching to CURP-HT
-  - Add `stringCache sync.Map` field to Replica struct
-  - Implement `int32ToString()` helper method
-  - Replace all `strconv.FormatInt` calls with cached version
-  - Update tests for pendingWriteKey method conversion
+- [x] **19.1** Port String Caching to CURP-HT [26:02:07]
+  - ✅ Added `stringCache sync.Map` field to Replica struct
+  - ✅ Implemented `int32ToString()` helper method with sync.Map cache
+  - ✅ Replaced all `strconv.FormatInt` calls (7 locations):
+    - sync(), unsync(), leaderUnsync(), ok() - cmd.K conversions
+    - waitForWeakDep(), markWeakExecuted() - clientId conversions
+    - pendingWriteKey() - composite key generation
+  - ✅ Updated pendingWriteKey from function to method
+  - ✅ Updated tests: TestPendingWriteKey, TestCrossClientIsolation
+  - ✅ All tests pass (go test ./curp-ht/)
   - **Files**: curp-ht/curp-ht.go, curp-ht/curp-ht_test.go
-  - **Expected**: Reduced GC pressure, ~5-10% throughput gain
+  - **Analysis**: docs/phase-19.1-curp-ht-string-caching.md
+  - **Result**: Successfully ported string caching from CURP-HO Phase 18.2
 
 - [ ] **19.2** Port Pre-allocated Closed Channel to CURP-HT
   - Add `closedChan chan struct{}` field to Replica struct
