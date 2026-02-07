@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	_ "net/http/pprof" // Enable pprof endpoints for profiling
 	"net/rpc"
 	"strings"
 	"time"

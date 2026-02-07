@@ -7,8 +7,11 @@ set -e
 PROFILE_TYPE="${1:-all}"
 DURATION="${2:-30}"
 OUTPUT_DIR="docs/phase-31-profiles"
-REPLICA_PPROF="localhost:6060"
-CLIENT_PPROF="localhost:6061"
+# Replica runs on port 7070+1000 = 8070 (see run.go)
+# Using replica0 at 127.0.0.1:8070
+REPLICA_PPROF="127.0.0.1:8070"
+# Client profiling not currently supported (would need client pprof setup)
+CLIENT_PPROF="127.0.0.4:8070"
 
 # Create output directory
 mkdir -p "$OUTPUT_DIR"

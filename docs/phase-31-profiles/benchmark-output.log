@@ -1,0 +1,54 @@
+============================================
+  Distributed Multi-Client CURP-HT Benchmark
+============================================
+Config: multi-client.conf
+Mode: Local
+Client servers: 2
+Threads per server: 2
+Total concurrent threads: 4
+Replicas: 3
+Results dir: /home/users/zihao/swiftpaxos/results/benchmark-20260207-171134
+
+  client0 -> 127.0.0.4
+  client1 -> 127.0.0.5
+
+Stopping existing processes...
+Starting master...
+Starting replicas...
+  replica0...
+  replica1...
+  replica2...
+Waiting 10s for replicas to connect...
+
+========== Running Clients ==========
+Starting client0 (local)...
+Starting client1 (local)...
+
+Waiting for all clients to complete...
+
+Cleaning up...
+Results saved in: /home/users/zihao/swiftpaxos/results/benchmark-20260207-171134
+
+========== All Clients Finished ==========
+
+========== Merged Results ==========
+Client servers: 2
+Total operations: 0
+Max duration: 0.00s
+Aggregate throughput: 0.00 ops/sec
+
+--- Per-Client Breakdown ---
+client0: 0.00 ops/sec (0 ops)
+client1: 0.00 ops/sec (0 ops)
+
+============================================
+Individual logs: /home/users/zihao/swiftpaxos/results/benchmark-20260207-171134/
+  /home/users/zihao/swiftpaxos/results/benchmark-20260207-171134/client0.log
+  /home/users/zihao/swiftpaxos/results/benchmark-20260207-171134/client1.log
+  /home/users/zihao/swiftpaxos/results/benchmark-20260207-171134/master.log
+  /home/users/zihao/swiftpaxos/results/benchmark-20260207-171134/replica0.log
+  /home/users/zihao/swiftpaxos/results/benchmark-20260207-171134/replica1.log
+  /home/users/zihao/swiftpaxos/results/benchmark-20260207-171134/replica2.log
+
+Cleaning up...
+Results saved in: /home/users/zihao/swiftpaxos/results/benchmark-20260207-171134
