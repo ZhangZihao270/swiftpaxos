@@ -1,0 +1,54 @@
+=== Phase 31.5: Client Parallelism Scaling Test ===
+Test configurations:
+  - Requests per client: 10000
+  - Iterations per config: 3
+  - Pendings: 10 (fixed)
+  - Timestamp: 20260207-172327
+
+Starting tests...
+
+=== Testing: 2 clients × 2 threads = 4 streams ===
+  Iteration 1/3...
+    Throughput: 18262.27 ops/sec, Weak: 1.25ms, Strong: 2.28ms
+  Iteration 2/3...
+    Throughput: 18135.64 ops/sec, Weak: 1.25ms, Strong: 2.30ms
+  Iteration 3/3...
+    Throughput: 18622.52 ops/sec, Weak: 1.21ms, Strong: 2.25ms
+  Average: 18340.14 ops/sec (weak median: 1.23ms)
+
+=== Testing: 2 clients × 4 threads = 8 streams ===
+  Iteration 1/3...
+    Throughput: 17132.11 ops/sec, Weak: 2.49ms, Strong: 5.06ms
+  Iteration 2/3...
+    Throughput: 16003.81 ops/sec, Weak: 1.67ms, Strong: 5.73ms
+  Iteration 3/3...
+    Throughput: 18788.03 ops/sec, Weak: 1.75ms, Strong: 5.04ms
+  Average: 17307.98 ops/sec (weak median: 1.97ms)
+
+=== Testing: 2 clients × 6 threads = 12 streams ===
+  Iteration 1/3...
+    Throughput: 9452.16 ops/sec, Weak: 6.74ms, Strong: 10.15ms
+  Iteration 2/3...
+    Throughput: 13060.88 ops/sec, Weak: 1.88ms, Strong: 11.16ms
+  Iteration 3/3...
+    Throughput: 13985.53 ops/sec, Weak: 2.28ms, Strong: 10.55ms
+  Average: 12166.19 ops/sec (weak median: 3.63ms)
+
+=== Testing: 2 clients × 8 threads = 16 streams ===
+  Iteration 1/3...
+    Throughput: 11051.16 ops/sec, Weak: 10.75ms, Strong: 13.86ms
+  Iteration 2/3...
+    Throughput: 12420.60 ops/sec, Weak: 1.77ms, Strong: 20.27ms
+  Iteration 3/3...
+    Throughput: 12082.14 ops/sec, Weak: 2.14ms, Strong: 21.23ms
+  Average: 11851.30 ops/sec (weak median: 4.88ms)
+
+=== Summary ===
+
+Results saved to: /home/users/zihao/swiftpaxos/docs/phase-31-profiles/client-parallelism-results-20260207-172327.txt
+
+Next steps:
+  1. Review results in /home/users/zihao/swiftpaxos/docs/phase-31-profiles/client-parallelism-results-20260207-172327.txt
+  2. Plot throughput vs streams (4, 8, 12, 16)
+  3. Identify optimal configuration (max throughput, weak median < 2ms)
+  4. Document findings in docs/phase-31.5-client-parallelism.md
