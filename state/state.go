@@ -5,10 +5,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"sync"
-
-	"github.com/emirpasic/gods/maps/treemap"
 )
 
 type Operation uint8
@@ -39,20 +38,7 @@ func NOOP() []Command { return []Command{{NONE, 0, NIL()}} }
 
 type State struct {
 	mutex *sync.Mutex
-	Store *treemap.Map
-}
-
-func KeyComparator(a, b interface{}) int {
-	aAsserted := a.(Key)
-	bAsserted := b.(Key)
-	switch {
-	case aAsserted > bAsserted:
-		return 1
-	case aAsserted < bAsserted:
-		return -1
-	default:
-		return 0
-	}
+	Store map[Key]Value
 }
 
 func concat(slices []Value) Value {
@@ -69,7 +55,7 @@ func concat(slices []Value) Value {
 }
 
 func InitState() *State {
-	return &State{new(sync.Mutex), treemap.NewWith(KeyComparator)}
+	return &State{new(sync.Mutex), make(map[Key]Value)}
 }
 
 func Conflict(gamma *Command, delta *Command) bool {
@@ -119,27 +105,29 @@ func (c *Command) Execute(st *State) Value {
 
 	switch c.Op {
 	case PUT:
-		st.Store.Put(c.K, c.V)
+		st.Store[c.K] = c.V
 
 	case GET:
-		if value, present := st.Store.Get(c.K); present {
-			valAsserted := value.(Value)
-			return valAsserted
+		if value, present := st.Store[c.K]; present {
+			return value
 		}
 
 	case SCAN:
-		found := make([]Value, 0)
 		count := binary.LittleEndian.Uint64(c.V)
-		it := st.Store.Select(func(index interface{}, value interface{}) bool {
-			keyAsserted := index.(Key)
-			return keyAsserted >= c.K && keyAsserted <= c.K+Key(count)
-		}).Iterator()
-		for it.Next() {
-			valAsserted := it.Value().(Value)
-			found = append(found, valAsserted)
+		upper := c.K + Key(count)
+		// Collect matching keys, sort for deterministic order
+		keys := make([]Key, 0)
+		for k := range st.Store {
+			if k >= c.K && k <= upper {
+				keys = append(keys, k)
+			}
 		}
-		ret := concat(found)
-		return ret
+		sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+		found := make([]Value, 0, len(keys))
+		for _, k := range keys {
+			found = append(found, st.Store[k])
+		}
+		return concat(found)
 	}
 
 	return NIL()
@@ -156,21 +144,23 @@ func (c *Command) ComputeResult(st *State) Value {
 
 	switch c.Op {
 	case GET:
-		if value, present := st.Store.Get(c.K); present {
-			valAsserted := value.(Value)
-			return valAsserted
+		if value, present := st.Store[c.K]; present {
+			return value
 		}
 
 	case SCAN:
-		found := make([]Value, 0)
 		count := binary.LittleEndian.Uint64(c.V)
-		it := st.Store.Select(func(index interface{}, value interface{}) bool {
-			keyAsserted := index.(Key)
-			return keyAsserted >= c.K && keyAsserted <= c.K+Key(count)
-		}).Iterator()
-		for it.Next() {
-			valAsserted := it.Value().(Value)
-			found = append(found, valAsserted)
+		upper := c.K + Key(count)
+		keys := make([]Key, 0)
+		for k := range st.Store {
+			if k >= c.K && k <= upper {
+				keys = append(keys, k)
+			}
+		}
+		sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+		found := make([]Value, 0, len(keys))
+		for _, k := range keys {
+			found = append(found, st.Store[k])
 		}
 		return concat(found)
 

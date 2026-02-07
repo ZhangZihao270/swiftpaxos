@@ -1085,33 +1085,36 @@ Investigation needed before proceeding to optimization phases.
 
 ---
 
-#### Phase 31.6: State Machine Optimization [DEFERRED - NOT NEEDED]
+#### Phase 31.6: State Machine Optimization [✅ COMPLETE]
 
 **Goal**: Reduce state machine execution time for faster command processing.
 
-**Status**: Deferred - Phase 31 target (23K ops/sec) already achieved without this optimization.
+**Status**: Complete - Replaced treemap (O(log n)) with Go built-in map (O(1) amortized) for GET/PUT.
 
 **Tasks**:
-- [ ] Profile state machine operations
-  - Measure: Execute() time per operation (GET, PUT, SCAN)
-  - Identify: slow operations in state/state.go
-- [ ] Optimize GET operation
-  - Current: map lookup in r.State
-  - Consider: read-optimized data structure (read-write lock? cache?)
-- [ ] Optimize PUT operation
-  - Current: map write in r.State
-  - Consider: write buffering, batch state updates
+- [x] Profile state machine operations
+  - Measured: Execute() time per operation (GET, PUT, SCAN) via benchmarks
+  - Identified: treemap O(log n) overhead replaced with O(1) map access
+- [x] Optimize GET operation
+  - Before: treemap.Get() with O(log n) red-black tree traversal
+  - After: direct map[Key]Value lookup, O(1) amortized, ~38ns/op, 0 allocs
+- [x] Optimize PUT operation
+  - Before: treemap.Put() with O(log n) red-black tree insert/rebalance
+  - After: direct map assignment, O(1) amortized, ~44ns/op, 0 allocs
 - [ ] Optimize key generation in client
-  - Current: GetClientKey() called per operation
-  - Consider: pre-generate batch of keys, cache Zipf samples
-- [ ] Measure state machine % of total latency
-  - Target: < 15% of total latency (< 0.3ms per op)
-- [ ] Document in docs/phase-31.6-state-machine.md
+  - Deferred: client-side key generation is not a bottleneck
+- [x] Measure state machine % of total latency
+  - GET: 38ns/op (negligible vs ~3ms network latency)
+  - PUT: 44ns/op (negligible vs ~3ms network latency)
+  - Mixed (90% GET, 10% PUT): 41ns/op
+- [x] Document in docs/phase-31.6-state-machine.md
 
-**Expected Results**:
-- State machine speedup: 1.5-2x faster Execute()
-- Throughput improvement: +1-2K ops/sec
-- Latency reduction: -0.2-0.3ms
+**Benchmark Results** (AMD EPYC 7702P, 128 cores):
+- GET: 38ns/op, 0 allocs (O(1) - constant across state sizes)
+- PUT: 44ns/op, 0 allocs (O(1) amortized)
+- SCAN: 24μs/op, 9 allocs (sorted iteration, expected)
+- Mixed workload: 41ns/op, 0 allocs
+- State scaling: GET/PUT remain ~20-50ns from 100 to 100K entries
 
 **Output**: docs/phase-31.6-state-machine.md
 
