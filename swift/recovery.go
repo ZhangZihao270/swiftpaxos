@@ -212,9 +212,9 @@ func (r *Replica) handleSync(msg *MSync) {
 				if descPrime != nil {
 					descPrime.successors = append(descPrime.successors, cmdId)
 				}
-				go func() {
-					r.deliverChan <- cmdIdPrime
-				}()
+				go func(id CommandId) {
+					r.deliverChan <- id
+				}(cmdIdPrime)
 			}
 
 			go func() {

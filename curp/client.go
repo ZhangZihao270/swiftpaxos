@@ -124,18 +124,10 @@ func (c *Client) handleMsgs() {
 			rep := m.(*MSyncReply)
 			c.handleSyncReply(rep)
 
-		case needSync := <-c.t.c:
-			// FIXME
+		case <-c.t.c:
+			// Timer-triggered sync intentionally disabled (see CURP paper §4.2).
+			// The slow path via SyncReply handles retransmission.
 			break
-			if needSync && c.leader != -1 {
-				if _, exists := c.delivered[c.lastCmdId.SeqNum]; !exists {
-					sync := &MSync{
-						CmdId: c.lastCmdId,
-					}
-					// TODO: send to closest?
-					c.SendMsg(c.leader, c.cs.syncRPC, sync)
-				}
-			}
 		}
 	}
 }

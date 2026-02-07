@@ -1335,6 +1335,21 @@ Investigation needed before proceeding to optimization phases.
 - [x] Commit docs/curp-ho-protocol-verification.md
 - [x] Commit docs/phase-31-current-status.md
 
+#### Phase 33.3: Fix go vet Warnings (Bug Fixes) [✅ COMPLETE]
+
+**Goal**: Fix all `go vet` warnings in protocol packages identified during code quality audit.
+
+**Fixes**:
+- [x] Fix loop variable capture bug in `swift/recovery.go:215`
+  - Goroutine captured `cmdIdPrime` loop variable by reference instead of by value
+  - In Go 1.20 (pre-1.22), all goroutines would see the final loop value
+  - Fix: Pass `cmdIdPrime` as parameter to closure: `go func(id CommandId) { ... }(cmdIdPrime)`
+- [x] Fix unreachable code in `curp/client.go`, `curp-ht/client.go`, `curp-ho/client.go`
+  - Timer-triggered sync code was unreachable after `break` statement
+  - The `break` was intentional (sync disabled), but dead code triggered `go vet` warnings
+  - Fix: Removed dead code, kept `break` with comment explaining design decision
+- [x] Run `go vet ./...` — protocol packages now clean (remaining warnings are in paxos/epaxos/replica for unkeyed struct literals, pre-existing)
+
 ---
 
 # Future Protocols
