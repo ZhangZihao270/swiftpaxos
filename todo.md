@@ -82,11 +82,19 @@ All phases completed successfully. See detailed tasks below.
 
 #### Planned Optimizations to Reach 20K
 
-- [ ] **18.3** Increase Client Pipeline Depth
-  - **Current**: pendings: 5 (max 5 in-flight commands per thread)
-  - **Test**: pendings: 10, 20, 30 to find optimal value
-  - **Expected**: Higher concurrency = more ops in flight = higher throughput
-  - **Risk**: Too high may increase P99 latency
+- [x] **18.3** Increase Client Pipeline Depth [26:02:07]
+  - **Tested**: pendings: 5, 10, 15, 20, 30
+  - **Results**:
+    - pendings=5: 4.8K ops/sec (baseline)
+    - pendings=10: 13.0K ops/sec (+173%)
+    - pendings=15: 17.1K ops/sec (+258%)
+    - pendings=20: 17.95K ops/sec (+275%, P99: 5.53ms) ⭐ **OPTIMAL**
+    - pendings=30: 18.66K ops/sec (+290%, P99: 7.57ms)
+  - **Selected**: pendings=20 (best throughput/latency balance)
+  - **Validation**: 17.35K ops/sec (40K ops test, P99: 16.18ms strong, 9.73ms weak)
+  - **Improvement**: 14.6K → 17.35K ops/sec (+19% from Phase 18.2)
+  - **Analysis**: docs/phase-18.3-pipeline-depth-analysis.md
+  - **Tool**: test-pipeline-depth.sh
 
 - [ ] **18.4** Optimize MaxDescRoutines Sweet Spot
   - **Current**: maxDescRoutines: 100 (reverted due to regression)
