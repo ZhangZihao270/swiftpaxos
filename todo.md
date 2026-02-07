@@ -55,16 +55,130 @@ All phases completed successfully. See detailed tasks below.
 - Strong latency: 3.29ms (median), 11.53ms (P99)
 - Weak latency: 2.01ms (median), 9.28ms (P99)
 
-#### Optimization Candidates
+#### Optimization Results
+
+**Current Status**: 14.6K ops/sec (+12% from 13K baseline) - **Target: 20K ops/sec**
+
+#### Completed Optimizations
 
 - [x] **18.1** Increase MaxDescRoutines (500 → 10000) [26:02:06]
   - Changed default from 500 to 10000 in curp-ht/defs.go and curp-ho/defs.go
   - Added `MaxDescRoutines` config parameter (configurable via config file)
   - run.go now uses protocol defaults unless config overrides (removed hardcoded 100)
   - Config value 0 = use protocol default (10000), >0 = override
-- [ ] **18.2** Remove weak command spin-wait overhead
-- [ ] **18.3** Increase client pipeline depth (pendings: 5 → 10/20)
-- [ ] **18.4** Reduce channel buffer contention
+  - **Result**: Regression (26K → 17K). Reverted to maxDescRoutines: 100 in config
+
+- [x] **18.2** CURP-HO Code Optimizations [26:02:07]
+  - **String Caching**: Added sync.Map cache for int32→string conversions
+    - Eliminates repeated strconv.FormatInt calls in hot paths (clientId, keys)
+    - Reduces GC pressure from string allocations
+  - **Faster Spin-Wait**: Optimized waitForWeakDep polling (100μs → 10μs)
+    - 10x faster response for causal dependency resolution
+    - Same 100ms timeout to prevent deadlocks
+  - **Pre-allocated Closed Channel**: Reuse single closed channel
+    - Avoids allocations in getOrCreateCommitNotify/ExecuteNotify
+  - **Result**: 13K → 14.6K ops/sec (+12% improvement)
+  - **Commit**: e9a29a6
+
+#### Planned Optimizations to Reach 20K
+
+- [ ] **18.3** Increase Client Pipeline Depth
+  - **Current**: pendings: 5 (max 5 in-flight commands per thread)
+  - **Test**: pendings: 10, 20, 30 to find optimal value
+  - **Expected**: Higher concurrency = more ops in flight = higher throughput
+  - **Risk**: Too high may increase P99 latency
+
+- [ ] **18.4** Optimize MaxDescRoutines Sweet Spot
+  - **Current**: maxDescRoutines: 100 (reverted due to regression)
+  - **Test**: 100, 200, 500, 1000, 2000 with current optimizations
+  - **Tool**: Use test-maxdesc-performance.sh
+  - **Rationale**: String caching may reduce overhead that caused regression
+
+- [ ] **18.5** Reduce Batcher Latency
+  - **Current**: Batcher size = 128, likely has implicit delay
+  - **Investigate**: Check batcher.go for sleep/timeout settings
+  - **Test**: Reduce batch timeout, or disable batching for weak ops
+  - **Expected**: Lower latency → faster command processing
+
+- [ ] **18.6** Optimize Concurrent Map Contention
+  - **Current**: Multiple cmap.ConcurrentMap with SHARD_COUNT=32768
+  - **Profile**: Use pprof to identify map lock contention
+  - **Test**: Reduce SHARD_COUNT or use lock-free alternatives
+  - **Expected**: Reduced lock contention in hot paths
+
+- [ ] **18.7** Reduce Channel Allocations in Hot Paths
+  - **Current**: Many chan struct{} allocations per command
+  - **Test**: Pool channels or use sync.Cond for notifications
+  - **Expected**: Lower GC pressure, better cache locality
+
+- [ ] **18.8** Profile and Identify Remaining Bottlenecks
+  - **Tool**: `go tool pprof -http=:8080 cpu.prof`
+  - **Action**: Run CPU profiling during benchmark
+  - **Output**: Flamegraph showing hot paths
+  - **Next**: Optimize top 3 CPU consumers
+
+- [ ] **18.9** Memory Allocation Profiling
+  - **Tool**: `go tool pprof -http=:8080 -alloc_space mem.prof`
+  - **Action**: Run memory profiling during benchmark
+  - **Output**: Find allocation hotspots
+  - **Next**: Add object pools for frequently allocated structs
+
+- [ ] **18.10** Validate 20K Target Achieved
+  - **Test**: Full benchmark with optimized configuration
+  - **Measure**: Throughput, latency (median, P99), CPU usage
+  - **Document**: Final configuration and results
+  - **Next**: Apply to CURP-HT (Phase 19)
+
+### Phase 19: Apply Optimizations to CURP-HT [PLANNED]
+
+**Goal**: Port successful CURP-HO optimizations (Phase 18.2+) to CURP-HT for consistency and performance parity.
+
+**Prerequisite**: Phase 18.10 complete (20K target achieved on CURP-HO)
+
+#### Tasks
+
+- [ ] **19.1** Port String Caching to CURP-HT
+  - Add `stringCache sync.Map` field to Replica struct
+  - Implement `int32ToString()` helper method
+  - Replace all `strconv.FormatInt` calls with cached version
+  - Update tests for pendingWriteKey method conversion
+  - **Files**: curp-ht/curp-ht.go, curp-ht/curp-ht_test.go
+  - **Expected**: Reduced GC pressure, ~5-10% throughput gain
+
+- [ ] **19.2** Port Pre-allocated Closed Channel to CURP-HT
+  - Add `closedChan chan struct{}` field to Replica struct
+  - Initialize in NewReplica: `close(closedChan)`
+  - Update getOrCreateCommitNotify to return closedChan for committed slots
+  - Update getOrCreateExecuteNotify to return closedChan for executed slots
+  - Update newTestReplicaForDesc in tests
+  - **Files**: curp-ht/curp-ht.go, curp-ht/curp-ht_test.go
+  - **Expected**: Reduced allocations, minor throughput gain
+
+- [ ] **19.3** Optimize CURP-HT Spin-Wait (if applicable)
+  - Review waitForWeakDep or similar blocking patterns in CURP-HT
+  - Apply faster polling (100μs → 10μs) where beneficial
+  - **Note**: CURP-HT has different weak command flow (leader-only)
+  - **Files**: curp-ht/curp-ht.go
+  - **Expected**: Lower latency for weak ops
+
+- [ ] **19.4** Port Additional Optimizations from Phase 18.3-18.9
+  - Apply pipeline depth, MaxDescRoutines, batcher, and profiling-driven fixes
+  - Use same configuration values that worked for CURP-HO
+  - **Files**: Multiple (curp-ht/*.go, config files)
+  - **Expected**: Similar throughput gains as CURP-HO
+
+- [ ] **19.5** Benchmark CURP-HT with Optimizations
+  - Run full benchmark with test-simple.conf (protocol: curpht)
+  - Measure throughput, latency, CPU usage
+  - Compare to baseline: Previous ~26K ops/sec
+  - **Target**: Maintain or exceed previous performance
+  - **Config**: Use optimized maxDescRoutines, pendings, etc.
+
+- [ ] **19.6** Document and Commit CURP-HT Optimizations
+  - Update todo.md with results
+  - Create detailed commit message
+  - Tag as milestone if both protocols achieve 20K+
+  - **Commit**: "perf: Apply CURP-HO optimizations to CURP-HT"
 
 ---
 
