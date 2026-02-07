@@ -59,6 +59,10 @@ for delay in "${DELAYS[@]}"; do
     for i in $(seq 1 $ITERATIONS); do
         echo "  Iteration $i/$ITERATIONS (delay=${delay}μs)..." | tee -a "$RESULT_FILE"
 
+        # Ensure clean state before running
+        killall -9 server master client 2>/dev/null || true
+        sleep 3
+
         # Run benchmark and save to temp file
         cd "$PROJECT_ROOT"
         TEMP_OUTPUT="/tmp/curpht-batch-test-${delay}-${i}.txt"
