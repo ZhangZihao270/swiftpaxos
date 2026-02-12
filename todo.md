@@ -1464,16 +1464,41 @@ batchDelayUs: 150
 
 ---
 
-#### Phase 34.4: Scale Pipeline Depth (Both Protocols) [PENDING]
+#### Phase 34.4: Scale Pipeline Depth (Both Protocols) [COMPLETE]
 
 **Goal**: Find optimal pendings for latency-injected workload.
 
-**Tasks**:
-- [ ] **34.4a** CURP-HO: pendings sweep {5, 10, 15, 20, 30} at clientThreads=32
-- [ ] **34.4b** CURP-HT: same pendings sweep at clientThreads=32
-- [ ] **34.4c** Identify optimal pendings for each protocol
-  - Balance: throughput vs P99 latency
-- [ ] **34.4d** Document results
+**Results** (2×32=64 threads, 50ms RTT):
+
+**CURP-HO**:
+| Pendings | Throughput | Weak Med | Weak P99  | Strong Med | Strong P99 |
+|:--------:|----------:|:--------:|:---------:|:----------:|:----------:|
+| 5        | 9,155     | 25.6ms   | 33ms      | 50.8ms     | 52.5ms     |
+| 10       | 17,841    | 25.5ms   | 77ms      | 50.7ms     | 61ms       |
+| **15**   | **23,240**| 29.5ms   | 153ms     | 50.7ms     | 86ms       |
+| 20       | 27,225    | 26.4ms   | 536ms     | 50.8ms     | 100ms      |
+| 30       | 34,966    | 34.0ms   | 2,058ms   | 51.0ms     | 101ms      |
+
+**CURP-HT**:
+| Pendings | Throughput | Weak Med | Weak P99  | Strong Med | Strong P99 |
+|:--------:|----------:|:--------:|:---------:|:----------:|:----------:|
+| 5        | 9,008     | 25.4ms   | 27ms      | 51.0ms     | 52.8ms     |
+| 10       | 17,842    | 25.3ms   | 29ms      | 50.8ms     | 57ms       |
+| 15       | 25,970    | 25.3ms   | 55ms      | 50.8ms     | 81ms       |
+| **20**   | **31,168**| 25.3ms   | 77ms      | 51.4ms     | 112ms      |
+| 30       | 39,935    | 25.6ms   | 77ms      | 61.1ms     | 168ms      |
+
+- [x] **34.4a** CURP-HO pendings sweep complete
+- [x] **34.4b** CURP-HT pendings sweep complete
+- [x] **34.4c** Optimal pendings analysis:
+  - **CURP-HO optimal: pendings=15** (23K ops/sec, weak P99 ~153ms acceptable)
+  - **CURP-HT optimal: pendings=20** (31K ops/sec, weak P99 ~77ms)
+  - CURP-HT handles higher pipeline depth better — weak commands go to leader only
+    (1 message), while CURP-HO broadcasts to all replicas (3 messages), creating 3×
+    more server-side load. This causes CURP-HO's weak P99 to explode at high pendings.
+  - CURP-HO shows asymmetric client throughput at high pendings (leader bottleneck)
+  - For peak throughput: CURP-HT pendings=30 → ~40K, CURP-HO pendings=30 → ~35K
+- [x] **34.4d** Results documented above
 
 ---
 
