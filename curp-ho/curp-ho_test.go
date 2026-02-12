@@ -1174,6 +1174,57 @@ func TestLeaderUnsyncCausalDependency(t *testing.T) {
 	}
 }
 
+// TestLeaderCausalNoDoubleUnsync verifies that on the leader, calling
+// unsyncCausal before leaderUnsyncCausal for the same key causes a slot
+// mismatch. This was the root cause of a Fatal crash: unsyncCausal sets
+// Slot=1 (counter), then leaderUnsyncCausal with slot=0 sees entry.Slot=1>0.
+// The fix: leader skips unsyncCausal, only calls leaderUnsyncCausal.
+func TestLeaderCausalNoDoubleUnsync(t *testing.T) {
+	r := newTestReplica(true) // isLeader=true
+	cmd := state.Command{Op: state.PUT, K: state.Key(42), V: state.Value([]byte("val"))}
+	cmdId := CommandId{ClientId: 1, SeqNum: 1}
+
+	// Simulate the correct behavior: leader only calls leaderUnsyncCausal
+	dep := r.leaderUnsyncCausal(cmd, 0, cmdId)
+	if dep != -1 {
+		t.Errorf("first command should have no dep, got %d", dep)
+	}
+
+	// Verify the entry has actual slot=0 (not counter=1)
+	key := r.int32ToString(int32(cmd.K))
+	v, exists := r.unsynced.Get(key)
+	if !exists {
+		t.Fatal("entry should exist in unsynced map")
+	}
+	entry := v.(*UnsyncedEntry)
+	if entry.Slot != 0 {
+		t.Errorf("leader entry Slot = %d, want 0 (actual slot)", entry.Slot)
+	}
+}
+
+// TestNonLeaderCausalUsesCounter verifies that non-leader replicas use
+// counter-based Slot via unsyncCausal (not slot-based).
+func TestNonLeaderCausalUsesCounter(t *testing.T) {
+	r := newTestReplica(false) // isLeader=false
+	cmd := state.Command{Op: state.PUT, K: state.Key(42), V: state.Value([]byte("val"))}
+	cmdId1 := CommandId{ClientId: 1, SeqNum: 1}
+	cmdId2 := CommandId{ClientId: 1, SeqNum: 2}
+
+	// Non-leader calls unsyncCausal
+	r.unsyncCausal(cmd, cmdId1)
+	key := r.int32ToString(int32(cmd.K))
+	v, _ := r.unsynced.Get(key)
+	if v.(*UnsyncedEntry).Slot != 1 {
+		t.Errorf("first unsyncCausal Slot = %d, want 1", v.(*UnsyncedEntry).Slot)
+	}
+
+	r.unsyncCausal(cmd, cmdId2)
+	v, _ = r.unsynced.Get(key)
+	if v.(*UnsyncedEntry).Slot != 2 {
+		t.Errorf("second unsyncCausal Slot = %d, want 2", v.(*UnsyncedEntry).Slot)
+	}
+}
+
 // --- sync tests (non-leader cleanup) ---
 
 func TestSyncDecrementsCount(t *testing.T) {

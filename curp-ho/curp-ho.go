@@ -1207,8 +1207,14 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 func (r *Replica) handleCausalPropose(propose *MCausalPropose) {
 	cmdId := CommandId{ClientId: propose.ClientId, SeqNum: propose.CommandId}
 
-	// 1. ALL replicas: add to witness pool for conflict detection
-	r.unsyncCausal(propose.Command, cmdId)
+	// 1. Non-leader replicas: add to witness pool for conflict detection.
+	// Leader skips unsyncCausal because it uses leaderUnsyncCausal (actual slot-based)
+	// instead of counter-based tracking. Calling both would corrupt the unsynced map:
+	// unsyncCausal sets Slot=counter (starting at 1), then leaderUnsyncCausal expects
+	// Slot to be a real slot number (starting at 0), causing Fatal when counter > slot.
+	if !r.isLeader {
+		r.unsyncCausal(propose.Command, cmdId)
+	}
 
 	// 2. ALL replicas: track pending write for speculative reads
 	if propose.Command.Op == state.PUT {

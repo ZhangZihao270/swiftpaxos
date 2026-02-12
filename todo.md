@@ -1412,46 +1412,55 @@ batchDelayUs: 150
 
 ---
 
-#### Phase 34.1: CURP-HO Baseline with Latency [PENDING]
+#### Phase 34.1: CURP-HO Baseline with Latency [COMPLETE]
 
 **Goal**: Establish baseline throughput for CURP-HO at networkDelay=25.
 
-**Tasks**:
-- [ ] **34.1a** Run CURP-HO with 2 clients × 2 threads, pendings=10
-  - Config: protocol=curpho, clientThreads=2, pendings=10
-  - Expected: moderate throughput (latency-limited)
-  - Record: throughput, strong/weak median+P99 latency
-- [ ] **34.1b** Run CURP-HO with 2 clients × 4 threads, pendings=10
-- [ ] **34.1c** Run CURP-HO with 2 clients × 8 threads, pendings=10
-- [ ] **34.1d** Document baseline results
+**Results**:
+- [x] **34.1a** 2×2=4 threads: **1,226 ops/sec** (strong med: 50.87ms, weak med: 25.71ms)
+- [x] **34.1b** 2×4=8 threads: **2,402 ops/sec** (strong med: 50.76ms, weak med: 25.66ms)
+- [x] **34.1c** 2×8=16 threads: **4,729 ops/sec** (strong med: 50.78ms, weak med: 25.76ms)
+- [x] **34.1d** Baseline documented — perfect linear scaling (latency-limited)
 
 ---
 
-#### Phase 34.2: CURP-HT Baseline with Latency [PENDING]
+#### Phase 34.2: CURP-HT Baseline with Latency [COMPLETE]
 
 **Goal**: Establish baseline throughput for CURP-HT at networkDelay=25.
 
-**Tasks**:
-- [ ] **34.2a** Run CURP-HT with 2 clients × 2 threads, pendings=10
-  - Config: protocol=curpht, clientThreads=2, pendings=10
-- [ ] **34.2b** Run CURP-HT with 2 clients × 4 threads, pendings=10
-- [ ] **34.2c** Run CURP-HT with 2 clients × 8 threads, pendings=10
-- [ ] **34.2d** Document baseline results
+**Results**:
+- [x] **34.2a** 2×2=4 threads: **1,204 ops/sec** (strong med: 51.04ms, weak med: 25.47ms)
+- [x] **34.2b** 2×4=8 threads: **2,369 ops/sec** (strong med: 50.95ms, weak med: 25.38ms)
+- [x] **34.2c** 2×8=16 threads: **4,642 ops/sec** (strong med: 50.93ms, weak med: 25.41ms)
+- [x] **34.2d** Baseline documented — identical to CURP-HO (both latency-limited)
 
 ---
 
-#### Phase 34.3: Scale Client Threads (Both Protocols) [PENDING]
+#### Phase 34.3: Scale Client Threads (Both Protocols) [COMPLETE]
 
 **Goal**: Find throughput scaling curve by increasing clientThreads (10, 16, 24, 32).
 
-**Tasks**:
-- [ ] **34.3a** CURP-HO: clientThreads sweep {10, 16, 24, 32}, pendings=10
-  - Run each with 2 clients, record throughput
-  - If hang/crash → stop, diagnose, fix, re-run
-- [ ] **34.3b** CURP-HT: same clientThreads sweep
-- [ ] **34.3c** Identify saturation point for each protocol
-  - Where throughput stops increasing or starts degrading
-- [ ] **34.3d** Document results and comparison
+**Results**:
+
+| Total Threads | CURP-HO (ops/sec) | CURP-HT (ops/sec) | Scaling Eff. |
+|---------------|-------------------:|-------------------:|:------------:|
+| 4  (2×2)      | 1,226              | 1,204              | baseline     |
+| 8  (2×4)      | 2,402              | 2,369              | ~98%         |
+| 16 (2×8)      | 4,729              | 4,642              | ~96%         |
+| 20 (2×10)     | 5,871              | 5,786              | ~96%         |
+| 32 (2×16)     | 9,298              | 9,131              | ~95%         |
+| 48 (2×24)     | 13,679             | 13,523             | ~93%         |
+| 64 (2×32)     | 17,845             | 17,805             | ~91%         |
+
+- [x] **34.3a** CURP-HO thread sweep complete (10→32 threads per client)
+- [x] **34.3b** CURP-HT thread sweep complete (10→32 threads per client)
+- [x] **34.3c** Saturation analysis:
+  - Still scaling at 64 threads (~91% linear efficiency)
+  - CURP-HO weak P99 jumped to 73ms at 64 threads (vs 29ms for CURP-HT)
+  - CURP-HO's broadcast pattern creates more server contention at high concurrency
+  - Both protocols remain latency-limited (medians stable at ~51ms/~25.5ms)
+- [x] **34.3d** Results documented above
+- **Note**: CURP-HO hit a Fatal crash at 10 threads (see Phase 34.6), fixed before scaling further
 
 ---
 
@@ -1460,8 +1469,8 @@ batchDelayUs: 150
 **Goal**: Find optimal pendings for latency-injected workload.
 
 **Tasks**:
-- [ ] **34.4a** CURP-HO: pendings sweep {5, 10, 15, 20, 30} at best clientThreads from 34.3
-- [ ] **34.4b** CURP-HT: same pendings sweep at best clientThreads from 34.3
+- [ ] **34.4a** CURP-HO: pendings sweep {5, 10, 15, 20, 30} at clientThreads=32
+- [ ] **34.4b** CURP-HT: same pendings sweep at clientThreads=32
 - [ ] **34.4c** Identify optimal pendings for each protocol
   - Balance: throughput vs P99 latency
 - [ ] **34.4d** Document results
@@ -1485,20 +1494,23 @@ batchDelayUs: 150
 
 ---
 
-#### Phase 34.6: Fix Concurrency Issues [PENDING - AS NEEDED]
+#### Phase 34.6: Fix Leader Fatal Crash on Causal Commands [COMPLETE]
 
-**Goal**: Fix any hangs, deadlocks, or crashes discovered during scaling experiments.
+**Goal**: Fix CURP-HO leader crash at 10+ threads with latency injection.
 
-**Potential issues (from prior experience)**:
-- Descriptor pool saturation (maxDescRoutines too low for high thread counts)
-- Channel buffer overflow or deadlock under high concurrency
-- waitForWeakDep timeout at extreme throughput
-- Memory/GC pressure at high request rates
+**Root Cause**: `handleCausalPropose` called both `unsyncCausal` (counter-based, Slot=1 for new key)
+and `leaderUnsyncCausal` (slot-based, Slot=0 for first command) on the leader. When `unsyncCausal`
+set `Slot=1` and `leaderUnsyncCausal` checked `entry.Slot(1) > slot(0)`, it triggered `r.Fatal(1, 0)`.
+The crash was probabilistic — it happened when a causal command was the first operation on a hot key
+(Zipf skew 0.99), which became more likely with more concurrent threads.
 
-**Tasks**:
-- [ ] **34.6a** Diagnose and fix any CURP-HO failures at high concurrency
-- [ ] **34.6b** Diagnose and fix any CURP-HT failures at high concurrency
-- [ ] **34.6c** Re-validate after fixes
+**Fix**: Leader skips `unsyncCausal` (only non-leaders need counter-based witness tracking).
+Leader uses `leaderUnsyncCausal` exclusively for slot-based dependency tracking.
+
+- [x] **34.6a** Diagnosed Fatal crash: "1 0" in leader log = `r.Fatal(entry.Slot=1, slot=0)`
+- [x] **34.6b** Fixed in `curp-ho/curp-ho.go:handleCausalPropose` — skip `unsyncCausal` on leader
+- [x] **34.6c** Added tests: `TestLeaderCausalNoDoubleUnsync`, `TestNonLeaderCausalUsesCounter`
+- [x] **34.6d** Re-validated: 10-thread benchmark completes successfully (5,871 ops/sec)
 
 ---
 
