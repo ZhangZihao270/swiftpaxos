@@ -73,6 +73,10 @@ type Replica struct {
 
 	// Pre-allocated closed channel for immediate notifications (avoids repeated allocations)
 	closedChan chan struct{}
+
+	// Channel-based causal dep notification (replaces spin-wait in waitForWeakDep)
+	weakDepNotify map[int32]chan struct{}
+	weakDepMu     sync.Mutex
 }
 
 // pendingWrite tracks an uncommitted write for speculative read computation
@@ -184,6 +188,9 @@ func New(alias string, rid int, addrs []string, exec bool, pl, f int,
 	// Initialize pre-allocated closed channel for immediate notifications
 	r.closedChan = make(chan struct{})
 	close(r.closedChan)
+
+	// Initialize channel-based weak dep notification (replaces spin-wait)
+	r.weakDepNotify = make(map[int32]chan struct{})
 
 	_, leaderIds, err := replica.NewQuorumsFromFile(conf.Quorum, r.Replica)
 	if err == nil && len(leaderIds) != 0 {
@@ -944,27 +951,59 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 	}
 }
 
-// waitForWeakDep waits for a causal dependency to be executed
-// This ensures that weak commands from the same client execute in order
-// Optimized with shorter sleep intervals for faster response
+// waitForWeakDep waits for a causal dependency to be executed.
+// Uses channel-based notification instead of spin-wait to avoid CPU exhaustion
+// at high request counts. When markWeakExecuted advances the seqnum for a client,
+// it closes the broadcast channel, waking all waiters.
 func (r *Replica) waitForWeakDep(clientId int32, depSeqNum int32) {
 	clientKey := r.int32ToString(clientId)
 
-	// Optimized spin-wait with shorter intervals (10us instead of 100us)
-	// This provides 10x faster response time while still avoiding busy-waiting
-	for i := 0; i < 10000; i++ { // Max ~100ms wait (10000 iterations * 10us)
+	for {
+		// Check if dependency is already satisfied
 		if lastExec, exists := r.weakExecuted.Get(clientKey); exists {
 			if lastExec.(int32) >= depSeqNum {
-				return // Dependency satisfied
+				return
 			}
 		}
-		// Very brief sleep to avoid busy-waiting (10us)
-		time.Sleep(10 * time.Microsecond)
+
+		// Get or create notification channel for this client
+		ch := r.getWeakDepNotify(clientId)
+
+		// Wait for notification or timeout
+		select {
+		case <-ch:
+			// Notification received — re-check condition in next loop iteration
+		case <-time.After(5 * time.Second):
+			// Timeout: proceed to avoid deadlock
+			return
+		}
 	}
-	// Timeout: proceed anyway to avoid deadlock
 }
 
-// markWeakExecuted marks a weak command as executed for causal ordering
+// getWeakDepNotify returns the current notification channel for a client's weak dep.
+func (r *Replica) getWeakDepNotify(clientId int32) chan struct{} {
+	r.weakDepMu.Lock()
+	defer r.weakDepMu.Unlock()
+	if ch, ok := r.weakDepNotify[clientId]; ok {
+		return ch
+	}
+	ch := make(chan struct{})
+	r.weakDepNotify[clientId] = ch
+	return ch
+}
+
+// notifyWeakDep broadcasts to all waiters for a client's weak dependency.
+func (r *Replica) notifyWeakDep(clientId int32) {
+	r.weakDepMu.Lock()
+	if ch, ok := r.weakDepNotify[clientId]; ok {
+		close(ch)
+		delete(r.weakDepNotify, clientId)
+	}
+	r.weakDepMu.Unlock()
+}
+
+// markWeakExecuted marks a weak command as executed for causal ordering,
+// then notifies all waiters for this client's weak dependency.
 func (r *Replica) markWeakExecuted(clientId int32, seqNum int32) {
 	clientKey := r.int32ToString(clientId)
 	r.weakExecuted.Upsert(clientKey, nil,
@@ -978,6 +1017,9 @@ func (r *Replica) markWeakExecuted(clientId int32, seqNum int32) {
 			}
 			return seqNum
 		})
+
+	// Notify all waiters for this client
+	r.notifyWeakDep(clientId)
 }
 
 // int32ToString converts an int32 to string using a cache to avoid repeated conversions
