@@ -1597,28 +1597,50 @@ Leader uses `leaderUnsyncCausal` exclusively for slot-based dependency tracking.
 
 ---
 
-#### Phase 34.8: Peak Throughput Validation [PENDING]
+#### Phase 34.8: Peak Throughput Validation [DONE] [26:02:12, 23:15]
 
 **Goal**: Run 5+ iterations with best configuration for each protocol. Report final peak throughput.
 
 **Tasks**:
-- [ ] **34.8a** CURP-HO: 5 iterations with optimal config, report avg/min/max/stddev
-- [ ] **34.8b** CURP-HT: 5 iterations with optimal config, report avg/min/max/stddev
-- [ ] **34.8c** Create comparison table:
+- [x] **34.8a** CURP-HO: 5 iterations with optimal config (3×32 threads, pendings=15, batchDelayUs=150)
+  - Run 1: 30,538 ops/sec | Strong med 50.83ms P99 105.20ms | Weak med 25.43ms P99 1,987ms
+  - Run 2: 30,588 ops/sec | Strong med 50.82ms P99  98.73ms | Weak med 25.42ms P99 2,179ms
+  - Run 3: 30,594 ops/sec | Strong med 50.79ms P99 103.02ms | Weak med 25.40ms P99 2,063ms
+  - Run 4: 30,526 ops/sec | Strong med 50.79ms P99  95.57ms | Weak med 25.41ms P99 2,126ms
+  - Run 5: 30,575 ops/sec | Strong med 50.84ms P99 116.76ms | Weak med 25.46ms P99 2,070ms
+  - **Avg: 30,564 | Min: 30,526 | Max: 30,594 | StdDev: 31 | CV: 0.10%**
+
+- [x] **34.8b** CURP-HT: 5 iterations with optimal config (3×32 threads, pendings=20, batchDelayUs=50)
+  - Run 1: 38,419 ops/sec | Strong med 58.09ms P99 129.32ms | Weak med 26.36ms P99 127ms
+  - Run 2: 40,552 ops/sec | Strong med 55.57ms P99 157.10ms | Weak med 25.72ms P99 104ms
+  - Run 3: 37,934 ops/sec | Strong med 60.50ms P99 177.20ms | Weak med 25.52ms P99  80ms
+  - Run 4: 39,944 ops/sec | Strong med 59.99ms P99 127.19ms | Weak med 25.40ms P99  87ms
+  - Run 5: 36,291 ops/sec | Strong med 66.16ms P99 172.96ms | Weak med 25.86ms P99 108ms
+  - **Avg: 38,628 | Min: 36,291 | Max: 40,552 | StdDev: 1,690 | CV: 4.37%**
+
+- [x] **34.8c** Final comparison table:
 
 | Metric | CURP-HO | CURP-HT |
 |--------|---------|---------|
-| Peak throughput | ? | ? |
-| Sustained throughput | ? | ? |
-| Strong median latency | ? | ? |
-| Weak median latency | ? | ? |
-| Strong P99 latency | ? | ? |
-| Weak P99 latency | ? | ? |
-| Best clientThreads | ? | ? |
-| Best pendings | ? | ? |
-| Best batchDelayUs | ? | ? |
+| Peak throughput (avg) | 30,564 ops/sec | 38,628 ops/sec |
+| Peak throughput (max) | 30,594 | 40,552 |
+| Throughput stddev | 31 | 1,690 |
+| Strong median latency | 50.81ms | 60.06ms |
+| Weak median latency | 25.42ms | 25.77ms |
+| Strong P99 latency | 103.86ms | 152.75ms |
+| Weak P99 latency | 2,084.96ms | 101.20ms |
+| Best clientThreads | 32 | 32 |
+| Best pendings | 15 | 20 |
+| Best batchDelayUs | 150μs | 50μs |
 
-- [ ] **34.8d** Document final results in docs/phase-34-peak-throughput-geo.md
+- [x] **34.8d** Document final results in docs/phase-34-peak-throughput-geo.md
+
+**Key Findings**:
+- **CURP-HT achieves 1.26x higher peak throughput** (38.6K vs 30.6K ops/sec).
+- **CURP-HO has lower strong command latency** (50.81ms vs 60.06ms) due to 1-RTT fast path.
+- **CURP-HO has extremely high weak P99** (~2,085ms) due to broadcast contention under load.
+- **CURP-HT scales symmetrically** across clients; CURP-HO creates asymmetric load.
+- **CURP-HO throughput is rock-stable** (CV=0.10%) vs CURP-HT (CV=4.37%).
 
 ---
 
