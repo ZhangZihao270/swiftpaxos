@@ -1502,20 +1502,36 @@ batchDelayUs: 150
 
 ---
 
-#### Phase 34.5: Add Third Client Server [PENDING]
+#### Phase 34.5: Add Third Client Server [COMPLETE]
 
 **Goal**: Scale beyond 2 client servers by adding client2 on .101 (co-located with leader/replica0).
 
-**Requires**: Update multi-client.conf to uncomment/add client2 on .101, update Proxy section.
+**Results** (3×32=96 threads, 50ms RTT):
 
-**Tasks**:
-- [ ] **34.5a** Configure 3 client servers (.101, .102, .104)
-  - Add `client2 130.245.173.101` in Clients section
-  - Add proxy mapping: `server_alias replica0` + `client2 (local)`
-- [ ] **34.5b** CURP-HO: 3 clients × best_threads × best_pendings
-- [ ] **34.5c** CURP-HT: 3 clients × best_threads × best_pendings
-- [ ] **34.5d** Compare 2-client vs 3-client throughput
-  - Determine if 3rd client provides additional throughput or if server is saturated
+| Metric | CURP-HO 2-cl | CURP-HO 3-cl | CURP-HT 2-cl | CURP-HT 3-cl |
+|--------|:------------:|:------------:|:------------:|:------------:|
+| Throughput | 23,240 | **30,456** (+31%) | 31,168 | **39,156** (+26%) |
+| Strong med | 50.7ms | 50.8ms | 51.4ms | 57.5ms |
+| Weak med | 29.5ms | 25.5ms | 25.3ms | 26.1ms |
+| Weak P99 | 153ms | 2,083ms | 77ms | 83ms |
+| Client bal. | balanced | asymmetric | balanced | **balanced** |
+
+Per-client breakdown (3-client):
+- CURP-HO: client0=11.9K, client1=6.4K, client2=12.2K (client1 starved)
+- CURP-HT: client0=13.0K, client1=13.0K, client2=13.1K (perfectly balanced)
+
+- [x] **34.5a** Configured client2 on .101, proxy mapping to replica0
+- [x] **34.5b** CURP-HO: 30,456 ops/sec (3×32 threads, pendings=15)
+- [x] **34.5c** CURP-HT: 39,156 ops/sec (3×32 threads, pendings=20)
+- [x] **34.5d** Analysis:
+  - 3rd client on leader adds 26-31% throughput — servers not yet fully saturated
+  - CURP-HT scales gracefully: balanced clients, reasonable P99 (83ms)
+  - CURP-HO suffers severe client asymmetry: client1 (remote from leader) starved
+    because leader is overwhelmed by 3× causal broadcast messages
+  - CURP-HT 3-client (39K) approaches no-latency throughput (~41K), suggesting
+    the system is near peak capacity
+  - **Recommendation**: CURP-HT is the better protocol for geo-replicated settings
+    due to lower message amplification and more balanced client performance
 
 ---
 
