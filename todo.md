@@ -1384,6 +1384,172 @@ Investigation needed before proceeding to optimization phases.
 
 ---
 
+### Phase 34: Peak Throughput Experiments with Injected Latency [IN PROGRESS]
+
+**Goal**: Find peak throughput for both CURP-HT and CURP-HO under geo-setting latency injection (networkDelay=25ms, 50ms RTT). Scale up client threads and client count, fix any hangs/failures at high concurrency.
+
+**Cluster Setup**:
+- 3 replicas: .101 (leader), .102, .104
+- 2 client servers: .102 (client0, co-located with replica1), .104 (client1, co-located with replica2)
+- Can add client2 on .101 (co-located with replica0/leader) if needed
+- Application-level delay injection: 25ms one-way per inter-node message
+
+**Baseline Config**:
+```yaml
+networkDelay: 25        # 50ms RTT between replicas
+reqs: 10000             # Per thread
+commandSize: 100
+writes: 10              # 10% strong writes
+weakRatio: 50           # 50% weak commands
+weakWrites: 10          # 10% weak writes
+conflicts: 0
+pipeline: true
+maxDescRoutines: 500
+batchDelayUs: 150
+```
+
+**Strategy**: Start conservative, scale up one dimension at a time. Record throughput + latency at each point. Fix any failures before scaling further.
+
+---
+
+#### Phase 34.1: CURP-HO Baseline with Latency [PENDING]
+
+**Goal**: Establish baseline throughput for CURP-HO at networkDelay=25.
+
+**Tasks**:
+- [ ] **34.1a** Run CURP-HO with 2 clients × 2 threads, pendings=10
+  - Config: protocol=curpho, clientThreads=2, pendings=10
+  - Expected: moderate throughput (latency-limited)
+  - Record: throughput, strong/weak median+P99 latency
+- [ ] **34.1b** Run CURP-HO with 2 clients × 4 threads, pendings=10
+- [ ] **34.1c** Run CURP-HO with 2 clients × 8 threads, pendings=10
+- [ ] **34.1d** Document baseline results
+
+---
+
+#### Phase 34.2: CURP-HT Baseline with Latency [PENDING]
+
+**Goal**: Establish baseline throughput for CURP-HT at networkDelay=25.
+
+**Tasks**:
+- [ ] **34.2a** Run CURP-HT with 2 clients × 2 threads, pendings=10
+  - Config: protocol=curpht, clientThreads=2, pendings=10
+- [ ] **34.2b** Run CURP-HT with 2 clients × 4 threads, pendings=10
+- [ ] **34.2c** Run CURP-HT with 2 clients × 8 threads, pendings=10
+- [ ] **34.2d** Document baseline results
+
+---
+
+#### Phase 34.3: Scale Client Threads (Both Protocols) [PENDING]
+
+**Goal**: Find throughput scaling curve by increasing clientThreads (10, 16, 24, 32).
+
+**Tasks**:
+- [ ] **34.3a** CURP-HO: clientThreads sweep {10, 16, 24, 32}, pendings=10
+  - Run each with 2 clients, record throughput
+  - If hang/crash → stop, diagnose, fix, re-run
+- [ ] **34.3b** CURP-HT: same clientThreads sweep
+- [ ] **34.3c** Identify saturation point for each protocol
+  - Where throughput stops increasing or starts degrading
+- [ ] **34.3d** Document results and comparison
+
+---
+
+#### Phase 34.4: Scale Pipeline Depth (Both Protocols) [PENDING]
+
+**Goal**: Find optimal pendings for latency-injected workload.
+
+**Tasks**:
+- [ ] **34.4a** CURP-HO: pendings sweep {5, 10, 15, 20, 30} at best clientThreads from 34.3
+- [ ] **34.4b** CURP-HT: same pendings sweep at best clientThreads from 34.3
+- [ ] **34.4c** Identify optimal pendings for each protocol
+  - Balance: throughput vs P99 latency
+- [ ] **34.4d** Document results
+
+---
+
+#### Phase 34.5: Add Third Client Server [PENDING]
+
+**Goal**: Scale beyond 2 client servers by adding client2 on .101 (co-located with leader/replica0).
+
+**Requires**: Update multi-client.conf to uncomment/add client2 on .101, update Proxy section.
+
+**Tasks**:
+- [ ] **34.5a** Configure 3 client servers (.101, .102, .104)
+  - Add `client2 130.245.173.101` in Clients section
+  - Add proxy mapping: `server_alias replica0` + `client2 (local)`
+- [ ] **34.5b** CURP-HO: 3 clients × best_threads × best_pendings
+- [ ] **34.5c** CURP-HT: 3 clients × best_threads × best_pendings
+- [ ] **34.5d** Compare 2-client vs 3-client throughput
+  - Determine if 3rd client provides additional throughput or if server is saturated
+
+---
+
+#### Phase 34.6: Fix Concurrency Issues [PENDING - AS NEEDED]
+
+**Goal**: Fix any hangs, deadlocks, or crashes discovered during scaling experiments.
+
+**Potential issues (from prior experience)**:
+- Descriptor pool saturation (maxDescRoutines too low for high thread counts)
+- Channel buffer overflow or deadlock under high concurrency
+- waitForWeakDep timeout at extreme throughput
+- Memory/GC pressure at high request rates
+
+**Tasks**:
+- [ ] **34.6a** Diagnose and fix any CURP-HO failures at high concurrency
+- [ ] **34.6b** Diagnose and fix any CURP-HT failures at high concurrency
+- [ ] **34.6c** Re-validate after fixes
+
+---
+
+#### Phase 34.7: Batch Delay Tuning Under Latency [PENDING]
+
+**Goal**: Optimal batchDelayUs may differ under latency injection. Re-tune.
+
+**Tasks**:
+- [ ] **34.7a** CURP-HO: batchDelayUs sweep {0, 50, 100, 150, 200, 300} at best config
+- [ ] **34.7b** CURP-HT: same batchDelayUs sweep
+- [ ] **34.7c** Document optimal batchDelayUs for each protocol under latency
+
+---
+
+#### Phase 34.8: Peak Throughput Validation [PENDING]
+
+**Goal**: Run 5+ iterations with best configuration for each protocol. Report final peak throughput.
+
+**Tasks**:
+- [ ] **34.8a** CURP-HO: 5 iterations with optimal config, report avg/min/max/stddev
+- [ ] **34.8b** CURP-HT: 5 iterations with optimal config, report avg/min/max/stddev
+- [ ] **34.8c** Create comparison table:
+
+| Metric | CURP-HO | CURP-HT |
+|--------|---------|---------|
+| Peak throughput | ? | ? |
+| Sustained throughput | ? | ? |
+| Strong median latency | ? | ? |
+| Weak median latency | ? | ? |
+| Strong P99 latency | ? | ? |
+| Weak P99 latency | ? | ? |
+| Best clientThreads | ? | ? |
+| Best pendings | ? | ? |
+| Best batchDelayUs | ? | ? |
+
+- [ ] **34.8d** Document final results in docs/phase-34-peak-throughput-geo.md
+
+---
+
+**Experiment Execution Order**:
+1. 34.1 → 34.2 (baselines, in parallel or sequential)
+2. 34.3 (thread scaling — fix issues as they arise → 34.6)
+3. 34.4 (pipeline depth optimization)
+4. 34.7 (batch delay re-tuning)
+5. 34.5 (3rd client if not yet saturated)
+6. 34.8 (final validation)
+
+**Success Criteria**: Find the peak throughput for both protocols at networkDelay=25, with a reproducible configuration. Fix any high-concurrency bugs discovered along the way.
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
