@@ -515,7 +515,10 @@ func (r *Replica) clientListener(conn net.Conn) {
 
 	mutex := &sync.Mutex{}
 
-	dchan := defs.NewDelayProposeChan(r.Dt.WaitDuration(addr), r.ProposeChan)
+	// Delay for client messages (simulates geo latency for remote clients).
+	// Uses simple goroutine+sleep instead of DelayProposeChan, which requires
+	// consecutive CommandIds and breaks with hybrid weak/strong protocols.
+	clientDelay := r.Dt.WaitDuration(addr)
 
 	for !r.Shutdown && err == nil {
 		if msgType, err = reader.ReadByte(); err != nil {
@@ -553,13 +556,21 @@ func (r *Replica) clientListener(conn net.Conn) {
 					Timestamp: propose.Timestamp,
 				}, writer, mutex)
 			} else {
-				dchan.Write(&defs.GPropose{
+				gp := &defs.GPropose{
 					Propose: propose,
 					Reply:   writer,
 					Mutex:   mutex,
 					Proxy:   isProxy,
 					Addr:    addr,
-				})
+				}
+				if clientDelay > 0 {
+					go func(p *defs.GPropose) {
+						time.Sleep(clientDelay)
+						r.ProposeChan <- p
+					}(gp)
+				} else {
+					r.ProposeChan <- gp
+				}
 			}
 			break
 

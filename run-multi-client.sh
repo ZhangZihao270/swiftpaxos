@@ -134,6 +134,23 @@ parse_config
 
 TOTAL_THREADS=$((NUM_CLIENTS * THREAD_COUNT))
 
+# Parse network delay from config (one-way delay in ms, 0 = disabled)
+# Uses the built-in application-level delay injection (no root/tc needed)
+NETWORK_DELAY=$(grep -iE "^networkDelay:" "$CONFIG" 2>/dev/null | awk '{print $2}' | head -1)
+NETWORK_DELAY=${NETWORK_DELAY:-0}
+
+# Compute unique host list (used for sync, cleanup)
+ALL_HOSTS=($(printf '%s\n' "$MASTER_ADDR" "${REPLICA_ADDRS[@]}" "${CLIENT_ADDRS[@]}" | sort -u))
+
+# Generate latency config file if network delay is enabled
+LATENCY_FLAG=""
+if [[ "$NETWORK_DELAY" -gt 0 ]]; then
+    RTT_MS=$((NETWORK_DELAY * 2))
+    LATENCY_CONF="$RESULTS_DIR/benchmark-latency.conf"
+    echo "uniform ${RTT_MS}ms" > "$LATENCY_CONF"
+    LATENCY_FLAG="-latency benchmark-latency.conf"
+fi
+
 echo "============================================"
 echo "  Distributed Multi-Client CURP-HT Benchmark"
 echo "============================================"
@@ -143,6 +160,9 @@ echo "Client servers: $NUM_CLIENTS"
 echo "Threads per server: $THREAD_COUNT"
 echo "Total concurrent threads: $TOTAL_THREADS"
 echo "Replicas: $NUM_REPLICAS"
+if [[ "$NETWORK_DELAY" -gt 0 ]]; then
+    echo "Network delay: ${NETWORK_DELAY}ms one-way (${RTT_MS}ms RTT)"
+fi
 echo "Results dir: $RESULTS_DIR"
 echo ""
 
@@ -175,6 +195,7 @@ cleanup() {
         for addr in "${CLIENT_ADDRS[@]}"; do
             ssh $SSH_OPTS "$SSH_USER@$addr" "pkill -x swiftpaxos" 2>/dev/null || true
         done
+
     else
         pkill -x "swiftpaxos" 2>/dev/null || true
     fi
@@ -191,11 +212,16 @@ cp "$CONFIG" "$TEMP_CONFIG"
 sync_to_remote() {
     local host="$1"
     echo "  Syncing to $host..."
+    # Build list of files to sync
+    local files=(./swiftpaxos "$TEMP_CONFIG")
+    if [[ -n "$LATENCY_CONF" ]]; then
+        files+=("$LATENCY_CONF")
+    fi
     rsync -az --delete \
-        ./swiftpaxos "$TEMP_CONFIG" \
+        "${files[@]}" \
         "$SSH_USER@$host:$WORK_DIR/" 2>/dev/null || {
         echo "Warning: rsync failed to $host, trying scp..."
-        scp $SSH_OPTS ./swiftpaxos "$TEMP_CONFIG" "$SSH_USER@$host:$WORK_DIR/"
+        scp $SSH_OPTS "${files[@]}" "$SSH_USER@$host:$WORK_DIR/"
     }
 }
 
@@ -219,15 +245,14 @@ run_remote_bg() {
 if $DISTRIBUTED; then
     # Sync to all servers first
     echo "Syncing files to remote servers..."
-    all_hosts=($(printf '%s\n' "$MASTER_ADDR" "${REPLICA_ADDRS[@]}" "${CLIENT_ADDRS[@]}" | sort -u))
-    for host in "${all_hosts[@]}"; do
+    for host in "${ALL_HOSTS[@]}"; do
         sync_to_remote "$host"
     done
     echo ""
 
     # Kill existing processes (use pkill -x to match exact binary name, not args)
     echo "Stopping existing processes..."
-    for host in "${all_hosts[@]}"; do
+    for host in "${ALL_HOSTS[@]}"; do
         ssh $SSH_OPTS "$SSH_USER@$host" "pkill -x swiftpaxos" 2>/dev/null || true
     done
     sleep 2
@@ -241,7 +266,7 @@ if $DISTRIBUTED; then
     echo "Starting replicas..."
     for i in "${!REPLICA_ALIASES[@]}"; do
         echo "  ${REPLICA_ALIASES[$i]} on ${REPLICA_ADDRS[$i]}..."
-        run_remote_bg "${REPLICA_ADDRS[$i]}" "$RESULTS_DIR/${REPLICA_ALIASES[$i]}.log" "./swiftpaxos -run server -config $(basename $TEMP_CONFIG) -alias ${REPLICA_ALIASES[$i]}"
+        run_remote_bg "${REPLICA_ADDRS[$i]}" "$RESULTS_DIR/${REPLICA_ALIASES[$i]}.log" "./swiftpaxos -run server -config $(basename $TEMP_CONFIG) -alias ${REPLICA_ALIASES[$i]} $LATENCY_FLAG"
     done
 
 else
@@ -257,7 +282,7 @@ else
     echo "Starting replicas..."
     for i in "${!REPLICA_ALIASES[@]}"; do
         echo "  ${REPLICA_ALIASES[$i]}..."
-        ./swiftpaxos -run server -config "$TEMP_CONFIG" -alias "${REPLICA_ALIASES[$i]}" \
+        ./swiftpaxos -run server -config "$TEMP_CONFIG" -alias "${REPLICA_ALIASES[$i]}" $LATENCY_FLAG \
             > "$RESULTS_DIR/${REPLICA_ALIASES[$i]}.log" 2>&1 &
     done
 fi
@@ -278,7 +303,7 @@ for i in "${!CLIENT_ALIASES[@]}"; do
 
     if $DISTRIBUTED; then
         echo "Starting $alias on $addr (remote)..."
-        # Run client and capture output
+        # No -latency flag for clients: clients are co-located with replicas
         ssh $SSH_OPTS "$SSH_USER@$addr" \
             "cd $WORK_DIR && ./swiftpaxos -run client -config $(basename $TEMP_CONFIG) -alias $alias" \
             > "$log_file" 2>&1 &
