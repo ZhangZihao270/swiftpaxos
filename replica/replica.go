@@ -20,6 +20,11 @@ import (
 	"github.com/imdea-software/swiftpaxos/state"
 )
 
+type clientSendArg struct {
+	code uint8
+	msg  fastrpc.Serializable
+}
+
 type Replica struct {
 	*dlog.Logger
 
@@ -34,6 +39,8 @@ type Replica struct {
 	PeerReaders        []*bufio.Reader
 	PeerWriters        []*bufio.Writer
 	ClientWriters      map[int32]*bufio.Writer
+	ClientMu           map[int32]*sync.Mutex
+	ClientFastChan     map[int32]chan clientSendArg
 	Config             *config.Config
 	Alive              []bool
 	PreferredPeerOrder []int32
@@ -75,6 +82,8 @@ func New(alias string, id, f int, addrs []string, thrifty, exec, lread bool, con
 		PeerReaders:        make([]*bufio.Reader, n),
 		PeerWriters:        make([]*bufio.Writer, n),
 		ClientWriters:      make(map[int32]*bufio.Writer),
+		ClientMu:           make(map[int32]*sync.Mutex),
+		ClientFastChan:     make(map[int32]chan clientSendArg),
 		Config:             config,
 		Alive:              make([]bool, n),
 		PreferredPeerOrder: make([]int32, n),
@@ -228,16 +237,32 @@ func (r *Replica) SendMsg(peerId int32, code uint8, msg fastrpc.Serializable) {
 
 func (r *Replica) SendClientMsg(id int32, code uint8, msg fastrpc.Serializable) {
 	r.M.Lock()
-	defer r.M.Unlock()
-
 	w := r.ClientWriters[id]
-	if w == nil {
+	mu := r.ClientMu[id]
+	r.M.Unlock()
+
+	if w == nil || mu == nil {
 		r.Printf("Connection to client %d lost!", id)
 		return
 	}
+	mu.Lock()
+	defer mu.Unlock()
 	w.WriteByte(code)
 	msg.Marshal(w)
 	w.Flush()
+}
+
+// SendClientMsgFast sends a message to a client via a dedicated per-client
+// goroutine, bypassing the Sender queue. This avoids head-of-line blocking
+// where slow remote flushes delay fast local replies.
+func (r *Replica) SendClientMsgFast(id int32, code uint8, msg fastrpc.Serializable) {
+	r.M.Lock()
+	ch := r.ClientFastChan[id]
+	r.M.Unlock()
+	if ch == nil {
+		return
+	}
+	ch <- clientSendArg{code: code, msg: msg}
 }
 
 func (r *Replica) SendMsgNoFlush(peerId int32, code uint8, msg fastrpc.Serializable) {
@@ -505,6 +530,19 @@ func (r *Replica) clientListener(conn net.Conn) {
 			}
 			r.M.Lock()
 			r.ClientWriters[propose.ClientId] = writer
+			if r.ClientMu[propose.ClientId] == nil {
+				r.ClientMu[propose.ClientId] = &sync.Mutex{}
+			}
+			if r.ClientFastChan[propose.ClientId] == nil {
+				ch := make(chan clientSendArg, 256)
+				r.ClientFastChan[propose.ClientId] = ch
+				cid := propose.ClientId
+				go func() {
+					for arg := range ch {
+						r.SendClientMsg(cid, arg.code, arg.msg)
+					}
+				}()
+			}
 			r.M.Unlock()
 			op := propose.Command.Op
 			if r.LRead && (op == state.GET || op == state.SCAN) {

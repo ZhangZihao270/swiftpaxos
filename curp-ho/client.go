@@ -432,9 +432,14 @@ func (c *Client) handleCausalReply(rep *MCausalReply) {
 
 // sendMsgToAll broadcasts a message to all replicas.
 // Used by CURP-HO for causal op broadcast (all replicas act as witnesses).
+// Sends to bound replica first so it receives the message without waiting
+// for remote TCP flushes to other replicas.
 func (c *Client) sendMsgToAll(code uint8, msg fastrpc.Serializable) {
+	c.SendMsg(c.boundReplica, code, msg)
 	for i := 0; i < c.N; i++ {
-		c.SendMsg(int32(i), code, msg)
+		if int32(i) != c.boundReplica {
+			c.SendMsg(int32(i), code, msg)
+		}
 	}
 }
 

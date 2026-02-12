@@ -164,19 +164,19 @@ cleanup() {
 
     if $DISTRIBUTED; then
         # Kill on master
-        ssh $SSH_OPTS "$SSH_USER@$MASTER_ADDR" "pkill -f swiftpaxos" 2>/dev/null || true
+        ssh $SSH_OPTS "$SSH_USER@$MASTER_ADDR" "pkill -x swiftpaxos" 2>/dev/null || true
 
         # Kill on replicas
         for addr in "${REPLICA_ADDRS[@]}"; do
-            ssh $SSH_OPTS "$SSH_USER@$addr" "pkill -f swiftpaxos" 2>/dev/null || true
+            ssh $SSH_OPTS "$SSH_USER@$addr" "pkill -x swiftpaxos" 2>/dev/null || true
         done
 
         # Kill on clients
         for addr in "${CLIENT_ADDRS[@]}"; do
-            ssh $SSH_OPTS "$SSH_USER@$addr" "pkill -f swiftpaxos" 2>/dev/null || true
+            ssh $SSH_OPTS "$SSH_USER@$addr" "pkill -x swiftpaxos" 2>/dev/null || true
         done
     else
-        pkill -f "swiftpaxos" 2>/dev/null || true
+        pkill -x "swiftpaxos" 2>/dev/null || true
     fi
 
     echo "Results saved in: $RESULTS_DIR"
@@ -207,8 +207,11 @@ run_remote() {
 
 run_remote_bg() {
     local host="$1"
-    shift
-    ssh $SSH_OPTS "$SSH_USER@$host" "cd $WORK_DIR && nohup $* > /dev/null 2>&1 &"
+    local logfile="$2"
+    shift 2
+    # -f: fork SSH to background after auth; -n: redirect stdin from /dev/null
+    # Without these, SSH hangs waiting for the backgrounded process to exit
+    ssh -f -n $SSH_OPTS "$SSH_USER@$host" "cd $WORK_DIR && nohup $* </dev/null > $logfile 2>&1 &"
 }
 
 # ========== START SERVERS ==========
@@ -222,29 +225,29 @@ if $DISTRIBUTED; then
     done
     echo ""
 
-    # Kill existing processes
+    # Kill existing processes (use pkill -x to match exact binary name, not args)
     echo "Stopping existing processes..."
     for host in "${all_hosts[@]}"; do
-        ssh $SSH_OPTS "$SSH_USER@$host" "pkill -f swiftpaxos" 2>/dev/null || true
+        ssh $SSH_OPTS "$SSH_USER@$host" "pkill -x swiftpaxos" 2>/dev/null || true
     done
     sleep 2
 
     # Start master
     echo "Starting master on $MASTER_ADDR..."
-    run_remote_bg "$MASTER_ADDR" "./swiftpaxos -run master -config $(basename $TEMP_CONFIG) -alias master0"
+    run_remote_bg "$MASTER_ADDR" "$RESULTS_DIR/master.log" "./swiftpaxos -run master -config $(basename $TEMP_CONFIG) -alias master0"
     sleep 2
 
     # Start replicas
     echo "Starting replicas..."
     for i in "${!REPLICA_ALIASES[@]}"; do
         echo "  ${REPLICA_ALIASES[$i]} on ${REPLICA_ADDRS[$i]}..."
-        run_remote_bg "${REPLICA_ADDRS[$i]}" "./swiftpaxos -run server -config $(basename $TEMP_CONFIG) -alias ${REPLICA_ALIASES[$i]}"
+        run_remote_bg "${REPLICA_ADDRS[$i]}" "$RESULTS_DIR/${REPLICA_ALIASES[$i]}.log" "./swiftpaxos -run server -config $(basename $TEMP_CONFIG) -alias ${REPLICA_ALIASES[$i]}"
     done
 
 else
     # Local mode
     echo "Stopping existing processes..."
-    pkill -f "swiftpaxos" 2>/dev/null || true
+    pkill -x "swiftpaxos" 2>/dev/null || true
     sleep 1
 
     echo "Starting master..."
