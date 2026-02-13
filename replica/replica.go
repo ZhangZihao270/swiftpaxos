@@ -248,10 +248,19 @@ func (r *Replica) SendClientMsg(id int32, code uint8, msg fastrpc.Serializable) 
 		r.Printf("Connection to client %d lost!", id)
 		return
 	}
-	// Inject latency for replica→client direction (non-co-located clients)
+	// Inject latency for replica→client direction (non-co-located clients).
+	// Use a goroutine so we don't block the Sender goroutine.
 	if caddr != "" {
 		if d := r.Dt.WaitDuration(caddr); d > 0 {
-			time.Sleep(d)
+			go func() {
+				time.Sleep(d)
+				mu.Lock()
+				defer mu.Unlock()
+				w.WriteByte(code)
+				msg.Marshal(w)
+				w.Flush()
+			}()
+			return
 		}
 	}
 	mu.Lock()
