@@ -11,9 +11,11 @@ import (
 var LatencyConf = ""
 
 type LatencyTable struct {
-	ti map[int]time.Duration
-	tn map[string]time.Duration
-	d  time.Duration
+	ti     map[int]time.Duration
+	tn     map[string]time.Duration
+	d      time.Duration
+	myAddr string
+	addrs  []string
 }
 
 type DelayProposeChan struct {
@@ -161,7 +163,9 @@ func NewLatencyTable(conf, myAddr string, addrs []string) *LatencyTable {
 	myAddr = strings.Split(myAddr, ":")[0]
 
 	dt := &LatencyTable{
-		d: time.Duration(0),
+		d:      time.Duration(0),
+		myAddr: myAddr,
+		addrs:  addrs,
 	}
 
 	s := bufio.NewScanner(f)
@@ -171,7 +175,9 @@ func NewLatencyTable(conf, myAddr string, addrs []string) *LatencyTable {
 			if data[0] == "uniform" {
 				if d, err := time.ParseDuration(data[1]); err == nil {
 					return &LatencyTable{
-						d: time.Duration(int64(d) / int64(2)),
+						d:      time.Duration(int64(d) / int64(2)),
+						myAddr: myAddr,
+						addrs:  addrs,
 					}
 				} else {
 					return nil
@@ -213,7 +219,11 @@ func (dt *LatencyTable) WaitDuration(addr string) time.Duration {
 	if dt == nil {
 		return time.Duration(0)
 	}
-	d, exists := dt.tn[strings.Split(addr, ":")[0]]
+	addr = strings.Split(addr, ":")[0]
+	if addr == dt.myAddr {
+		return time.Duration(0)
+	}
+	d, exists := dt.tn[addr]
 	if exists {
 		return d
 	}
@@ -222,6 +232,9 @@ func (dt *LatencyTable) WaitDuration(addr string) time.Duration {
 
 func (dt *LatencyTable) WaitDurationID(id int) time.Duration {
 	if dt == nil {
+		return time.Duration(0)
+	}
+	if id >= 0 && id < len(dt.addrs) && strings.Split(dt.addrs[id], ":")[0] == dt.myAddr {
 		return time.Duration(0)
 	}
 	d, exists := dt.ti[id]
