@@ -41,6 +41,7 @@ type Replica struct {
 	ClientWriters      map[int32]*bufio.Writer
 	ClientMu           map[int32]*sync.Mutex
 	ClientFastChan     map[int32]chan clientSendArg
+	ClientAddrs        map[int32]string
 	Config             *config.Config
 	Alive              []bool
 	PreferredPeerOrder []int32
@@ -84,6 +85,7 @@ func New(alias string, id, f int, addrs []string, thrifty, exec, lread bool, con
 		ClientWriters:      make(map[int32]*bufio.Writer),
 		ClientMu:           make(map[int32]*sync.Mutex),
 		ClientFastChan:     make(map[int32]chan clientSendArg),
+		ClientAddrs:        make(map[int32]string),
 		Config:             config,
 		Alive:              make([]bool, n),
 		PreferredPeerOrder: make([]int32, n),
@@ -239,11 +241,18 @@ func (r *Replica) SendClientMsg(id int32, code uint8, msg fastrpc.Serializable) 
 	r.M.Lock()
 	w := r.ClientWriters[id]
 	mu := r.ClientMu[id]
+	caddr := r.ClientAddrs[id]
 	r.M.Unlock()
 
 	if w == nil || mu == nil {
 		r.Printf("Connection to client %d lost!", id)
 		return
+	}
+	// Inject latency for replica→client direction (non-co-located clients)
+	if caddr != "" {
+		if d := r.Dt.WaitDuration(caddr); d > 0 {
+			time.Sleep(d)
+		}
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -533,6 +542,7 @@ func (r *Replica) clientListener(conn net.Conn) {
 			}
 			r.M.Lock()
 			r.ClientWriters[propose.ClientId] = writer
+			r.ClientAddrs[propose.ClientId] = addr
 			if r.ClientMu[propose.ClientId] == nil {
 				r.ClientMu[propose.ClientId] = &sync.Mutex{}
 			}

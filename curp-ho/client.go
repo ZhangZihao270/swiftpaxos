@@ -124,7 +124,7 @@ func (c *Client) initMsgSets(cmdId CommandId) {
 		c.acks[cmdId] = c.acks[cmdId].ReinitMsgSet(c.Q, accept, func(interface{}) {}, c.handleFastPathAcks)
 	}
 	if initMacks {
-		c.macks[cmdId] = c.macks[cmdId].ReinitMsgSet(c.M, accept, func(interface{}) {}, c.handleSlowPathAcks)
+		c.macks[cmdId] = c.macks[cmdId].ReinitMsgSet(c.Q, accept, func(interface{}) {}, c.handleSlowPathAcks)
 	}
 }
 
