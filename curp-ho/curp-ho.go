@@ -84,6 +84,9 @@ type Replica struct {
 	// Key: clientId, Value: channel closed when latest executed seqnum advances
 	weakDepNotify map[int32]chan struct{}
 	weakDepMu     sync.Mutex
+
+	// Track per-key version (slot of last write) for weak read responses
+	keyVersions cmap.ConcurrentMap
 }
 
 // pendingWrite tracks an uncommitted write for speculative read computation
@@ -161,6 +164,7 @@ func New(alias string, rid int, addrs []string, exec bool, pl, f int,
 		delivered:     cmap.New(),
 		weakExecuted:  cmap.New(),
 		pendingWrites: cmap.New(),
+		keyVersions:   cmap.New(),
 		boundClients:  make(map[int32]bool),
 		history:       make([]commandStaticDesc, HISTORY_SIZE),
 
@@ -346,6 +350,10 @@ func (r *Replica) run() {
 			causalPropose := m.(*MCausalPropose)
 			r.handleCausalPropose(causalPropose)
 			// ALL replicas handle causal proposes (witness pool + reply)
+
+		case m := <-r.cs.weakReadChan:
+			weakRead := m.(*MWeakRead)
+			r.handleWeakRead(weakRead)
 		}
 	}
 }
@@ -899,12 +907,19 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 			desc.val = desc.cmd.Execute(r.State)
 			desc.applied = true
 			r.executed.Set(slotStr, struct{}{})
+			// Track per-key version for weak read responses
+			if desc.cmd.Op == state.PUT {
+				keyStr := r.int32ToString(int32(desc.cmd.K))
+				r.keyVersions.Set(keyStr, slot)
+			}
 			r.notifyExecute(slot) // Notify waiters that slot is executed
 
 			// CURP-HO: Clean up unsynced entry on leader after execution.
 			// On non-leaders, sync() handles cleanup. On leader, we clean up here
 			// by decrementing the count or removing the entry if no other pending ops.
-			if r.isLeader {
+			// For weak commands on leader: skip syncLeader — the async function
+			// (asyncReplicateWeak/asyncReplicateCausal) owns cleanup to avoid duplicates.
+			if r.isLeader && !desc.isWeak {
 				r.syncLeader(desc.cmdId, desc.cmd)
 			}
 
@@ -927,6 +942,13 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 					}
 					r.sender.SendToClient(desc.propose.ClientId, rep, r.cs.syncReplyRPC)
 				}
+			}
+			// For weak commands on leader: skip cleanup here. The async function
+			// (asyncReplicateWeak/asyncReplicateCausal) owns the descriptor lifecycle —
+			// it will save the value, mark delivered, and trigger handler cleanup via desc.msgs <- slot.
+			// This avoids freeing the descriptor while the async function still needs it.
+			if desc.isWeak && r.isLeader {
+				return
 			}
 			desc.msgs <- slot
 			r.delivered.Set(strconv.Itoa(slot), struct{}{})
@@ -1197,15 +1219,14 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 	}
 
 	r.batcher.SendAccept(acc)
-	r.handleAccept(acc, desc)
-
-	// The accept/commit flow will continue through normal message handling
-	// Once majority acks are received, the command will be committed
-	// The actual execution happens through the deliver() mechanism which
-	// ensures slot ordering is maintained
+	// Route self-Accept through the handler goroutine (via desc.msgs) instead of
+	// calling handleAccept directly. This ensures ALL desc.acks.Add() calls happen
+	// in the single handler goroutine, avoiding concurrent access to the non-thread-safe MsgSet.
+	desc.msgs <- acc
 
 	// After commit is complete (tracked via committed map), execute in slot order
 	// Wait for commit using channel notification (replaces spin-wait)
+	slotStr := strconv.Itoa(slot)
 	commitCh := r.getOrCreateCommitNotify(slot)
 	select {
 	case <-commitCh:
@@ -1226,7 +1247,6 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 	}
 
 	// Wait for causal dependency (session ordering within client)
-	// This is now done here instead of blocking the speculative result computation
 	if causalDep > 0 {
 		r.waitForWeakDep(clientId, causalDep)
 	}
@@ -1235,9 +1255,8 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 	if !desc.applied {
 		desc.val = desc.cmd.Execute(r.State)
 		desc.applied = true
-		slotStr := strconv.Itoa(slot)
 		r.executed.Set(slotStr, struct{}{})
-		r.notifyExecute(slot) // Notify waiters that slot is executed
+		r.notifyExecute(slot)
 
 		// Trigger next slot
 		go func(nextSlot int) {
@@ -1246,12 +1265,18 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 	}
 
 	// Always mark weak executed and clean up — even if deliver() ran first.
-	// deliver() sets desc.applied but does NOT handle weak-specific cleanup.
+	// deliver() skips cleanup for weak commands on leader, so we own the full lifecycle.
 	r.markWeakExecuted(clientId, seqNum)
 
 	if desc.cmd.Op == state.PUT {
 		r.removePendingWrite(clientId, desc.cmd.K, seqNum)
 	}
+
+	// Cleanup: save result for MSyncReply, mark delivered, then trigger handler exit.
+	// deliver() skipped this for weak commands on leader to avoid freeing desc too early.
+	r.values.Set(desc.cmdId.String(), desc.val)
+	r.delivered.Set(slotStr, struct{}{})
+	desc.msgs <- slot // triggers handler goroutine cleanup (freeDesc) and exit
 }
 
 // handleCausalPropose handles a CURP-HO causal command received from a client.
@@ -1355,9 +1380,13 @@ func (r *Replica) asyncReplicateCausal(desc *commandDesc, slot int, clientId int
 	}
 
 	r.batcher.SendAccept(acc)
-	r.handleAccept(acc, desc)
+	// Route self-Accept through the handler goroutine (via desc.msgs) instead of
+	// calling handleAccept directly. This ensures ALL desc.acks.Add() calls happen
+	// in the single handler goroutine, avoiding concurrent access to the non-thread-safe MsgSet.
+	desc.msgs <- acc
 
 	// Wait for commit using channel notification
+	slotStr := strconv.Itoa(slot)
 	commitCh := r.getOrCreateCommitNotify(slot)
 	select {
 	case <-commitCh:
@@ -1386,7 +1415,6 @@ func (r *Replica) asyncReplicateCausal(desc *commandDesc, slot int, clientId int
 	if !desc.applied {
 		desc.val = desc.cmd.Execute(r.State)
 		desc.applied = true
-		slotStr := strconv.Itoa(slot)
 		r.executed.Set(slotStr, struct{}{})
 		r.notifyExecute(slot)
 
@@ -1397,7 +1425,7 @@ func (r *Replica) asyncReplicateCausal(desc *commandDesc, slot int, clientId int
 	}
 
 	// Always mark weak executed, clean up, and sync — even if deliver() ran first.
-	// deliver() sets desc.applied but does NOT handle causal-specific cleanup.
+	// deliver() skips cleanup for weak commands on leader, so we own the full lifecycle.
 	r.markWeakExecuted(clientId, seqNum)
 
 	if desc.cmd.Op == state.PUT {
@@ -1405,6 +1433,12 @@ func (r *Replica) asyncReplicateCausal(desc *commandDesc, slot int, clientId int
 	}
 
 	r.syncLeader(desc.cmdId, desc.cmd)
+
+	// Cleanup: save result for MSyncReply, mark delivered, then trigger handler exit.
+	// deliver() skipped this for weak commands on leader to avoid freeing desc too early.
+	r.values.Set(desc.cmdId.String(), desc.val)
+	r.delivered.Set(slotStr, struct{}{})
+	desc.msgs <- slot // triggers handler goroutine cleanup (freeDesc) and exit
 }
 
 // waitForWeakDep waits for a causal dependency to be executed.
@@ -1591,6 +1625,26 @@ func (r *Replica) computeSpeculativeResult(clientId int32, causalDep int32, cmd 
 	default:
 		return state.NIL()
 	}
+}
+
+// handleWeakRead handles a weak read request from any client (sent to nearest replica).
+// Returns committed value + version (slot of last write to this key).
+func (r *Replica) handleWeakRead(msg *MWeakRead) {
+	cmd := state.Command{Op: state.GET, K: msg.Key, V: state.NIL()}
+	value := cmd.ComputeResult(r.State)
+	version := int32(0)
+	keyStr := r.int32ToString(int32(msg.Key))
+	if v, exists := r.keyVersions.Get(keyStr); exists {
+		version = int32(v.(int))
+	}
+	reply := &MWeakReadReply{
+		Replica: r.Id,
+		Ballot:  r.ballot,
+		CmdId:   CommandId{ClientId: msg.ClientId, SeqNum: msg.CommandId},
+		Rep:     value,
+		Version: version,
+	}
+	r.sender.SendToClient(msg.ClientId, reply, r.cs.weakReadReplyRPC)
 }
 
 // getOrCreateCommitNotify returns a channel that will be closed when the slot is committed

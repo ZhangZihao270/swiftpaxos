@@ -1754,16 +1754,16 @@ Leader uses `leaderUnsyncCausal` exclusively for slot-based dependency tracking.
 
 ---
 
-### Phase 37: Fix Weak Command Descriptor Lifecycle & Port Client Cache to CURP-HO
+### Phase 37: Fix Weak Command Descriptor Lifecycle & Port Client Cache to CURP-HO [COMPLETE]
 
-**Status**: `[ ]` PLANNED
+**Status**: `[x]` COMPLETE [26:02:14]
 
 **Background**: After Phase 36's protocol changes, three issues emerged:
 1. **CURP-HT weak tail latency (P99 ~2s)**: Weak command descriptors were not registered in `cmdDescs`, causing AcceptAcks to create a second descriptor. Acks split between two descriptors → neither reaches ThreeQuarters quorum → 1s commit timeout + 1s execute timeout. A fix registering in cmdDescs was applied but introduced a second problem: `deliver()` frees the descriptor via `desc.msgs <- slot` while `asyncReplicateWeak` still needs it (race condition). Also, `handleAccept` called directly from async goroutine causes concurrent access to non-thread-safe `MsgSet`.
 2. **CURP-HO hang (0 ops)**: Same root causes as CURP-HT. Additionally, concurrent `MsgSet.Add()` from async goroutine + handler goroutine corrupts the internal map → quorum never fires → complete hang.
 3. **CURP-HO missing client cache**: CURP-HT has `localCache`, `weakPendingKeys`, `weakPendingValues`, `strongPendingKeys`, weak reads to nearest replica with cache merge. CURP-HO has none of these.
 
-#### 37.1: Fix descriptor lifecycle for weak commands on leader (CURP-HT) `curp-ht/curp-ht.go`
+#### 37.1: Fix descriptor lifecycle for weak commands on leader (CURP-HT) `curp-ht/curp-ht.go` [DONE]
 
 **Root cause**: Two concurrent bugs:
 - **MsgSet race**: `asyncReplicateWeak` calls `r.handleAccept(acc, desc)` directly → `desc.acks.Add()` from async goroutine. Handler goroutine also calls `desc.acks.Add()` for remote AcceptAcks. `MsgSet` is NOT thread-safe (plain map, no locks).
@@ -1779,7 +1779,7 @@ Leader uses `leaderUnsyncCausal` exclusively for slot-based dependency tracking.
 
 **Expected result**: Weak write latency ≈ 50-100ms (2 RTT with 25ms one-way delay). No more 2s timeouts.
 
-#### 37.2: Fix descriptor lifecycle for weak commands on leader (CURP-HO) `curp-ho/curp-ho.go`
+#### 37.2: Fix descriptor lifecycle for weak commands on leader (CURP-HO) `curp-ho/curp-ho.go` [DONE]
 
 **Same root cause** as 37.1, applied to two functions:
 
@@ -1787,7 +1787,7 @@ Leader uses `leaderUnsyncCausal` exclusively for slot-based dependency tracking.
 2. `asyncReplicateCausal`: same pattern. Replace `r.handleAccept(acc, desc)` with `desc.msgs <- acc`. Skip cleanup in deliver(). Async does cleanup.
 3. Also remove the duplicate `syncLeader` call — deliver() calls `syncLeader` for leader in COMMIT phase (line 908), and asyncReplicateCausal also calls `syncLeader` (moved outside `if !desc.applied`). Fix: remove `syncLeader` from deliver() for `desc.isWeak` commands, let async handle it.
 
-#### 37.3: Port MWeakRead/MWeakReadReply to CURP-HO `curp-ho/defs.go`
+#### 37.3: Port MWeakRead/MWeakReadReply to CURP-HO `curp-ho/defs.go` [DONE]
 
 Add the same message types from CURP-HT:
 - `MWeakRead { CommandId int32, ClientId int32, Key state.Key }` — 16B fixed
@@ -1796,7 +1796,7 @@ Add the same message types from CURP-HT:
 - Register RPC channels: `weakReadChan`, `weakReadReplyChan`, `weakReadRPC`, `weakReadReplyRPC`
 - Wire into `CommunicationSupply` and `initCs()`
 
-#### 37.4: Add handleWeakRead to CURP-HO replica `curp-ho/curp-ho.go`
+#### 37.4: Add handleWeakRead to CURP-HO replica `curp-ho/curp-ho.go` [DONE]
 
 - Add `keyVersions cmap.ConcurrentMap` to Replica struct (init in `New()`)
 - Update `keyVersions` in `deliver()` after execution: `if desc.cmd.Op == state.PUT { keyVersions.Set(key, slot) }`
@@ -1804,7 +1804,7 @@ Add the same message types from CURP-HT:
 - `handleWeakRead()`: read committed state via `ComputeResult`, look up `keyVersions`, return `MWeakReadReply`
 - ALL replicas handle MWeakRead (same as CURP-HT)
 
-#### 37.5: Port client local cache to CURP-HO `curp-ho/client.go`
+#### 37.5: Port client local cache to CURP-HO `curp-ho/client.go` [DONE]
 
 Add to Client struct:
 - `localCache map[int64]cacheEntry` — key → (value, version)
@@ -1828,7 +1828,7 @@ Change weak read routing:
 - Add `handleWeakReadReply`: merge replica response with local cache (max-version rule)
 - Add `weakReadReplyChan` case in `handleMsgs`
 
-#### 37.6: Tests & Verification
+#### 37.6: Tests & Verification [DONE]
 
 - `go build -o swiftpaxos .` — compiles
 - `go test ./curp-ht/ -v` — all tests pass

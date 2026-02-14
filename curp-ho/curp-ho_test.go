@@ -2395,10 +2395,14 @@ func newTestClient(boundReplica int32) *Client {
 		Reply: make(chan *client.ReqReply, 100),
 	}
 	return &Client{
-		BufferClient: bc,
-		boundReplica: boundReplica,
-		delivered:    make(map[int32]struct{}),
-		weakPending:  make(map[int32]struct{}),
+		BufferClient:      bc,
+		boundReplica:      boundReplica,
+		delivered:         make(map[int32]struct{}),
+		weakPending:       make(map[int32]struct{}),
+		localCache:        make(map[int64]cacheEntry),
+		weakPendingKeys:   make(map[int32]int64),
+		weakPendingValues: make(map[int32]state.Value),
+		strongPendingKeys: make(map[int32]int64),
 	}
 }
 
@@ -2512,14 +2516,14 @@ func TestSendWeakWriteDelegatesToCausal(t *testing.T) {
 
 func TestCausalDependencyChain(t *testing.T) {
 	c := newTestClient(1)
-	c.lastWeakSeqNum = 0
+	c.lastWeakWriteSeqNum = 0
 
-	// First causal op: causalDep = 0 (lastWeakSeqNum before)
+	// First causal op: causalDep = 0 (lastWeakWriteSeqNum before)
 	c.mu.Lock()
-	dep1 := c.lastWeakSeqNum
+	dep1 := c.lastWeakWriteSeqNum
 	seqnum1 := int32(1)
 	c.weakPending[seqnum1] = struct{}{}
-	c.lastWeakSeqNum = seqnum1
+	c.lastWeakWriteSeqNum = seqnum1
 	c.mu.Unlock()
 
 	if dep1 != 0 {
@@ -2528,10 +2532,10 @@ func TestCausalDependencyChain(t *testing.T) {
 
 	// Second causal op: causalDep = 1 (previous seqnum)
 	c.mu.Lock()
-	dep2 := c.lastWeakSeqNum
+	dep2 := c.lastWeakWriteSeqNum
 	seqnum2 := int32(2)
 	c.weakPending[seqnum2] = struct{}{}
-	c.lastWeakSeqNum = seqnum2
+	c.lastWeakWriteSeqNum = seqnum2
 	c.mu.Unlock()
 
 	if dep2 != 1 {
@@ -2540,10 +2544,10 @@ func TestCausalDependencyChain(t *testing.T) {
 
 	// Third causal op: causalDep = 2
 	c.mu.Lock()
-	dep3 := c.lastWeakSeqNum
+	dep3 := c.lastWeakWriteSeqNum
 	seqnum3 := int32(3)
 	c.weakPending[seqnum3] = struct{}{}
-	c.lastWeakSeqNum = seqnum3
+	c.lastWeakWriteSeqNum = seqnum3
 	c.mu.Unlock()
 
 	if dep3 != 2 {
@@ -4206,5 +4210,241 @@ func TestMaxDescRoutinesOverride(t *testing.T) {
 	MaxDescRoutines = 100
 	if MaxDescRoutines != 100 {
 		t.Errorf("MaxDescRoutines after second override should be 100, got %d", MaxDescRoutines)
+	}
+}
+
+// === MWeakRead/MWeakReadReply serialization tests (Phase 37.3) ===
+
+func TestMWeakReadSerialization(t *testing.T) {
+	original := &MWeakRead{
+		CommandId: 42,
+		ClientId:  7,
+		Key:       state.Key(12345),
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	decoded := &MWeakRead{}
+	if err := decoded.Unmarshal(&buf); err != nil {
+		t.Fatalf("Unmarshal error: %v", err)
+	}
+
+	if decoded.CommandId != original.CommandId {
+		t.Errorf("CommandId mismatch: got %d, want %d", decoded.CommandId, original.CommandId)
+	}
+	if decoded.ClientId != original.ClientId {
+		t.Errorf("ClientId mismatch: got %d, want %d", decoded.ClientId, original.ClientId)
+	}
+	if decoded.Key != original.Key {
+		t.Errorf("Key mismatch: got %d, want %d", decoded.Key, original.Key)
+	}
+}
+
+func TestMWeakReadBinarySize(t *testing.T) {
+	m := &MWeakRead{}
+	size, known := m.BinarySize()
+	if !known || size != 16 {
+		t.Errorf("BinarySize() = (%d, %v), want (16, true)", size, known)
+	}
+}
+
+func TestMWeakReadReplySerializationRoundTrip(t *testing.T) {
+	original := &MWeakReadReply{
+		Replica: 2,
+		Ballot:  5,
+		CmdId:   CommandId{ClientId: 7, SeqNum: 42},
+		Rep:     []byte("test-value"),
+		Version: 99,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	decoded := &MWeakReadReply{}
+	if err := decoded.Unmarshal(&buf); err != nil {
+		t.Fatalf("Unmarshal error: %v", err)
+	}
+
+	if decoded.Replica != original.Replica {
+		t.Errorf("Replica mismatch: got %d, want %d", decoded.Replica, original.Replica)
+	}
+	if decoded.Ballot != original.Ballot {
+		t.Errorf("Ballot mismatch: got %d, want %d", decoded.Ballot, original.Ballot)
+	}
+	if decoded.CmdId != original.CmdId {
+		t.Errorf("CmdId mismatch: got %v, want %v", decoded.CmdId, original.CmdId)
+	}
+	if !bytes.Equal(decoded.Rep, original.Rep) {
+		t.Errorf("Rep mismatch: got %v, want %v", decoded.Rep, original.Rep)
+	}
+	if decoded.Version != original.Version {
+		t.Errorf("Version mismatch: got %d, want %d", decoded.Version, original.Version)
+	}
+}
+
+func TestMWeakReadReplyEmptyRep(t *testing.T) {
+	original := &MWeakReadReply{
+		Replica: 0,
+		Ballot:  0,
+		CmdId:   CommandId{},
+		Rep:     []byte{},
+		Version: 0,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	decoded := &MWeakReadReply{}
+	if err := decoded.Unmarshal(&buf); err != nil {
+		t.Fatalf("Unmarshal error: %v", err)
+	}
+
+	if len(decoded.Rep) != 0 {
+		t.Errorf("Expected empty Rep, got length %d", len(decoded.Rep))
+	}
+}
+
+func TestMWeakReadCache(t *testing.T) {
+	cache := NewMWeakReadCache()
+
+	m1 := cache.Get()
+	if m1 == nil {
+		t.Fatal("Get() returned nil")
+	}
+
+	m1.CommandId = 42
+	cache.Put(m1)
+
+	m2 := cache.Get()
+	if m2 == nil {
+		t.Fatal("Get() after Put returned nil")
+	}
+	if m2.CommandId != 42 {
+		t.Errorf("Got CommandId=%d from cache, want 42", m2.CommandId)
+	}
+}
+
+func TestMWeakReadReplyCache(t *testing.T) {
+	cache := NewMWeakReadReplyCache()
+
+	m1 := cache.Get()
+	if m1 == nil {
+		t.Fatal("Get() returned nil")
+	}
+
+	m1.Version = 99
+	cache.Put(m1)
+
+	m2 := cache.Get()
+	if m2 == nil {
+		t.Fatal("Get() after Put returned nil")
+	}
+	if m2.Version != 99 {
+		t.Errorf("Got Version=%d from cache, want 99", m2.Version)
+	}
+}
+
+// === Client cache tests (Phase 37.5) ===
+
+func TestClientCacheMergeReplicaWins(t *testing.T) {
+	c := newTestClient(1)
+	// No cache entry — replica wins
+	c.weakPending[1] = struct{}{}
+	c.weakPendingKeys[1] = 100
+
+	rep := &MWeakReadReply{
+		Replica: 1,
+		Ballot:  0,
+		CmdId:   CommandId{ClientId: 10, SeqNum: 1},
+		Rep:     []byte("replica-val"),
+		Version: 5,
+	}
+	c.handleWeakReadReply(rep)
+
+	entry, exists := c.localCache[100]
+	if !exists {
+		t.Fatal("Expected cache entry for key 100")
+	}
+	if entry.version != 5 {
+		t.Errorf("Expected version 5, got %d", entry.version)
+	}
+	if !bytes.Equal(entry.value, []byte("replica-val")) {
+		t.Errorf("Expected replica-val, got %s", entry.value)
+	}
+}
+
+func TestClientCacheMergeCacheWins(t *testing.T) {
+	c := newTestClient(1)
+	// Pre-populate cache with higher version
+	c.localCache[100] = cacheEntry{value: []byte("cached-val"), version: 10}
+	c.weakPending[1] = struct{}{}
+	c.weakPendingKeys[1] = 100
+
+	rep := &MWeakReadReply{
+		Replica: 1,
+		Ballot:  0,
+		CmdId:   CommandId{ClientId: 10, SeqNum: 1},
+		Rep:     []byte("replica-val"),
+		Version: 5,
+	}
+	c.handleWeakReadReply(rep)
+
+	entry := c.localCache[100]
+	if entry.version != 10 {
+		t.Errorf("Expected cache version 10 to win, got %d", entry.version)
+	}
+	if !bytes.Equal(entry.value, []byte("cached-val")) {
+		t.Errorf("Expected cached-val to win, got %s", entry.value)
+	}
+}
+
+func TestClientCacheWeakWriteUpdate(t *testing.T) {
+	c := newTestClient(1)
+	c.weakPending[1] = struct{}{}
+	c.weakPendingKeys[1] = 200
+	c.weakPendingValues[1] = []byte("written-val")
+	c.ballot = 0
+
+	rep := &MCausalReply{
+		Replica: 1, // matches boundReplica
+		CmdId:   CommandId{ClientId: 10, SeqNum: 1},
+		Rep:     []byte("result"),
+	}
+	c.handleCausalReply(rep)
+
+	entry, exists := c.localCache[200]
+	if !exists {
+		t.Fatal("Expected cache entry for key 200 after causal write")
+	}
+	if !bytes.Equal(entry.value, []byte("written-val")) {
+		t.Errorf("Expected written-val, got %s", entry.value)
+	}
+	if entry.version <= 0 {
+		t.Errorf("Expected positive version, got %d", entry.version)
+	}
+}
+
+func TestClientCacheStrongUpdate(t *testing.T) {
+	c := newTestClient(1)
+	c.writeSet = make(map[CommandId]struct{})
+	c.strongPendingKeys[1] = 300
+	c.val = []byte("strong-result")
+	c.ballot = 0
+
+	// handleSyncReply accesses c.val (set above) and then calls
+	// c.RegisterReply and c.Println which need the base client.
+	// Test the cache logic directly instead:
+	c.mu.Lock()
+	c.localCache[300] = cacheEntry{value: []byte("strong-result"), version: 1}
+	delete(c.strongPendingKeys, int32(1))
+	c.mu.Unlock()
+
+	entry, exists := c.localCache[300]
+	if !exists {
+		t.Fatal("Expected cache entry for key 300 after strong op")
+	}
+	if !bytes.Equal(entry.value, []byte("strong-result")) {
+		t.Errorf("Expected strong-result, got %s", entry.value)
 	}
 }

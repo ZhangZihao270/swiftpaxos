@@ -10,6 +10,13 @@ import (
 	"github.com/imdea-software/swiftpaxos/state"
 )
 
+// cacheEntry stores a cached value and its version (slot number).
+// Higher version = fresher data. Used for max-version merge on weak reads.
+type cacheEntry struct {
+	value   state.Value
+	version int32
+}
+
 type Client struct {
 	*client.BufferClient
 
@@ -33,8 +40,8 @@ type Client struct {
 	alreadySlow map[CommandId]struct{}
 
 	// Weak command tracking
-	weakPending    map[int32]struct{}
-	lastWeakSeqNum int32 // Track sequence number of last weak command for causal ordering
+	weakPending         map[int32]struct{}
+	lastWeakWriteSeqNum int32 // Track sequence number of last weak WRITE for causal ordering
 
 	// CURP-HO: Client write set — tracks uncommitted weak writes.
 	// Entries added on SendCausalWrite, cleared on SyncReply (leader commit) or fast-path delivery.
@@ -45,6 +52,14 @@ type Client struct {
 	// Causal ops are broadcast to all replicas, but client only waits for
 	// the bound replica's reply to complete in 1-RTT.
 	boundReplica int32
+
+	// Client local cache: key → (value, version) with slot-based versioning
+	localCache        map[int64]cacheEntry
+	weakPendingKeys   map[int32]int64       // seqNum → key (for weak writes and reads)
+	weakPendingValues map[int32]state.Value  // seqNum → value (for weak writes)
+	strongPendingKeys map[int32]int64       // seqNum → key (for strong ops)
+	lastReplySlot     int32                 // slot from last leader MReply
+	maxVersion        int32                 // highest version seen
 
 	// Mutex for concurrent map access (needed for pipelining)
 	mu sync.Mutex
@@ -89,6 +104,12 @@ func NewClient(b *client.BufferClient, repNum, reqNum, pclients int) *Client {
 		// CURP-HO: Bind to closest replica for 1-RTT causal op completion.
 		// ClosestId is computed by base client during Connect() via ping latency measurement.
 		boundReplica: int32(b.ClosestId),
+
+		// Client local cache
+		localCache:        make(map[int64]cacheEntry),
+		weakPendingKeys:   make(map[int32]int64),
+		weakPendingValues: make(map[int32]state.Value),
+		strongPendingKeys: make(map[int32]int64),
 	}
 
 	c.lastCmdId = CommandId{
@@ -155,6 +176,10 @@ func (c *Client) handleMsgs() {
 		case m := <-c.cs.causalReplyChan:
 			rep := m.(*MCausalReply)
 			c.handleCausalReply(rep)
+
+		case m := <-c.cs.weakReadReplyChan:
+			rep := m.(*MWeakReadReply)
+			c.handleWeakReadReply(rep)
 
 		case <-c.t.c:
 			// Timer-triggered sync intentionally disabled (see CURP paper §4.2).
@@ -237,6 +262,12 @@ func (c *Client) handleSyncReply(rep *MSyncReply) {
 			delete(c.writeSet, ws)
 		}
 	}
+	// Update local cache from strong slow-path result
+	if key, hasKey := c.strongPendingKeys[rep.CmdId.SeqNum]; hasKey {
+		c.maxVersion++
+		c.localCache[key] = cacheEntry{value: c.val, version: c.maxVersion}
+		delete(c.strongPendingKeys, rep.CmdId.SeqNum)
+	}
 	c.mu.Unlock()
 	c.RegisterReply(c.val, rep.CmdId.SeqNum)
 	c.Println("Slow Paths:", c.slowPaths)
@@ -289,6 +320,12 @@ func (c *Client) handleFastPathAcks(leaderMsg interface{}, msgs []interface{}) {
 			delete(c.writeSet, ws)
 		}
 	}
+	// Update local cache from strong fast-path result
+	if key, hasKey := c.strongPendingKeys[cmdId.SeqNum]; hasKey {
+		c.maxVersion++
+		c.localCache[key] = cacheEntry{value: c.val, version: c.maxVersion}
+		delete(c.strongPendingKeys, cmdId.SeqNum)
+	}
 	c.mu.Unlock()
 	c.RegisterReply(c.val, cmdId.SeqNum)
 	c.Println("Slow Paths:", c.slowPaths)
@@ -337,6 +374,17 @@ func (c *Client) handleWeakReply(rep *MWeakReply) {
 	c.val = state.Value(rep.Rep)
 	c.delivered[rep.CmdId.SeqNum] = struct{}{}
 	delete(c.weakPending, rep.CmdId.SeqNum)
+
+	// Update local cache with committed write value + slot (version)
+	if key, hasKey := c.weakPendingKeys[rep.CmdId.SeqNum]; hasKey {
+		if val, hasVal := c.weakPendingValues[rep.CmdId.SeqNum]; hasVal {
+			c.maxVersion++
+			c.localCache[key] = cacheEntry{value: val, version: c.maxVersion}
+			delete(c.weakPendingValues, rep.CmdId.SeqNum)
+		}
+		delete(c.weakPendingKeys, rep.CmdId.SeqNum)
+	}
+
 	c.mu.Unlock()
 	c.RegisterReply(c.val, rep.CmdId.SeqNum)
 }
@@ -356,12 +404,20 @@ func (c *Client) getNextSeqnum() int32 {
 
 // SendStrongWrite sends a linearizable write command (delegates to base SendWrite).
 func (c *Client) SendStrongWrite(key int64, value []byte) int32 {
-	return c.SendWrite(key, value)
+	seqnum := c.SendWrite(key, value)
+	c.mu.Lock()
+	c.strongPendingKeys[seqnum] = key
+	c.mu.Unlock()
+	return seqnum
 }
 
 // SendStrongRead sends a linearizable read command (delegates to base SendRead).
 func (c *Client) SendStrongRead(key int64) int32 {
-	return c.SendRead(key)
+	seqnum := c.SendRead(key)
+	c.mu.Lock()
+	c.strongPendingKeys[seqnum] = key
+	c.mu.Unlock()
+	return seqnum
 }
 
 // SupportsWeak returns true since curp-ho supports weak consistency commands.
@@ -389,9 +445,11 @@ func (c *Client) SendCausalWrite(key int64, value []byte) int32 {
 	seqnum := c.getNextSeqnum()
 
 	c.mu.Lock()
-	causalDep := c.lastWeakSeqNum
+	causalDep := c.lastWeakWriteSeqNum
 	c.weakPending[seqnum] = struct{}{}
-	c.lastWeakSeqNum = seqnum
+	c.weakPendingKeys[seqnum] = key
+	c.weakPendingValues[seqnum] = value
+	c.lastWeakWriteSeqNum = seqnum
 	c.writeSet[CommandId{ClientId: c.ClientId, SeqNum: seqnum}] = struct{}{}
 	c.mu.Unlock()
 
@@ -417,24 +475,21 @@ func (c *Client) SendCausalRead(key int64) int32 {
 	seqnum := c.getNextSeqnum()
 
 	c.mu.Lock()
-	causalDep := c.lastWeakSeqNum
 	c.weakPending[seqnum] = struct{}{}
-	c.lastWeakSeqNum = seqnum
+	c.weakPendingKeys[seqnum] = key
+	closest := c.ClosestId
 	c.mu.Unlock()
 
-	p := &MCausalPropose{
+	// Weak reads go to nearest replica only (not broadcast)
+	msg := &MWeakRead{
 		CommandId: seqnum,
 		ClientId:  c.ClientId,
-		Command: state.Command{
-			Op: state.GET,
-			K:  state.Key(key),
-			V:  state.NIL(),
-		},
-		Timestamp: 0,
-		CausalDep: causalDep,
+		Key:       state.Key(key),
 	}
 
-	c.sendMsgToAll(c.cs.causalProposeRPC, p)
+	if closest != -1 {
+		c.SendMsg(int32(closest), c.cs.weakReadRPC, msg)
+	}
 	return seqnum
 }
 
@@ -456,6 +511,56 @@ func (c *Client) handleCausalReply(rep *MCausalReply) {
 	c.val = state.Value(rep.Rep)
 	c.delivered[rep.CmdId.SeqNum] = struct{}{}
 	delete(c.weakPending, rep.CmdId.SeqNum)
+
+	// Update local cache for causal writes (speculative value from bound replica)
+	if key, hasKey := c.weakPendingKeys[rep.CmdId.SeqNum]; hasKey {
+		if val, hasVal := c.weakPendingValues[rep.CmdId.SeqNum]; hasVal {
+			c.maxVersion++
+			c.localCache[key] = cacheEntry{value: val, version: c.maxVersion}
+			delete(c.weakPendingValues, rep.CmdId.SeqNum)
+		}
+		delete(c.weakPendingKeys, rep.CmdId.SeqNum)
+	}
+
+	c.mu.Unlock()
+	c.RegisterReply(c.val, rep.CmdId.SeqNum)
+}
+
+// handleWeakReadReply merges the replica's response with the local cache
+// using the max-version rule: whoever has the higher version wins.
+func (c *Client) handleWeakReadReply(rep *MWeakReadReply) {
+	c.mu.Lock()
+	if _, exists := c.delivered[rep.CmdId.SeqNum]; exists {
+		c.mu.Unlock()
+		return
+	}
+
+	key, _ := c.weakPendingKeys[rep.CmdId.SeqNum]
+	replicaVal := state.Value(rep.Rep)
+	replicaVer := rep.Version
+
+	// Merge: max-version wins
+	cached, hasCached := c.localCache[key]
+	var finalVal state.Value
+	var finalVer int32
+	if hasCached && cached.version > replicaVer {
+		finalVal = cached.value
+		finalVer = cached.version
+	} else {
+		finalVal = replicaVal
+		finalVer = replicaVer
+	}
+
+	// Update cache with merged result
+	c.localCache[key] = cacheEntry{value: finalVal, version: finalVer}
+	if finalVer > c.maxVersion {
+		c.maxVersion = finalVer
+	}
+
+	c.val = finalVal
+	c.delivered[rep.CmdId.SeqNum] = struct{}{}
+	delete(c.weakPending, rep.CmdId.SeqNum)
+	delete(c.weakPendingKeys, rep.CmdId.SeqNum)
 	c.mu.Unlock()
 	c.RegisterReply(c.val, rep.CmdId.SeqNum)
 }

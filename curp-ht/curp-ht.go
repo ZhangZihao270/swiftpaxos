@@ -647,6 +647,13 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 					r.sender.SendToClient(desc.propose.ClientId, rep, r.cs.syncReplyRPC)
 				}
 			}
+			// For weak commands on leader: skip cleanup here. asyncReplicateWeak
+			// owns the descriptor lifecycle — it will send the reply, save the value,
+			// mark delivered, and then trigger handler cleanup via desc.msgs <- slot.
+			// This avoids freeing the descriptor while asyncReplicateWeak still needs it.
+			if desc.isWeak && r.isLeader {
+				return
+			}
 			desc.msgs <- slot
 			r.delivered.Set(strconv.Itoa(slot), struct{}{})
 			if desc.seq {
@@ -893,7 +900,10 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 	}
 
 	r.batcher.SendAccept(acc)
-	r.handleAccept(acc, desc)
+	// Route self-Accept through the handler goroutine (via desc.msgs) instead of
+	// calling handleAccept directly. This ensures ALL desc.acks.Add() calls happen
+	// in the single handler goroutine, avoiding concurrent access to the non-thread-safe MsgSet.
+	desc.msgs <- acc
 
 	// The accept/commit flow will continue through normal message handling
 	// Once majority acks are received, the command will be committed
@@ -947,7 +957,7 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 	}
 
 	// Always mark weak executed and send reply — even if deliver() executed first.
-	// deliver() sets desc.val but does NOT send weak replies or mark weak executed.
+	// deliver() skips cleanup for weak commands on leader, so we own the full lifecycle.
 	r.markWeakExecuted(clientId, seqNum)
 
 	rep := r.weakReplyPool.Get().(*MWeakReply)
@@ -957,6 +967,12 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 	rep.Rep = desc.val
 	rep.Slot = int32(slot)
 	r.sender.SendToClient(clientId, rep, r.cs.weakReplyRPC)
+
+	// Cleanup: save result for MSyncReply, mark delivered, then trigger handler exit.
+	// deliver() skipped this for weak commands on leader to avoid freeing desc too early.
+	r.values.Set(desc.cmdId.String(), desc.val)
+	r.delivered.Set(slotStr, struct{}{})
+	desc.msgs <- slot // triggers handler goroutine cleanup (freeDesc) and exit
 }
 
 // waitForWeakDep waits for a causal dependency to be executed.
