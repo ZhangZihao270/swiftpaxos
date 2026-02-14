@@ -876,10 +876,11 @@ func TestMixedStrongWeakSlotOrdering(t *testing.T) {
 // It only initializes fields needed for unsynced/conflict logic.
 func newTestReplica(isLeader bool) *Replica {
 	return &Replica{
-		isLeader:     isLeader,
-		unsynced:     cmap.New(),
-		synced:       cmap.New(),
-		boundClients: make(map[int32]bool),
+		isLeader:         isLeader,
+		unsynced:         cmap.New(),
+		synced:           cmap.New(),
+		unsyncedByClient: cmap.New(),
+		boundClients:     make(map[int32]bool),
 	}
 }
 
@@ -1390,7 +1391,7 @@ func TestOkWithWeakDepNoEntry(t *testing.T) {
 	r := newTestReplica(false)
 	cmd := state.Command{Op: state.GET, K: state.Key(100), V: state.NIL()}
 
-	ok, dep := r.okWithWeakDep(cmd)
+	ok, dep, _ := r.witnessCheck(cmd, 0)
 	if ok != TRUE {
 		t.Errorf("ok = %d, want TRUE", ok)
 	}
@@ -1406,7 +1407,7 @@ func TestOkWithWeakDepStrongConflict(t *testing.T) {
 
 	r.unsyncStrong(cmd, cmdId)
 
-	ok, dep := r.okWithWeakDep(cmd)
+	ok, dep, _ := r.witnessCheck(cmd, 0)
 	if ok != FALSE {
 		t.Errorf("ok = %d, want FALSE (strong write conflict)", ok)
 	}
@@ -1425,7 +1426,7 @@ func TestOkWithWeakDepCausalWrite(t *testing.T) {
 	r.unsyncCausal(writecmd, weakCmdId)
 
 	// A strong read for the same key should see the weakDep
-	ok, dep := r.okWithWeakDep(readcmd)
+	ok, dep, _ := r.witnessCheck(readcmd, 0)
 	if ok != TRUE {
 		t.Errorf("ok = %d, want TRUE", ok)
 	}
@@ -1446,7 +1447,7 @@ func TestOkWithWeakDepCausalRead(t *testing.T) {
 	r.unsyncCausal(readCmd, weakCmdId)
 
 	// A strong read should NOT get a weakDep for a causal READ
-	ok, dep := r.okWithWeakDep(readCmd)
+	ok, dep, _ := r.witnessCheck(readCmd, 0)
 	if ok != TRUE {
 		t.Errorf("ok = %d, want TRUE", ok)
 	}
@@ -1709,7 +1710,7 @@ func TestCausalUnsyncOkNoConflict(t *testing.T) {
 
 	// okWithWeakDep for a strong WRITE should return TRUE but no weakDep.
 	// Per protocol spec, weakDep is only for strong READs.
-	ok, dep := r.okWithWeakDep(strongWrite)
+	ok, dep, _ := r.witnessCheck(strongWrite, 0)
 	if ok != TRUE {
 		t.Errorf("okWithWeakDep ok = %d, want TRUE", ok)
 	}
@@ -1719,7 +1720,7 @@ func TestCausalUnsyncOkNoConflict(t *testing.T) {
 
 	// okWithWeakDep for a strong READ should return TRUE + weakDep
 	strongRead := state.Command{Op: state.GET, K: state.Key(100), V: state.NIL()}
-	ok, dep = r.okWithWeakDep(strongRead)
+	ok, dep, _ = r.witnessCheck(strongRead, 0)
 	if ok != TRUE {
 		t.Errorf("okWithWeakDep ok = %d, want TRUE", ok)
 	}
@@ -1985,7 +1986,7 @@ func TestStrongOpSeesWitnessFromBoundClient(t *testing.T) {
 
 	// Another client sends strong GET for key 42 → should see weakDep
 	strongRead := state.Command{Op: state.GET, K: state.Key(42), V: state.NIL()}
-	ok, dep := r.okWithWeakDep(strongRead)
+	ok, dep, _ := r.witnessCheck(strongRead, 0)
 	if ok != TRUE {
 		t.Errorf("ok = %d, want TRUE", ok)
 	}
@@ -2679,17 +2680,18 @@ func newTestReplicaForDesc(isLeader bool) *Replica {
 		ballot:        0,
 		status:        NORMAL,
 		lastCmdSlot:   0,
-		unsynced:      cmap.New(),
-		synced:        cmap.New(),
-		values:        cmap.New(),
-		proposes:      cmap.New(),
-		cmdDescs:      cmap.New(),
-		executed:      cmap.New(),
-		committed:     cmap.New(),
-		delivered:     cmap.New(),
-		weakExecuted:  cmap.New(),
-		pendingWrites: cmap.New(),
-		boundClients:  make(map[int32]bool),
+		unsynced:         cmap.New(),
+		synced:           cmap.New(),
+		unsyncedByClient: cmap.New(),
+		values:           cmap.New(),
+		proposes:         cmap.New(),
+		cmdDescs:         cmap.New(),
+		executed:         cmap.New(),
+		committed:        cmap.New(),
+		delivered:        cmap.New(),
+		weakExecuted:     cmap.New(),
+		pendingWrites:    cmap.New(),
+		boundClients:     make(map[int32]bool),
 		slots:         make(map[CommandId]int),
 		history:       make([]commandStaticDesc, HISTORY_SIZE),
 		commitNotify:  make(map[int]chan struct{}),
@@ -3351,7 +3353,7 @@ func TestMRecordAckSerializationNoWeakDep(t *testing.T) {
 		Ballot:  5,
 		CmdId:   CommandId{ClientId: 10, SeqNum: 20},
 		Ok:      TRUE,
-		WeakDep: nil,
+		ReadDep: nil,
 	}
 
 	var buf bytes.Buffer
@@ -3375,8 +3377,8 @@ func TestMRecordAckSerializationNoWeakDep(t *testing.T) {
 	if decoded.Ok != TRUE {
 		t.Errorf("Ok = %d, want TRUE", decoded.Ok)
 	}
-	if decoded.WeakDep != nil {
-		t.Errorf("WeakDep = %v, want nil", decoded.WeakDep)
+	if decoded.ReadDep != nil {
+		t.Errorf("WeakDep = %v, want nil", decoded.ReadDep)
 	}
 }
 
@@ -3386,7 +3388,7 @@ func TestMRecordAckSerializationWithWeakDep(t *testing.T) {
 		Ballot:  7,
 		CmdId:   CommandId{ClientId: 42, SeqNum: 100},
 		Ok:      TRUE,
-		WeakDep: &CommandId{ClientId: 99, SeqNum: 50},
+		ReadDep: &CommandId{ClientId: 99, SeqNum: 50},
 	}
 
 	var buf bytes.Buffer
@@ -3410,41 +3412,56 @@ func TestMRecordAckSerializationWithWeakDep(t *testing.T) {
 	if decoded.Ok != TRUE {
 		t.Errorf("Ok = %d, want TRUE", decoded.Ok)
 	}
-	if decoded.WeakDep == nil {
+	if decoded.ReadDep == nil {
 		t.Fatal("WeakDep should not be nil")
 	}
-	if decoded.WeakDep.ClientId != 99 || decoded.WeakDep.SeqNum != 50 {
-		t.Errorf("WeakDep = %v, want {99,50}", decoded.WeakDep)
+	if decoded.ReadDep.ClientId != 99 || decoded.ReadDep.SeqNum != 50 {
+		t.Errorf("WeakDep = %v, want {99,50}", decoded.ReadDep)
 	}
 }
 
 func TestMRecordAckSerializationSizes(t *testing.T) {
-	// Without WeakDep: 18 bytes (17 fixed + 1 flag)
+	// Without ReadDep, no CausalDeps: 20 bytes (17 fixed + 1 flag + 2 count)
 	noWeak := &MRecordAck{
 		Replica: 1,
 		Ballot:  1,
 		CmdId:   CommandId{ClientId: 1, SeqNum: 1},
 		Ok:      TRUE,
-		WeakDep: nil,
+		ReadDep: nil,
 	}
 	var buf1 bytes.Buffer
 	noWeak.Marshal(&buf1)
-	if buf1.Len() != 18 {
-		t.Errorf("Size without WeakDep = %d, want 18", buf1.Len())
+	if buf1.Len() != 20 {
+		t.Errorf("Size without ReadDep = %d, want 20", buf1.Len())
 	}
 
-	// With WeakDep: 26 bytes (17 fixed + 1 flag + 8 CommandId)
+	// With ReadDep, no CausalDeps: 28 bytes (17 fixed + 1 flag + 8 CommandId + 2 count)
 	withWeak := &MRecordAck{
 		Replica: 1,
 		Ballot:  1,
 		CmdId:   CommandId{ClientId: 1, SeqNum: 1},
 		Ok:      TRUE,
-		WeakDep: &CommandId{ClientId: 1, SeqNum: 1},
+		ReadDep: &CommandId{ClientId: 1, SeqNum: 1},
 	}
 	var buf2 bytes.Buffer
 	withWeak.Marshal(&buf2)
-	if buf2.Len() != 26 {
-		t.Errorf("Size with WeakDep = %d, want 26", buf2.Len())
+	if buf2.Len() != 28 {
+		t.Errorf("Size with ReadDep = %d, want 28", buf2.Len())
+	}
+
+	// With ReadDep + 2 CausalDeps: 44 bytes (17 + 1 + 8 + 2 + 2*8)
+	withCausal := &MRecordAck{
+		Replica:    1,
+		Ballot:     1,
+		CmdId:      CommandId{ClientId: 1, SeqNum: 1},
+		Ok:         TRUE,
+		ReadDep:    &CommandId{ClientId: 1, SeqNum: 1},
+		CausalDeps: []CommandId{{ClientId: 2, SeqNum: 3}, {ClientId: 4, SeqNum: 5}},
+	}
+	var buf3 bytes.Buffer
+	withCausal.Marshal(&buf3)
+	if buf3.Len() != 44 {
+		t.Errorf("Size with ReadDep + 2 CausalDeps = %d, want 44", buf3.Len())
 	}
 }
 
@@ -3454,7 +3471,7 @@ func TestMRecordAckSerializationFALSEOk(t *testing.T) {
 		Ballot:  0,
 		CmdId:   CommandId{ClientId: 1, SeqNum: 1},
 		Ok:      FALSE,
-		WeakDep: nil,
+		ReadDep: nil,
 	}
 
 	var buf bytes.Buffer
@@ -3475,7 +3492,7 @@ func TestMRecordAckSerializationORDEREDOk(t *testing.T) {
 		Ballot:  2,
 		CmdId:   CommandId{ClientId: 10, SeqNum: 7},
 		Ok:      ORDERED,
-		WeakDep: dep,
+		ReadDep: dep,
 	}
 
 	var buf bytes.Buffer
@@ -3487,8 +3504,8 @@ func TestMRecordAckSerializationORDEREDOk(t *testing.T) {
 	if decoded.Ok != ORDERED {
 		t.Errorf("Ok = %d, want ORDERED", decoded.Ok)
 	}
-	if decoded.WeakDep == nil || decoded.WeakDep.ClientId != 5 || decoded.WeakDep.SeqNum != 3 {
-		t.Errorf("WeakDep = %v, want {5,3}", decoded.WeakDep)
+	if decoded.ReadDep == nil || decoded.ReadDep.ClientId != 5 || decoded.ReadDep.SeqNum != 3 {
+		t.Errorf("WeakDep = %v, want {5,3}", decoded.ReadDep)
 	}
 }
 
@@ -3498,7 +3515,7 @@ func TestOkWithWeakDepNoConflict(t *testing.T) {
 	r := newTestReplica(false)
 	cmd := state.Command{Op: state.PUT, K: state.Key(100)}
 
-	ok, weakDep := r.okWithWeakDep(cmd)
+	ok, weakDep, _ := r.witnessCheck(cmd, 0)
 	if ok != TRUE {
 		t.Errorf("ok = %d, want TRUE (no entries)", ok)
 	}
@@ -3516,7 +3533,7 @@ func TestOkWithWeakDepStrongWriteConflict(t *testing.T) {
 	r.unsyncStrong(strongCmd, strongId)
 
 	// Check incoming strong op on same key
-	ok, weakDep := r.okWithWeakDep(state.Command{Op: state.PUT, K: state.Key(100)})
+	ok, weakDep, _ := r.witnessCheck(state.Command{Op: state.PUT, K: state.Key(100)}, 0)
 	if ok != FALSE {
 		t.Errorf("ok = %d, want FALSE (strong write conflict)", ok)
 	}
@@ -3534,7 +3551,7 @@ func TestOkWithWeakDepCausalWriteDep(t *testing.T) {
 	r.unsyncCausal(causalCmd, causalId)
 
 	// Check incoming strong op on same key - should get weakDep
-	ok, weakDep := r.okWithWeakDep(state.Command{Op: state.GET, K: state.Key(100)})
+	ok, weakDep, _ := r.witnessCheck(state.Command{Op: state.GET, K: state.Key(100)}, 0)
 	if ok != TRUE {
 		t.Errorf("ok = %d, want TRUE (causal doesn't conflict)", ok)
 	}
@@ -3555,7 +3572,7 @@ func TestOkWithWeakDepCausalReadNoDep(t *testing.T) {
 	r.unsyncCausal(causalCmd, causalId)
 
 	// Should get TRUE and no weakDep (only writes create deps)
-	ok, weakDep := r.okWithWeakDep(state.Command{Op: state.GET, K: state.Key(100)})
+	ok, weakDep, _ := r.witnessCheck(state.Command{Op: state.GET, K: state.Key(100)}, 0)
 	if ok != TRUE {
 		t.Errorf("ok = %d, want TRUE", ok)
 	}
@@ -3576,7 +3593,7 @@ func TestOkWithWeakDepStrongReadVsWriteWithCausalWrite(t *testing.T) {
 	r.unsyncCausal(causalCmd, causalId)
 
 	// Strong READ should get weakDep
-	ok, weakDep := r.okWithWeakDep(state.Command{Op: state.GET, K: state.Key(200)})
+	ok, weakDep, _ := r.witnessCheck(state.Command{Op: state.GET, K: state.Key(200)}, 0)
 	if ok != TRUE {
 		t.Errorf("strong GET: ok = %d, want TRUE", ok)
 	}
@@ -3588,7 +3605,7 @@ func TestOkWithWeakDepStrongReadVsWriteWithCausalWrite(t *testing.T) {
 	}
 
 	// Strong WRITE should NOT get weakDep (per protocol spec)
-	ok, weakDep = r.okWithWeakDep(state.Command{Op: state.PUT, K: state.Key(200)})
+	ok, weakDep, _ = r.witnessCheck(state.Command{Op: state.PUT, K: state.Key(200)}, 0)
 	if ok != TRUE {
 		t.Errorf("strong PUT: ok = %d, want TRUE", ok)
 	}
@@ -3597,7 +3614,7 @@ func TestOkWithWeakDepStrongReadVsWriteWithCausalWrite(t *testing.T) {
 	}
 
 	// SCAN should also NOT get weakDep
-	ok, weakDep = r.okWithWeakDep(state.Command{Op: state.SCAN, K: state.Key(200)})
+	ok, weakDep, _ = r.witnessCheck(state.Command{Op: state.SCAN, K: state.Key(200)}, 0)
 	if ok != TRUE {
 		t.Errorf("strong SCAN: ok = %d, want TRUE", ok)
 	}
@@ -3738,7 +3755,7 @@ func TestStrongReadWithCausalWriteInWitnessPool(t *testing.T) {
 
 	// Client B does strong read of key 100
 	// okWithWeakDep should return TRUE + weakDep pointing to causal write
-	ok, weakDep := r.okWithWeakDep(state.Command{Op: state.GET, K: state.Key(100)})
+	ok, weakDep, _ := r.witnessCheck(state.Command{Op: state.GET, K: state.Key(100)}, 0)
 	if ok != TRUE {
 		t.Errorf("ok = %d, want TRUE", ok)
 	}
@@ -3763,7 +3780,7 @@ func TestStrongWriteWithCausalWriteInWitnessPool(t *testing.T) {
 
 	// Strong write on same key - should NOT conflict (causal != strong conflict)
 	// Per protocol spec, strong writes don't get weakDep (only strong reads do)
-	ok, weakDep := r.okWithWeakDep(state.Command{Op: state.PUT, K: state.Key(100)})
+	ok, weakDep, _ := r.witnessCheck(state.Command{Op: state.PUT, K: state.Key(100)}, 0)
 	if ok != TRUE {
 		t.Errorf("ok = %d, want TRUE (causal write doesn't conflict with strong write)", ok)
 	}
@@ -3776,7 +3793,7 @@ func TestStrongWriteWithCausalWriteInWitnessPool(t *testing.T) {
 // Phase 26: Client Fast Path with WeakDep Tests
 // ============================================================================
 
-// --- 26.2: weakDepEqual helper ---
+// --- 26.2: readDepEqual helper ---
 
 func TestWeakDepEqual(t *testing.T) {
 	tests := []struct {
@@ -3796,22 +3813,22 @@ func TestWeakDepEqual(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := weakDepEqual(tt.a, tt.b)
+			result := readDepEqual(tt.a, tt.b)
 			if result != tt.expected {
-				t.Errorf("weakDepEqual(%v, %v) = %v, want %v", tt.a, tt.b, result, tt.expected)
+				t.Errorf("readDepEqual(%v, %v) = %v, want %v", tt.a, tt.b, result, tt.expected)
 			}
 		})
 	}
 }
 
-// --- 26.2: checkWeakDepConsistency ---
+// --- 26.2: checkReadDepConsistency ---
 
 func TestCheckWeakDepConsistencyEmpty(t *testing.T) {
 	c := &Client{}
-	if !c.checkWeakDepConsistency(nil) {
+	if !c.checkReadDepConsistency(nil) {
 		t.Error("nil msgs should be consistent")
 	}
-	if !c.checkWeakDepConsistency([]interface{}{}) {
+	if !c.checkReadDepConsistency([]interface{}{}) {
 		t.Error("empty slice should be consistent")
 	}
 }
@@ -3819,11 +3836,11 @@ func TestCheckWeakDepConsistencyEmpty(t *testing.T) {
 func TestCheckWeakDepConsistencyAllNil(t *testing.T) {
 	c := &Client{}
 	msgs := []interface{}{
-		&MRecordAck{Replica: 1, WeakDep: nil},
-		&MRecordAck{Replica: 2, WeakDep: nil},
-		&MRecordAck{Replica: 3, WeakDep: nil},
+		&MRecordAck{Replica: 1, ReadDep: nil},
+		&MRecordAck{Replica: 2, ReadDep: nil},
+		&MRecordAck{Replica: 3, ReadDep: nil},
 	}
-	if !c.checkWeakDepConsistency(msgs) {
+	if !c.checkReadDepConsistency(msgs) {
 		t.Error("all nil weakDeps should be consistent")
 	}
 }
@@ -3831,11 +3848,11 @@ func TestCheckWeakDepConsistencyAllNil(t *testing.T) {
 func TestCheckWeakDepConsistencyAllSame(t *testing.T) {
 	c := &Client{}
 	msgs := []interface{}{
-		&MRecordAck{Replica: 1, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
-		&MRecordAck{Replica: 2, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
-		&MRecordAck{Replica: 3, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
+		&MRecordAck{Replica: 1, ReadDep: &CommandId{ClientId: 10, SeqNum: 5}},
+		&MRecordAck{Replica: 2, ReadDep: &CommandId{ClientId: 10, SeqNum: 5}},
+		&MRecordAck{Replica: 3, ReadDep: &CommandId{ClientId: 10, SeqNum: 5}},
 	}
-	if !c.checkWeakDepConsistency(msgs) {
+	if !c.checkReadDepConsistency(msgs) {
 		t.Error("all same weakDeps should be consistent")
 	}
 }
@@ -3843,10 +3860,10 @@ func TestCheckWeakDepConsistencyAllSame(t *testing.T) {
 func TestCheckWeakDepConsistencyMixedNilNonNil(t *testing.T) {
 	c := &Client{}
 	msgs := []interface{}{
-		&MRecordAck{Replica: 1, WeakDep: nil},
-		&MRecordAck{Replica: 2, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
+		&MRecordAck{Replica: 1, ReadDep: nil},
+		&MRecordAck{Replica: 2, ReadDep: &CommandId{ClientId: 10, SeqNum: 5}},
 	}
-	if c.checkWeakDepConsistency(msgs) {
+	if c.checkReadDepConsistency(msgs) {
 		t.Error("mixed nil/non-nil should be inconsistent")
 	}
 }
@@ -3854,10 +3871,10 @@ func TestCheckWeakDepConsistencyMixedNilNonNil(t *testing.T) {
 func TestCheckWeakDepConsistencyDifferentSeqNum(t *testing.T) {
 	c := &Client{}
 	msgs := []interface{}{
-		&MRecordAck{Replica: 1, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
-		&MRecordAck{Replica: 2, WeakDep: &CommandId{ClientId: 10, SeqNum: 6}},
+		&MRecordAck{Replica: 1, ReadDep: &CommandId{ClientId: 10, SeqNum: 5}},
+		&MRecordAck{Replica: 2, ReadDep: &CommandId{ClientId: 10, SeqNum: 6}},
 	}
-	if c.checkWeakDepConsistency(msgs) {
+	if c.checkReadDepConsistency(msgs) {
 		t.Error("different seqnums should be inconsistent")
 	}
 }
@@ -3865,10 +3882,10 @@ func TestCheckWeakDepConsistencyDifferentSeqNum(t *testing.T) {
 func TestCheckWeakDepConsistencyDifferentClient(t *testing.T) {
 	c := &Client{}
 	msgs := []interface{}{
-		&MRecordAck{Replica: 1, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
-		&MRecordAck{Replica: 2, WeakDep: &CommandId{ClientId: 11, SeqNum: 5}},
+		&MRecordAck{Replica: 1, ReadDep: &CommandId{ClientId: 10, SeqNum: 5}},
+		&MRecordAck{Replica: 2, ReadDep: &CommandId{ClientId: 11, SeqNum: 5}},
 	}
-	if c.checkWeakDepConsistency(msgs) {
+	if c.checkReadDepConsistency(msgs) {
 		t.Error("different client IDs should be inconsistent")
 	}
 }
@@ -3876,9 +3893,9 @@ func TestCheckWeakDepConsistencyDifferentClient(t *testing.T) {
 func TestCheckWeakDepConsistencySingle(t *testing.T) {
 	c := &Client{}
 	msgs := []interface{}{
-		&MRecordAck{Replica: 1, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
+		&MRecordAck{Replica: 1, ReadDep: &CommandId{ClientId: 10, SeqNum: 5}},
 	}
-	if !c.checkWeakDepConsistency(msgs) {
+	if !c.checkReadDepConsistency(msgs) {
 		t.Error("single message should be consistent")
 	}
 }
@@ -3887,11 +3904,11 @@ func TestCheckWeakDepConsistencyThreeWayInconsistent(t *testing.T) {
 	c := &Client{}
 	// First two agree, third differs
 	msgs := []interface{}{
-		&MRecordAck{Replica: 1, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
-		&MRecordAck{Replica: 2, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
-		&MRecordAck{Replica: 3, WeakDep: &CommandId{ClientId: 10, SeqNum: 7}},
+		&MRecordAck{Replica: 1, ReadDep: &CommandId{ClientId: 10, SeqNum: 5}},
+		&MRecordAck{Replica: 2, ReadDep: &CommandId{ClientId: 10, SeqNum: 5}},
+		&MRecordAck{Replica: 3, ReadDep: &CommandId{ClientId: 10, SeqNum: 7}},
 	}
-	if c.checkWeakDepConsistency(msgs) {
+	if c.checkReadDepConsistency(msgs) {
 		t.Error("third ack differs, should be inconsistent")
 	}
 }
@@ -3921,8 +3938,8 @@ func TestHandleFastPathAcksInconsistentWeakDeps(t *testing.T) {
 		Ok:      TRUE,
 	}
 	msgs := []interface{}{
-		&MRecordAck{Replica: 1, WeakDep: nil},
-		&MRecordAck{Replica: 2, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
+		&MRecordAck{Replica: 1, ReadDep: nil},
+		&MRecordAck{Replica: 2, ReadDep: &CommandId{ClientId: 10, SeqNum: 5}},
 	}
 	c.handleFastPathAcks(leaderMsg, msgs)
 
@@ -3952,8 +3969,8 @@ func TestHandleFastPathAcksInconsistentNoDuplicateCount(t *testing.T) {
 		Ok:      TRUE,
 	}
 	msgs := []interface{}{
-		&MRecordAck{Replica: 1, WeakDep: nil},
-		&MRecordAck{Replica: 2, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
+		&MRecordAck{Replica: 1, ReadDep: nil},
+		&MRecordAck{Replica: 2, ReadDep: &CommandId{ClientId: 10, SeqNum: 5}},
 	}
 	// Call twice (simulating quorum callback firing again)
 	c.handleFastPathAcks(leaderMsg, msgs)
@@ -3979,8 +3996,8 @@ func TestHandleFastPathAcksAlreadyDelivered(t *testing.T) {
 		Ok:      TRUE,
 	}
 	msgs := []interface{}{
-		&MRecordAck{Replica: 1, WeakDep: nil},
-		&MRecordAck{Replica: 2, WeakDep: nil},
+		&MRecordAck{Replica: 1, ReadDep: nil},
+		&MRecordAck{Replica: 2, ReadDep: nil},
 	}
 	// Consistent weakDeps but already delivered - should return without panic
 	c.handleFastPathAcks(leaderMsg, msgs)
@@ -4047,8 +4064,8 @@ func TestHandleSlowPathIgnoresWeakDepInconsistency(t *testing.T) {
 	}
 	// Inconsistent weakDeps - slow path doesn't check, just delivers
 	msgs := []interface{}{
-		&MRecordAck{Replica: 1, WeakDep: nil},
-		&MRecordAck{Replica: 2, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
+		&MRecordAck{Replica: 1, ReadDep: nil},
+		&MRecordAck{Replica: 2, ReadDep: &CommandId{ClientId: 10, SeqNum: 5}},
 	}
 	// Should not panic; already delivered so returns early
 	c.handleSlowPathAcks(leaderMsg, msgs)
@@ -4070,8 +4087,8 @@ func TestFastPathSlowPathFallback(t *testing.T) {
 
 	// Step 1: Fast path fails due to inconsistent weakDeps
 	fastMsgs := []interface{}{
-		&MRecordAck{Replica: 1, WeakDep: nil},
-		&MRecordAck{Replica: 2, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
+		&MRecordAck{Replica: 1, ReadDep: nil},
+		&MRecordAck{Replica: 2, ReadDep: &CommandId{ClientId: 10, SeqNum: 5}},
 	}
 	c.handleFastPathAcks(leaderMsg, fastMsgs)
 
@@ -4088,8 +4105,8 @@ func TestFastPathSlowPathFallback(t *testing.T) {
 
 	// Step 3: Fast path called again (e.g., more acks arrive) - should be no-op
 	c.handleFastPathAcks(leaderMsg, []interface{}{
-		&MRecordAck{Replica: 1, WeakDep: nil},
-		&MRecordAck{Replica: 2, WeakDep: nil},
+		&MRecordAck{Replica: 1, ReadDep: nil},
+		&MRecordAck{Replica: 2, ReadDep: nil},
 	})
 	// Should still be delivered, no change
 	if _, exists := c.delivered[1]; !exists {
@@ -4106,8 +4123,8 @@ func TestMultipleCommandsIndependent(t *testing.T) {
 	// Command 1: inconsistent (falls back to slow path)
 	cmd1Leader := &MRecordAck{Replica: 0, CmdId: CommandId{ClientId: 1, SeqNum: 1}, Ok: TRUE}
 	cmd1Msgs := []interface{}{
-		&MRecordAck{Replica: 1, WeakDep: nil},
-		&MRecordAck{Replica: 2, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
+		&MRecordAck{Replica: 1, ReadDep: nil},
+		&MRecordAck{Replica: 2, ReadDep: &CommandId{ClientId: 10, SeqNum: 5}},
 	}
 	c.handleFastPathAcks(cmd1Leader, cmd1Msgs)
 
@@ -4115,8 +4132,8 @@ func TestMultipleCommandsIndependent(t *testing.T) {
 	c.delivered[2] = struct{}{}
 	cmd2Leader := &MRecordAck{Replica: 0, CmdId: CommandId{ClientId: 1, SeqNum: 2}, Ok: TRUE}
 	cmd2Msgs := []interface{}{
-		&MRecordAck{Replica: 1, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
-		&MRecordAck{Replica: 2, WeakDep: &CommandId{ClientId: 10, SeqNum: 5}},
+		&MRecordAck{Replica: 1, ReadDep: &CommandId{ClientId: 10, SeqNum: 5}},
+		&MRecordAck{Replica: 2, ReadDep: &CommandId{ClientId: 10, SeqNum: 5}},
 	}
 	c.handleFastPathAcks(cmd2Leader, cmd2Msgs)
 

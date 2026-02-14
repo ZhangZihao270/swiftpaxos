@@ -34,8 +34,9 @@ type Replica struct {
 	values    cmap.ConcurrentMap
 	proposes  cmap.ConcurrentMap
 	cmdDescs  cmap.ConcurrentMap
-	unsynced  cmap.ConcurrentMap
-	executed  cmap.ConcurrentMap
+	unsynced         cmap.ConcurrentMap
+	unsyncedByClient cmap.ConcurrentMap // per-client index: clientId → []CommandId of weak writes
+	executed         cmap.ConcurrentMap
 	committed cmap.ConcurrentMap
 	delivered cmap.ConcurrentMap
 
@@ -153,8 +154,9 @@ func New(alias string, rid int, addrs []string, exec bool, pl, f int,
 		values:    cmap.New(),
 		proposes:  cmap.New(),
 		cmdDescs:  cmap.New(),
-		unsynced:  cmap.New(),
-		executed:  cmap.New(),
+		unsynced:         cmap.New(),
+		unsyncedByClient: cmap.New(),
+		executed:         cmap.New(),
 		committed: cmap.New(),
 		delivered:     cmap.New(),
 		weakExecuted:  cmap.New(),
@@ -272,13 +274,14 @@ func (r *Replica) run() {
 					continue
 				}
 				r.proposes.Set(cmdId.String(), propose)
-				ok, weakDep := r.okWithWeakDep(propose.Command)
+				ok, readDep, causalDeps := r.witnessCheck(propose.Command, propose.ClientId)
 				recAck := &MRecordAck{
-					Replica: r.Id,
-					Ballot:  r.ballot,
-					CmdId:   cmdId,
-					Ok:      ok,
-					WeakDep: weakDep,
+					Replica:    r.Id,
+					Ballot:     r.ballot,
+					CmdId:      cmdId,
+					Ok:         ok,
+					ReadDep:    readDep,
+					CausalDeps: causalDeps,
 				}
 				r.sender.SendToClient(propose.ClientId, recAck, r.cs.recordAckRPC)
 				r.unsyncStrong(propose.Command, cmdId)
@@ -540,6 +543,21 @@ func (r *Replica) sync(cmdId CommandId, cmd state.Command) {
 			r.synced.Set(cmdId.String(), struct{}{})
 			return &UnsyncedEntry{Slot: 0}
 		})
+	// Remove from per-client causal dependency index
+	clientKey := r.int32ToString(cmdId.ClientId)
+	r.unsyncedByClient.Upsert(clientKey, nil,
+		func(exists bool, mapV, _ interface{}) interface{} {
+			if !exists {
+				return []CommandId{}
+			}
+			deps := mapV.([]CommandId)
+			for i, d := range deps {
+				if d == cmdId {
+					return append(deps[:i], deps[i+1:]...)
+				}
+			}
+			return deps
+		})
 }
 
 // syncLeader cleans up the unsynced map on the leader after a command is executed.
@@ -556,6 +574,21 @@ func (r *Replica) syncLeader(cmdId CommandId, cmd state.Command) {
 	if entry.CmdId == cmdId {
 		r.unsynced.Remove(key)
 	}
+	// Remove from per-client causal dependency index (leader tracks for speculative execution)
+	clientKey := r.int32ToString(cmdId.ClientId)
+	r.unsyncedByClient.Upsert(clientKey, nil,
+		func(exists bool, mapV, _ interface{}) interface{} {
+			if !exists {
+				return []CommandId{}
+			}
+			deps := mapV.([]CommandId)
+			for i, d := range deps {
+				if d == cmdId {
+					return append(deps[:i], deps[i+1:]...)
+				}
+			}
+			return deps
+		})
 }
 
 // unsyncStrong adds a strong (linearizable) op to the unsynced map on non-leaders.
@@ -616,6 +649,17 @@ func (r *Replica) unsyncCausal(cmd state.Command, cmdId CommandId) {
 				CmdId:    cmdId,
 			}
 		})
+	// Per-client index: track weak WRITES for causal dependency reporting (non-leaders only)
+	if !r.isLeader && cmd.Op == state.PUT {
+		clientKey := r.int32ToString(cmdId.ClientId)
+		r.unsyncedByClient.Upsert(clientKey, nil,
+			func(exists bool, mapV, _ interface{}) interface{} {
+				if exists {
+					return append(mapV.([]CommandId), cmdId)
+				}
+				return []CommandId{cmdId}
+			})
+	}
 }
 
 // leaderUnsyncStrong adds a strong op to the unsynced map on the leader.
@@ -701,38 +745,42 @@ func (r *Replica) ok(cmd state.Command) uint8 {
 	return TRUE
 }
 
-// okWithWeakDep checks unsynced for conflicts and returns both ok status and weakDep.
-// Used by non-leaders in CURP-HO when processing strong proposes.
-// weakDep is non-nil only for strong READs when there's an uncommitted weak write on the same key.
-func (r *Replica) okWithWeakDep(cmd state.Command) (uint8, *CommandId) {
+// witnessCheck performs the CURP-HO witness check for strong commands on non-leaders.
+// Returns:
+//   - ok: TRUE if no strong write conflict, FALSE if conflict
+//   - readDep: per-key read dependency (non-nil only for strong reads with pending weak write on same key)
+//   - causalDeps: per-session causal dependencies (all weak writes from same client in witness pool)
+func (r *Replica) witnessCheck(cmd state.Command, clientId int32) (uint8, *CommandId, []CommandId) {
+	var okResult uint8 = TRUE
+	var readDep *CommandId
+
+	// Per-key conflict check + ReadDep
 	key := r.int32ToString(int32(cmd.K))
 	v, exists := r.unsynced.Get(key)
-	if !exists {
-		return TRUE, nil
-	}
-	entry := v.(*UnsyncedEntry)
-	if entry.Slot <= 0 {
-		return TRUE, nil
-	}
-	// Strong write conflict
-	if entry.IsStrong && entry.Op == state.PUT {
-		return FALSE, nil
-	}
-	// Any strong op pending → conflict
-	if entry.IsStrong {
-		return FALSE, nil
-	}
-	// Causal (weak) write pending → return weakDep only for strong reads.
-	// Per protocol spec: strong reads need weakDep to track uncommitted weak write
-	// dependencies for fast-path consistency checking. Strong writes don't need it.
-	if !entry.IsStrong && entry.Op == state.PUT {
-		if cmd.Op == state.GET {
-			dep := entry.CmdId
-			return TRUE, &dep
+	if exists {
+		entry := v.(*UnsyncedEntry)
+		if entry.Slot > 0 {
+			if entry.IsStrong {
+				okResult = FALSE
+			} else if entry.Op == state.PUT && cmd.Op == state.GET {
+				dep := entry.CmdId
+				readDep = &dep
+			}
 		}
-		return TRUE, nil
 	}
-	return TRUE, nil
+
+	// Per-session causal deps: all weak writes from same client
+	var causalDeps []CommandId
+	clientKey := r.int32ToString(clientId)
+	if v, exists := r.unsyncedByClient.Get(clientKey); exists {
+		deps := v.([]CommandId)
+		if len(deps) > 0 {
+			causalDeps = make([]CommandId, len(deps))
+			copy(causalDeps, deps)
+		}
+	}
+
+	return okResult, readDep, causalDeps
 }
 
 // checkStrongWriteConflict checks if there's a pending strong write on the given key.

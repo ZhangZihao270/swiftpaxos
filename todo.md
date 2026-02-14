@@ -9,7 +9,7 @@ This document tracks the implementation of multiple hybrid consistency protocols
 ## Table of Contents
 
 1. [CURP-HT (Hybrid Two-Phase)](#curp-ht-hybrid-two-phase) - **COMPLETE**
-2. [CURP-HO (Hybrid Optimal)](#curp-ho-hybrid-optimal) - **PLANNED**
+2. [CURP-HO (Hybrid Optimal)](#curp-ho-hybrid-optimal) - **COMPLETE**
 3. [Future Protocols](#future-protocols)
 
 ---
@@ -440,26 +440,18 @@ See original todo.md for detailed history.
 
 ## Design Summary
 
-**Key Idea**: Weak ops broadcast to all replicas (witness pool), but only wait for closest replica response.
+**Key Idea**: Weak ops broadcast to all replicas (creating a witness pool), and the client completes by waiting only for the closest replica's reply. Strong operations track per-session causal dependencies on same-session weak writes and per-key read dependencies (ReadDep) on same-key weak writes, ensuring hybrid consistency while achieving optimal latency.
 
 | Aspect | Strong Ops | Weak Ops |
 |--------|------------|----------|
-| **Broadcast** | All replicas | All replicas ✨ |
-| **Execution** | Leader (speculative) | Bound replica (speculative) ✨ |
-| **Client wait** | 2-RTT (super majority) | 1-RTT (bound replica) ✨ |
-| **Latency** | To super majority | To **closest** replica ✨ |
-| **Strong speculative sees weak?** | ✅ **Yes** (witness pool) ✨ | N/A |
-
-**Advantages**:
-- ✅ **Optimal weak latency**: 1-RTT to closest replica (not leader)
-- ✅ Strong ops can see uncommitted weak ops (better speculative execution)
-- ✅ Reuses CURP-HT's `unsynced` structure (no duplicate data structures)
-- ✅ Witness functionality via extended `unsynced` entries
-
-**Disadvantages**:
-- ❌ Higher network load: Weak ops broadcast to all
-- ❌ More complex: Extended unsynced entries with metadata
-- ❌ Super majority requirement for strong fast path (more restrictive)
+| **Broadcast** | All replicas | All replicas |
+| **Execution** | Leader (speculative) | Bound replica (speculative) |
+| **Client wait** | Super quorum (fast) or SyncReply (slow) | 1-RTT (bound replica) |
+| **Latency** | 1-RTT to super quorum (fast path) | 1-RTT to **closest** replica |
+| **Strong speculative sees weak?** | Yes (via witness pool + ReadDep) | N/A |
+| **Witness checks** | Per-key conflict + per-session causal deps + per-key ReadDep | N/A |
+| **Client write set** | Maintained; cleared on leader commit | N/A |
+| **Fast-path checks** | Causal dep check + ReadDep consistency | N/A |
 
 ---
 
@@ -469,102 +461,97 @@ See original todo.md for detailed history.
 
 **Setup Phase**:
 ```
-Client measures latency to all replicas
-Client binds to closest replica: boundReplica[clientId] = closestReplicaId
+Client measures latency to all replicas during Connect()
+Client binds to closest replica: boundReplica = closestReplicaId
 ```
 
 ### 2. Causal (Weak) Operation
 
 **Client**:
 ```
-1. Broadcast MCausalPropose to ALL replicas
-2. Wait for reply from boundReplica only
-3. Complete immediately (1-RTT optimal!)
+1. Broadcast MCausalPropose to ALL replicas (bound replica first)
+2. If write: add CommandId to writeSet
+3. Wait for MCausalReply from boundReplica only (ignore others)
+4. Complete immediately (1-RTT to closest replica!)
+   Note: Do NOT clear writeSet on bound-replica reply
 ```
 
 **All Replicas** (including bound replica and leader):
 ```
-1. Add op to unsynced map (witness):
-   unsynced[key] = UnsyncedEntry{isStrong: false, op, value, clientId, seqNum, ...}
-```
-
-**Bound Replica** (whoever client is bound to):
-```
-1. Check causal dependency (if causalDep > 0)
-2. Speculative execution: computeSpeculativeResult()
-   - Can see pending writes from same client
-3. Send MCausalReply{result} to client immediately (1-RTT done!)
-4. STOP - bound replica does NOT do replication
+1. Add to witness pool: unsynced[key] = UnsyncedEntry{isStrong: false, op, value, cmdId, ...}
+2. If write on non-leader: add cmdId to unsyncedByClient[clientId] (for causal dep tracking)
+3. If write: add to pendingWrites[clientId] (for read-your-writes)
+4. Compute speculative result, send MCausalReply to client
 ```
 
 **Leader** (replication coordinator):
 ```
-1. Also adds to unsynced (like all replicas)
-2. Coordinate async replication (independently from bound replica):
-   - Assign slot
+1. Also adds to witness pool (like all replicas)
+2. Assign slot, track dependency (leaderUnsyncCausal)
+3. Coordinate async replication:
    - Send Accept to all replicas
-   - Wait for majority acks
-   - Send Commit
-   - Execute in slot order (modifies state machine)
+   - Wait for majority acks → Commit
+   - Execute in slot order (respecting causal chain via CausalDep)
+   - Clean up: syncLeader, remove from pendingWrites
 ```
-
-**Note**: If bound replica == leader, then leader does BOTH:
-- Immediately replies to client (1-RTT)
-- Separately coordinates replication in background
 
 ### 3. Strong Operation
 
 **Client**:
 ```
-1. Broadcast GPropose to ALL replicas
-2. Collect replies
-3. Fast path: If super majority (3/4) reply ok with consistent weakDep → complete
-4. Slow path: Wait for leader's SyncReply
+1. Broadcast Propose to ALL replicas
+2. Collect MRecordAck replies (with Ok, ReadDep, CausalDeps)
+3. Fast path (super quorum):
+   a. Causal dep check: every entry in writeSet appears in CausalDeps of ALL witnesses
+   b. ReadDep consistency: all witnesses report same ReadDep (all nil, or all same cmdId)
+   If both pass → COMPLETE, clear writeSet entries < seqNum
+4. Slow path: Wait for SyncReply from leader → COMPLETE, clear writeSet entries ≤ seqNum
 ```
 
-**All Replicas**:
+**Non-Leader Witnesses** (witnessCheck):
 ```
-1. Check unsynced for strong write conflicts:
-   if exists strong write W in unsynced[currentOp.key]:
-     return RecordAck{ok: FAIL}
+Three checks:
+1. Per-key conflict: if pending STRONG write on same key → Ok=FALSE
+2. Per-key ReadDep (strong reads only):
+   if pending weak WRITE on same key (any session) → ReadDep = cmdId
+   else → ReadDep = nil
+3. Per-session causal deps:
+   collect all weak WRITEs from same client in unsyncedByClient → CausalDeps[]
 
-2. For strong write:
-   if no conflict:
-     return RecordAck{ok: TRUE}
-
-3. For strong read:
-   if exists weak write W in unsynced[currentOp.key]:
-     return RecordAck{ok: TRUE, weakDep: W.cmdId}  // Depends on weak write
-   else:
-     return RecordAck{ok: TRUE, weakDep: nil}      // No dependency
+Return MRecordAck{Ok, ReadDep, CausalDeps}
+Also: unsyncStrong(cmd, cmdId) to add to witness pool
 ```
 
 **Leader**:
 ```
-1. Speculative execution (CAN see unsynced entries, including uncommitted weak writes!)
-2. Send Reply{result, ok, weakDep}
+1. Speculative execution (CAN see uncommitted weak writes in witness pool):
+   - Strong GET: check getWeakWriteValue(key), return pending value if found
+   - Strong PUT: return NIL
+2. Send MReply{result, ok} to client
 3. Start replication (Accept → Commit)
 4. Execute in slot order
-5. Send SyncReply{finalResult}
+5. Send SyncReply{finalResult} (triggers writeSet cleanup on client)
 ```
 
-### 4. Client Completion
+### 4. Client Write Set
 
-**Causal**:
 ```
-Receive MCausalReply from boundReplica → COMPLETE (1-RTT!)
+writeSet: map[CommandId]struct{}
+
+Add:    on SendCausalWrite (weak PUT only)
+Clear:  on handleSyncReply (leader commit): delete entries with SeqNum ≤ committed
+        on handleFastPathAcks (fast-path delivery): delete entries with SeqNum < delivered
+Do NOT clear on handleCausalReply (bound-replica reply does not mean leader committed)
 ```
 
-**Strong**:
-```
-Fast path:
-  if super majority (3n/4) reply ok:
-    if all weakDep consistent (all nil, or all same opId):
-      → COMPLETE (2-RTT)
+### 5. Satisfying Hybrid Consistency (C1-C3)
 
-Slow path:
-  Wait for SyncReply from leader → COMPLETE
-```
+- **C1 & C2** (same-session): Causal dependency mechanism. Each witness reports same-session
+  weak writes (CausalDeps). Client verifies its writeSet entries appear in super-majority.
+  This ensures same-session weak writes are fault-tolerant before strong ops complete.
+- **C3** (cross-session): For strong writes, causal deps only track same-session → cross-session
+  weak writes remain invisible until committed. For strong reads, ReadDep allows observing
+  cross-session weak writes only when super-majority agrees (fault-tolerance guaranteed).
 
 ---
 
@@ -607,7 +594,7 @@ Slow path:
   - Split `leaderUnsync()` → `leaderUnsyncStrong()` + `leaderUnsyncCausal()`
   - Updated `sync()` to work with `*UnsyncedEntry` count field
   - Updated `ok()` to distinguish strong conflicts (FALSE) from causal entries (TRUE)
-  - Added `okWithWeakDep()` returning both ok status and weak write dependency
+  - Added `witnessCheck()` returning ok status, ReadDep, and per-session CausalDeps
 
 - [x] **20.3** Implement enhanced conflict checking functions [26:02:06]
   - `checkStrongWriteConflict(key)`: detects pending strong writes
@@ -627,7 +614,7 @@ Slow path:
 
 **Design decisions**:
 - Single entry per key (latest op overwrites metadata, count tracks total pending)
-- Strong entries block strong writes; causal entries create weakDep for strong reads
+- Strong entries block strong writes; causal entries create ReadDep for strong reads
 - Leader stores actual slot number; non-leader uses count for pending tracking
 
 ---
@@ -728,16 +715,16 @@ Slow path:
 
 ### Phase 25: Strong Op Modifications [COMPLETE]
 
-**Goal**: Modify strong op handling to check witness pool and track weakDep.
+**Goal**: Modify strong op handling to check witness pool and track ReadDep.
 
-- [x] **25.1** Add weakDep field to MRecordAck message [26:02:06]
-  - Added `WeakDep *CommandId` (pointer, nil when no dep)
-  - Variable-size serialization: 18 bytes (no dep) or 26 bytes (with dep)
-  - hasWeakDep flag byte at offset 17
+- [x] **25.1** Add ReadDep field to MRecordAck message [26:02:06]
+  - Added `ReadDep *CommandId` (pointer, nil when no dep) — per-key weak write dependency
+  - Added `CausalDeps []CommandId` — per-session weak writes from same client (Phase 35)
+  - Variable-size serialization: 20 bytes (no deps) or 28+ bytes (with deps)
 
 - [x] **25.2** Modify handlePropose() for strong ops [26:02:06]
-  - Non-leaders use okWithWeakDep() instead of ok()
-  - RecordAck now carries WeakDep when causal write exists on same key
+  - Non-leaders use witnessCheck(cmd, clientId) returning (ok, readDep, causalDeps)
+  - RecordAck carries ReadDep + CausalDeps for fast-path checks
 
 - [x] **25.3** Modify deliver() speculative execution for strong ops [26:02:06]
   - Replace ComputeResult with computeSpeculativeResultWithUnsynced
@@ -750,24 +737,23 @@ Slow path:
 
 ---
 
-### Phase 26: Client Fast Path with WeakDep [COMPLETE]
+### Phase 26: Client Fast Path with ReadDep + CausalDeps [COMPLETE]
 
-**Goal**: Implement super majority fast path with weakDep consistency check.
+**Goal**: Implement super quorum fast path with two-part check: causal dep + ReadDep consistency.
 
-- [x] **26.1** Update client to track weakDep in acks
-  - MRecordAck already carries WeakDep from Phase 25
-  - MsgSet stores full MRecordAck objects with WeakDep
+- [x] **26.1** Update client to track ReadDep and CausalDeps in acks
+  - MRecordAck carries ReadDep + CausalDeps from Phase 25/35
+  - MsgSet stores full MRecordAck objects
 
-- [x] **26.2** Implement weakDep consistency check
-  - Added `weakDepEqual(a, b *CommandId) bool` helper
-  - Added `checkWeakDepConsistency(msgs []interface{}) bool` method
-  - Checks all non-leader acks agree on the same WeakDep (or all nil)
+- [x] **26.2** Implement fast-path checks
+  - `readDepEqual(a, b *CommandId) bool` — ReadDep pointer comparison
+  - `checkCausalDeps(msgs)` — verifies every writeSet entry appears in CausalDeps of ALL witnesses
+  - `checkReadDepConsistency(msgs)` — verifies all witnesses report same ReadDep
 
 - [x] **26.3** Modify handleAcks for fast/slow path separation
-  - Split `handleAcks` into `handleFastPathAcks` (3/4 quorum + weakDep check) and `handleSlowPathAcks` (majority quorum)
-  - Fast path: checks weakDep consistency, delivers if consistent, increments slowPaths and defers to slow path if inconsistent
-  - Slow path: delivers unconditionally (leader has ordered the command)
-  - Updated `initMsgSets` to use separate handlers
+  - `handleFastPathAcks` (super quorum): check 1 = causal deps, check 2 = ReadDep consistency
+  - `handleSlowPathAcks` (super quorum): delivers unconditionally (leader has ordered)
+  - Client maintains writeSet, cleared on SyncReply/fast-path delivery
   - 21 new tests (177 total), all passing
 
 ---
@@ -785,13 +771,13 @@ All tests already covered by Phases 19-26 (177 total tests):
   - TestClientBoundReplica* (4), TestBindingModel* (4), TestBoundClientTracking, TestAutoDetectBinding
 
 - [x] **27.3** Unit tests: Message serialization
-  - TestMCausalProposeSerialization + 2 variants, TestMCausalReplySerialization + 2 variants, TestMRecordAckSerializationWithWeakDep + 4 variants
+  - TestMCausalProposeSerialization + 2 variants, TestMCausalReplySerialization + 2 variants, TestMRecordAckSerializationWithReadDep + 4 variants
 
 - [x] **27.4** Unit tests: Causal op execution
   - TestCausalProposeWitnessPoolAddsEntry, TestHandleCausalReplyFromBoundReplica/EachReplica, TestNonBoundReplicaWitnessOnly
 
 - [x] **27.5** Unit tests: Strong op witness checking
-  - TestOkStrongWriteConflict, TestCheckStrongWriteConflict* (3), TestOkWithWeakDep* (4), TestCheckWeakDepConsistency* (8)
+  - TestOkStrongWriteConflict, TestCheckStrongWriteConflict* (3), TestWitnessCheck* (4), TestCheckReadDepConsistency* (8)
 
 - [x] **27.6** Integration tests: Mixed workload
   - TestCausalAndStrongMixedWitnessPool, TestStrongRead/WriteWithCausalWriteInWitnessPool, TestFastPathSlowPathFallback, TestMultipleCommandsIndependent
@@ -826,7 +812,7 @@ Analysis: All witness pool operations are already O(1) using ConcurrentMap key l
 No full-map iterations exist. Further optimization requires runtime benchmarks.
 
 - [x] **29.2** Witness pool lookup analysis (COMPLETE - no changes needed)
-  - All operations (ok, okWithWeakDep, getWeakWriteValue, etc.) are O(1) key lookups
+  - All operations (ok, witnessCheck, getWeakWriteValue, etc.) are O(1) key lookups
   - Already using ConcurrentMap (sharded hash map, SHARD_COUNT=32768)
   - No full-map iteration anywhere in witness pool code
 
@@ -1656,6 +1642,57 @@ Leader uses `leaderUnsyncCausal` exclusively for slot-based dependency tracking.
 6. 34.8 (final validation)
 
 **Success Criteria**: Find the peak throughput for both protocols at networkDelay=25, with a reproducible configuration. Fix any high-concurrency bugs discovered along the way.
+
+---
+
+### Phase 35: CURP-HO Per-Session Causal Dependency Tracking [✅ COMPLETE]
+
+**Goal**: Align CURP-HO implementation with protocol spec (docs/protocol-overview.md) by adding per-session causal dependency tracking, client write set, and proper fast-path checks.
+
+**Summary**: The previous implementation only tracked a single per-key WeakDep. The spec requires:
+1. Per-session causal dependency tracking (witnesses report all weak writes from same client)
+2. Client write set (tracks uncommitted weak writes, cleared on leader commit)
+3. Two-part fast-path: causal dep check + ReadDep consistency check
+
+**Changes**:
+
+#### 35.1: MRecordAck struct + serialization (defs.go) [COMPLETE]
+- Renamed `WeakDep` → `ReadDep` (per-key weak write dependency for strong reads)
+- Added `CausalDeps []CommandId` (per-session: all weak writes from same client in witness pool)
+- New wire format: 17B base + 1B hasReadDep + [8B ReadDep] + 2B count + [8B * count CausalDeps]
+- Rewrote Marshal/Unmarshal for new format
+
+#### 35.2: Secondary index unsyncedByClient (curp-ho.go) [COMPLETE]
+- Added `unsyncedByClient cmap.ConcurrentMap` to Replica struct
+- `unsyncCausal()`: appends to `unsyncedByClient[clientId]` for weak WRITES on non-leaders
+- `sync()`: removes from `unsyncedByClient[clientId]` when command is committed
+- `syncLeader()`: same removal for leader-side cleanup
+
+#### 35.3: witnessCheck function (curp-ho.go) [COMPLETE]
+- Replaced `okWithWeakDep(cmd) (uint8, *CommandId)` with `witnessCheck(cmd, clientId) (uint8, *CommandId, []CommandId)`
+- Returns: (ok, readDep, causalDeps) — per-key conflict + ReadDep + per-session causal deps
+- Non-leader propose handler updated to populate all MRecordAck fields
+
+#### 35.4: Client write set (client.go) [COMPLETE]
+- Added `writeSet map[CommandId]struct{}` to Client struct
+- `SendCausalWrite`: adds entry to writeSet
+- `handleSyncReply`: clears entries with SeqNum <= committed SeqNum
+- `handleFastPathAcks`: clears entries with SeqNum < delivered SeqNum
+
+#### 35.5: Client fast-path checks (client.go) [COMPLETE]
+- Renamed `weakDepEqual` → `readDepEqual`
+- Renamed `checkWeakDepConsistency` → `checkReadDepConsistency`
+- Added `checkCausalDeps(msgs)`: verifies every writeSet entry appears in CausalDeps of ALL witnesses
+- Fast path now performs both checks: causal dep check + ReadDep consistency
+
+#### 35.6: Tests (curp-ho_test.go) [COMPLETE]
+- Updated all `okWithWeakDep` calls to `witnessCheck` (3-return-value signature)
+- Renamed all `WeakDep` → `ReadDep` references
+- Updated serialization size tests for new wire format (18→20 bytes base, 26→28 with ReadDep)
+- Added test for CausalDeps serialization
+- Added `unsyncedByClient: cmap.New()` to test replica constructors
+
+**Verification**: `go build -o swiftpaxos .` ✓ | `go test ./...` ✓ (all tests pass)
 
 ---
 

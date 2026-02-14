@@ -36,6 +36,10 @@ type Client struct {
 	weakPending    map[int32]struct{}
 	lastWeakSeqNum int32 // Track sequence number of last weak command for causal ordering
 
+	// CURP-HO: Client write set — tracks uncommitted weak writes.
+	// Entries added on SendCausalWrite, cleared on SyncReply (leader commit) or fast-path delivery.
+	writeSet map[CommandId]struct{}
+
 	// CURP-HO: Bound replica for 1-RTT causal op completion.
 	// Client binds to closest replica (lowest latency) for fast causal replies.
 	// Causal ops are broadcast to all replicas, but client only waits for
@@ -80,6 +84,7 @@ func NewClient(b *client.BufferClient, repNum, reqNum, pclients int) *Client {
 		alreadySlow: make(map[CommandId]struct{}),
 
 		weakPending: make(map[int32]struct{}),
+		writeSet:    make(map[CommandId]struct{}),
 
 		// CURP-HO: Bind to closest replica for 1-RTT causal op completion.
 		// ClosestId is computed by base client during Connect() via ping latency measurement.
@@ -226,14 +231,22 @@ func (c *Client) handleSyncReply(rep *MSyncReply) {
 
 	c.val = state.Value(rep.Rep)
 	c.delivered[rep.CmdId.SeqNum] = struct{}{}
+	// Clear write set entries up to this committed seqnum
+	for ws := range c.writeSet {
+		if ws.ClientId == c.ClientId && ws.SeqNum <= rep.CmdId.SeqNum {
+			delete(c.writeSet, ws)
+		}
+	}
 	c.mu.Unlock()
 	c.RegisterReply(c.val, rep.CmdId.SeqNum)
 	c.Println("Slow Paths:", c.slowPaths)
 }
 
-// handleFastPathAcks handles the fast path (3/4 quorum) with weakDep consistency check.
-// If weakDeps are consistent across all non-leader acks, the operation completes.
-// If inconsistent, the operation falls back to the slow path (via macks).
+// handleFastPathAcks handles the fast path (super quorum) with two checks:
+// 1. Causal dep check: all weak writes in client's write set must appear in
+//    CausalDeps of every witness in the quorum.
+// 2. ReadDep consistency: all witnesses must agree on the same ReadDep.
+// If either check fails, fall back to the slow path (via macks).
 func (c *Client) handleFastPathAcks(leaderMsg interface{}, msgs []interface{}) {
 	if leaderMsg == nil {
 		return
@@ -241,9 +254,8 @@ func (c *Client) handleFastPathAcks(leaderMsg interface{}, msgs []interface{}) {
 
 	cmdId := leaderMsg.(*MRecordAck).CmdId
 
-	// Check weakDep consistency among non-leader acks
-	if !c.checkWeakDepConsistency(msgs) {
-		// Inconsistent weakDeps - cannot complete on fast path
+	// Check 1: Causal dependency check
+	if !c.checkCausalDeps(msgs) {
 		c.mu.Lock()
 		if _, exists := c.alreadySlow[cmdId]; !exists {
 			c.alreadySlow[cmdId] = struct{}{}
@@ -253,13 +265,30 @@ func (c *Client) handleFastPathAcks(leaderMsg interface{}, msgs []interface{}) {
 		return
 	}
 
-	// Consistent weakDeps - deliver on fast path
+	// Check 2: ReadDep consistency check
+	if !c.checkReadDepConsistency(msgs) {
+		c.mu.Lock()
+		if _, exists := c.alreadySlow[cmdId]; !exists {
+			c.alreadySlow[cmdId] = struct{}{}
+			c.slowPaths++
+		}
+		c.mu.Unlock()
+		return
+	}
+
+	// Both checks passed - deliver on fast path
 	c.mu.Lock()
 	if _, exists := c.delivered[cmdId.SeqNum]; exists {
 		c.mu.Unlock()
 		return
 	}
 	c.delivered[cmdId.SeqNum] = struct{}{}
+	// Clear write set entries up to this delivered seqnum
+	for ws := range c.writeSet {
+		if ws.ClientId == c.ClientId && ws.SeqNum < cmdId.SeqNum {
+			delete(c.writeSet, ws)
+		}
+	}
 	c.mu.Unlock()
 	c.RegisterReply(c.val, cmdId.SeqNum)
 	c.Println("Slow Paths:", c.slowPaths)
@@ -363,6 +392,7 @@ func (c *Client) SendCausalWrite(key int64, value []byte) int32 {
 	causalDep := c.lastWeakSeqNum
 	c.weakPending[seqnum] = struct{}{}
 	c.lastWeakSeqNum = seqnum
+	c.writeSet[CommandId{ClientId: c.ClientId, SeqNum: seqnum}] = struct{}{}
 	c.mu.Unlock()
 
 	p := &MCausalPropose{
@@ -448,9 +478,9 @@ func (c *Client) BoundReplica() int32 {
 	return c.boundReplica
 }
 
-// weakDepEqual checks if two optional WeakDep pointers are equal.
+// readDepEqual checks if two optional ReadDep pointers are equal.
 // Both nil = equal. One nil, one non-nil = not equal. Both non-nil = compare fields.
-func weakDepEqual(a, b *CommandId) bool {
+func readDepEqual(a, b *CommandId) bool {
 	if a == nil && b == nil {
 		return true
 	}
@@ -460,17 +490,50 @@ func weakDepEqual(a, b *CommandId) bool {
 	return a.ClientId == b.ClientId && a.SeqNum == b.SeqNum
 }
 
-// checkWeakDepConsistency checks if all non-leader acks have consistent weakDeps.
-// Returns true if all acks agree on the same weakDep (including all nil).
-func (c *Client) checkWeakDepConsistency(msgs []interface{}) bool {
+// checkCausalDeps verifies that every weak write in the client's write set
+// appears in the CausalDeps of ALL witnesses in the quorum.
+// If write set is empty, trivially passes.
+func (c *Client) checkCausalDeps(msgs []interface{}) bool {
+	c.mu.Lock()
+	if len(c.writeSet) == 0 {
+		c.mu.Unlock()
+		return true
+	}
+	// Copy write set under lock
+	wsCopy := make(map[CommandId]struct{}, len(c.writeSet))
+	for k, v := range c.writeSet {
+		wsCopy[k] = v
+	}
+	c.mu.Unlock()
+
+	for _, msg := range msgs {
+		ack := msg.(*MRecordAck)
+		// Build set of reported causal deps for fast lookup
+		depSet := make(map[CommandId]struct{}, len(ack.CausalDeps))
+		for _, dep := range ack.CausalDeps {
+			depSet[dep] = struct{}{}
+		}
+		// Every write set entry must appear in this witness's causal deps
+		for wsCmdId := range wsCopy {
+			if _, found := depSet[wsCmdId]; !found {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// checkReadDepConsistency checks if all non-leader acks have consistent ReadDeps.
+// Returns true if all acks agree on the same ReadDep (including all nil).
+func (c *Client) checkReadDepConsistency(msgs []interface{}) bool {
 	if len(msgs) == 0 {
 		return true
 	}
 	firstAck := msgs[0].(*MRecordAck)
-	firstWeakDep := firstAck.WeakDep
+	firstReadDep := firstAck.ReadDep
 	for _, msg := range msgs[1:] {
 		ack := msg.(*MRecordAck)
-		if !weakDepEqual(firstWeakDep, ack.WeakDep) {
+		if !readDepEqual(firstReadDep, ack.ReadDep) {
 			return false
 		}
 	}

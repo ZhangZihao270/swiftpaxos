@@ -92,11 +92,12 @@ type MAAcks struct {
 }
 
 type MRecordAck struct {
-	Replica int32
-	Ballot  int32
-	CmdId   CommandId
-	Ok      uint8
-	WeakDep *CommandId // CURP-HO: weak write dependency (nil if none)
+	Replica    int32
+	Ballot     int32
+	CmdId      CommandId
+	Ok         uint8
+	ReadDep    *CommandId  // per-key: weak write on same key (strong reads only)
+	CausalDeps []CommandId // per-session: all weak writes from same client in witness pool
 }
 
 type MCommit struct {
@@ -869,7 +870,7 @@ func (p *MRecordAckCache) Put(t *MRecordAck) {
 func (t *MRecordAck) Marshal(wire io.Writer) {
 	var b [26]byte
 	var bs []byte
-	bs = b[:18]
+	bs = b[:17]
 	tmp32 := t.Replica
 	bs[0] = byte(tmp32)
 	bs[1] = byte(tmp32 >> 8)
@@ -891,23 +892,48 @@ func (t *MRecordAck) Marshal(wire io.Writer) {
 	bs[14] = byte(tmp32 >> 16)
 	bs[15] = byte(tmp32 >> 24)
 	bs[16] = byte(t.Ok)
-	if t.WeakDep != nil {
-		bs[17] = 1 // hasWeakDep flag
+	wire.Write(bs)
+
+	// ReadDep: 1 byte flag + optional 8 bytes
+	bs = b[:1]
+	if t.ReadDep != nil {
+		bs[0] = 1
 		wire.Write(bs)
-		bs = b[18:26]
-		tmp32 = t.WeakDep.ClientId
+		bs = b[:8]
+		tmp32 = t.ReadDep.ClientId
 		bs[0] = byte(tmp32)
 		bs[1] = byte(tmp32 >> 8)
 		bs[2] = byte(tmp32 >> 16)
 		bs[3] = byte(tmp32 >> 24)
-		tmp32 = t.WeakDep.SeqNum
+		tmp32 = t.ReadDep.SeqNum
 		bs[4] = byte(tmp32)
 		bs[5] = byte(tmp32 >> 8)
 		bs[6] = byte(tmp32 >> 16)
 		bs[7] = byte(tmp32 >> 24)
 		wire.Write(bs)
 	} else {
-		bs[17] = 0 // no weakDep
+		bs[0] = 0
+		wire.Write(bs)
+	}
+
+	// CausalDeps: 2 byte count + 8 bytes per dep
+	count := uint16(len(t.CausalDeps))
+	bs = b[:2]
+	bs[0] = byte(count)
+	bs[1] = byte(count >> 8)
+	wire.Write(bs)
+	for i := 0; i < int(count); i++ {
+		bs = b[:8]
+		tmp32 = t.CausalDeps[i].ClientId
+		bs[0] = byte(tmp32)
+		bs[1] = byte(tmp32 >> 8)
+		bs[2] = byte(tmp32 >> 16)
+		bs[3] = byte(tmp32 >> 24)
+		tmp32 = t.CausalDeps[i].SeqNum
+		bs[4] = byte(tmp32)
+		bs[5] = byte(tmp32 >> 8)
+		bs[6] = byte(tmp32 >> 16)
+		bs[7] = byte(tmp32 >> 24)
 		wire.Write(bs)
 	}
 }
@@ -915,8 +941,8 @@ func (t *MRecordAck) Marshal(wire io.Writer) {
 func (t *MRecordAck) Unmarshal(wire io.Reader) error {
 	var b [26]byte
 	var bs []byte
-	bs = b[:18]
-	if _, err := io.ReadAtLeast(wire, bs, 18); err != nil {
+	bs = b[:17]
+	if _, err := io.ReadAtLeast(wire, bs, 17); err != nil {
 		return err
 	}
 	t.Replica = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
@@ -924,18 +950,43 @@ func (t *MRecordAck) Unmarshal(wire io.Reader) error {
 	t.CmdId.ClientId = int32((uint32(bs[8]) | (uint32(bs[9]) << 8) | (uint32(bs[10]) << 16) | (uint32(bs[11]) << 24)))
 	t.CmdId.SeqNum = int32((uint32(bs[12]) | (uint32(bs[13]) << 8) | (uint32(bs[14]) << 16) | (uint32(bs[15]) << 24)))
 	t.Ok = uint8(bs[16])
-	hasWeakDep := uint8(bs[17])
-	if hasWeakDep == 1 {
-		bs = b[18:26]
+
+	// ReadDep
+	bs = b[:1]
+	if _, err := io.ReadAtLeast(wire, bs, 1); err != nil {
+		return err
+	}
+	if bs[0] == 1 {
+		bs = b[:8]
 		if _, err := io.ReadAtLeast(wire, bs, 8); err != nil {
 			return err
 		}
-		t.WeakDep = &CommandId{
+		t.ReadDep = &CommandId{
 			ClientId: int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24))),
 			SeqNum:   int32((uint32(bs[4]) | (uint32(bs[5]) << 8) | (uint32(bs[6]) << 16) | (uint32(bs[7]) << 24))),
 		}
 	} else {
-		t.WeakDep = nil
+		t.ReadDep = nil
+	}
+
+	// CausalDeps
+	bs = b[:2]
+	if _, err := io.ReadAtLeast(wire, bs, 2); err != nil {
+		return err
+	}
+	count := uint16(bs[0]) | (uint16(bs[1]) << 8)
+	if count > 0 {
+		t.CausalDeps = make([]CommandId, count)
+		for i := uint16(0); i < count; i++ {
+			bs = b[:8]
+			if _, err := io.ReadAtLeast(wire, bs, 8); err != nil {
+				return err
+			}
+			t.CausalDeps[i].ClientId = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
+			t.CausalDeps[i].SeqNum = int32((uint32(bs[4]) | (uint32(bs[5]) << 8) | (uint32(bs[6]) << 16) | (uint32(bs[7]) << 24)))
+		}
+	} else {
+		t.CausalDeps = nil
 	}
 	return nil
 }
