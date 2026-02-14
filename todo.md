@@ -16,27 +16,34 @@ This document tracks the implementation of multiple hybrid consistency protocols
 
 # CURP-HT (Hybrid Two-Phase)
 
-## Status: ✅ **COMPLETE** (Phase 1-17 Done, Phase 18 In Progress)
+## Status: ✅ **COMPLETE** (Phase 1-18, 32, 36 Done)
 
 ## Design Summary
 
-**Key Idea**: Weak ops sent to leader only, serialized by leader.
+**Key Idea**: Weak ops sent to leader only (writes) or nearest replica (reads), with client local cache for freshness.
 
-| Aspect | Strong Ops | Weak Ops |
-|--------|------------|----------|
-| **Broadcast** | All replicas | Leader only |
-| **Execution** | Leader (speculative) | Leader (speculative) |
-| **Client wait** | 2-RTT (quorum) | 1-RTT (leader reply) |
-| **Latency** | To majority | To leader |
-| **Strong speculative sees weak?** | ❌ No | N/A |
+| Aspect | Strong Ops | Weak Writes | Weak Reads |
+|--------|------------|-------------|------------|
+| **Destination** | All replicas | Leader only | Nearest replica |
+| **Execution** | Leader (speculative) | Leader (after commit) | Nearest replica (committed state) |
+| **Client wait** | 2-RTT (quorum) | 2-RTT (Accept-Commit) | 1-RTT (nearest replica) |
+| **Reply includes** | Slot (version) | Slot (version) | Value + Version |
+| **Non-leader aware?** | Yes | No (transparent) | Yes (handles reads) |
+
+**Client Local Cache**: `key → (value, version)` with slot-based versioning.
+- Weak write commit updates cache with (written value, slot)
+- Weak read merges replica response with cache using max-version rule
+- Strong op completion updates cache with (result, slot)
 
 **Advantages**:
-- ✅ Simple: Leader serializes all weak ops
-- ✅ Lower network load: Weak ops don't broadcast
-- ✅ Proven correctness: Completed and tested
+- ✅ Simple: Leader serializes all weak writes
+- ✅ Lower network load: Weak writes don't broadcast
+- ✅ Low read latency: Weak reads go to nearest replica (1-RTT)
+- ✅ Fresh reads: Client cache provides most recent value even with stale replicas
 
 **Disadvantages**:
-- ❌ Weak latency = distance to leader (not optimal if leader is far)
+- ❌ Weak write latency = 2-RTT to leader (but writes are less common)
+- ❌ Client must maintain local cache state
 
 ---
 
@@ -1693,6 +1700,148 @@ Leader uses `leaderUnsyncCausal` exclusively for slot-based dependency tracking.
 - Added `unsyncedByClient: cmap.New()` to test replica constructors
 
 **Verification**: `go build -o swiftpaxos .` ✓ | `go test ./...` ✓ (all tests pass)
+
+---
+
+### Phase 36: CURP-HT Protocol Alignment [✅ COMPLETE]
+
+**Goal**: Align CURP-HT implementation with protocol spec (docs/protocol-overview.md). Major changes to weak ops semantics: weak writes wait for commit (2-RTT), weak reads go to nearest replica with client-side cache merge.
+
+**Summary**: Previous implementation used speculative execution for weak writes (1-RTT reply) with pendingWrites tracking for read-after-write consistency. New spec replaces this with:
+1. Weak writes wait for full Accept-Commit cycle (2-RTT), leader replies with Slot
+2. Weak reads sent to nearest replica (not leader), return (value, version)
+3. Client local cache with max-version merge rule for freshness
+4. Slot-based versioning: all replies include Slot for cache consistency
+
+**Changes**:
+
+#### 36.1: Message type changes (defs.go) [COMPLETE]
+- Added `Slot int32` to MReply (strong fast-path), MSyncReply (strong slow-path), MWeakReply (weak write commit)
+- Updated Marshal/Unmarshal for all three structs (+4 bytes per message)
+- Added new `MWeakRead` struct (CommandId, ClientId, Key) with 16B fixed serialization
+- Added new `MWeakReadReply` struct (Replica, Ballot, CmdId, Rep, Version) with variable serialization
+- Added New(), BinarySize(), Cache types, channels, RPCs for new message types
+- Registered new channels/RPCs in initCs()
+
+#### 36.2: Replica-side changes (curp-ht.go) [COMPLETE]
+- Replaced `pendingWrites cmap.ConcurrentMap` with `keyVersions cmap.ConcurrentMap` (tracks slot of last write per key)
+- Updated `deliver()`: adds Slot to MReply/MSyncReply, updates keyVersions after PUT execution
+- Simplified `handleWeakPropose()`: removed speculative execution + immediate reply (steps 4-6)
+- Modified `asyncReplicateWeak()`: adds keyVersions update, sends MWeakReply with Slot after commit
+- Added `handleWeakRead()`: reads committed state via ComputeResult, looks up keyVersions, returns MWeakReadReply
+- Removed ~70 lines: pendingWrite struct, pendingWriteKey(), addPendingWrite(), removePendingWrite(), getPendingWrite(), computeSpeculativeResult()
+
+#### 36.3: Client-side changes (client.go) [COMPLETE]
+- Added `cacheEntry` struct (value, version) and `localCache map[int64]cacheEntry`
+- Added per-command key tracking: `weakPendingKeys`, `weakPendingValues`, `strongPendingKeys`
+- Renamed `lastWeakSeqNum` → `lastWeakWriteSeqNum` (only weak writes participate in causal chain)
+- Modified `handleWeakReply()`: updates cache with (key, written value, slot) from weak write commit
+- Added `handleWeakReadReply()`: merges replica response with cache using max-version rule
+- Modified `SendWeakRead()`: sends MWeakRead to ClosestId (nearest replica) instead of MWeakPropose to leader
+- Modified `handleAcks()`/`handleSyncReply()`: updates cache from strong op completion with slot
+- Modified `SendStrongWrite()`/`SendStrongRead()`: tracks key in strongPendingKeys
+
+#### 36.4: Tests (curp-ht_test.go) [COMPLETE]
+- Updated serialization tests for MReply, MSyncReply, MWeakReply to include Slot field
+- Added MWeakRead serialization round-trip test (16B fixed)
+- Added MWeakReadReply serialization round-trip test (variable)
+- Added MWeakRead/MWeakReadReply New(), BinarySize(), Cache tests
+- Added client cache merge tests: replica wins, cache wins, no cache
+- Added client cache update tests: weak write commit, strong op completion
+- Removed 8 obsolete pendingWrite tests (TestPendingWriteKey, TestPendingWriteStruct, etc.)
+
+**Verification**: `go build -o swiftpaxos .` ✓ | `go test ./...` ✓ (52 tests pass, no regressions)
+
+---
+
+### Phase 37: Fix Weak Command Descriptor Lifecycle & Port Client Cache to CURP-HO
+
+**Status**: `[ ]` PLANNED
+
+**Background**: After Phase 36's protocol changes, three issues emerged:
+1. **CURP-HT weak tail latency (P99 ~2s)**: Weak command descriptors were not registered in `cmdDescs`, causing AcceptAcks to create a second descriptor. Acks split between two descriptors → neither reaches ThreeQuarters quorum → 1s commit timeout + 1s execute timeout. A fix registering in cmdDescs was applied but introduced a second problem: `deliver()` frees the descriptor via `desc.msgs <- slot` while `asyncReplicateWeak` still needs it (race condition). Also, `handleAccept` called directly from async goroutine causes concurrent access to non-thread-safe `MsgSet`.
+2. **CURP-HO hang (0 ops)**: Same root causes as CURP-HT. Additionally, concurrent `MsgSet.Add()` from async goroutine + handler goroutine corrupts the internal map → quorum never fires → complete hang.
+3. **CURP-HO missing client cache**: CURP-HT has `localCache`, `weakPendingKeys`, `weakPendingValues`, `strongPendingKeys`, weak reads to nearest replica with cache merge. CURP-HO has none of these.
+
+#### 37.1: Fix descriptor lifecycle for weak commands on leader (CURP-HT) `curp-ht/curp-ht.go`
+
+**Root cause**: Two concurrent bugs:
+- **MsgSet race**: `asyncReplicateWeak` calls `r.handleAccept(acc, desc)` directly → `desc.acks.Add()` from async goroutine. Handler goroutine also calls `desc.acks.Add()` for remote AcceptAcks. `MsgSet` is NOT thread-safe (plain map, no locks).
+- **Descriptor freed too early**: `deliver()` sends `desc.msgs <- slot` → handler does `freeDesc(desc)`. `asyncReplicateWeak` still needs `desc.val`, `desc.cmdId` for the reply.
+
+**Fix**:
+1. In `asyncReplicateWeak`: replace `r.handleAccept(acc, desc)` with `desc.msgs <- acc`. This routes the self-Accept through the handler goroutine, ensuring ALL `desc.acks.Add()` calls are single-threaded.
+2. In `deliver()`: for `desc.isWeak && r.isLeader` in COMMIT phase, skip the cleanup path (`desc.msgs <- slot`, `r.delivered.Set`). Execute the command but let `asyncReplicateWeak` own the cleanup.
+3. In `asyncReplicateWeak`: after sending the reply, do the cleanup:
+   - `r.values.Set(desc.cmdId.String(), desc.val)` — save result for MSyncReply
+   - `r.delivered.Set(slotStr, struct{}{})` — mark delivered
+   - `desc.msgs <- slot` — trigger handler goroutine cleanup (`freeDesc`) and exit
+
+**Expected result**: Weak write latency ≈ 50-100ms (2 RTT with 25ms one-way delay). No more 2s timeouts.
+
+#### 37.2: Fix descriptor lifecycle for weak commands on leader (CURP-HO) `curp-ho/curp-ho.go`
+
+**Same root cause** as 37.1, applied to two functions:
+
+1. `asyncReplicateWeak`: replace `r.handleAccept(acc, desc)` with `desc.msgs <- acc`. In `deliver()`: skip cleanup for `desc.isWeak && r.isLeader`. After async wait, do cleanup via `desc.msgs <- slot`.
+2. `asyncReplicateCausal`: same pattern. Replace `r.handleAccept(acc, desc)` with `desc.msgs <- acc`. Skip cleanup in deliver(). Async does cleanup.
+3. Also remove the duplicate `syncLeader` call — deliver() calls `syncLeader` for leader in COMMIT phase (line 908), and asyncReplicateCausal also calls `syncLeader` (moved outside `if !desc.applied`). Fix: remove `syncLeader` from deliver() for `desc.isWeak` commands, let async handle it.
+
+#### 37.3: Port MWeakRead/MWeakReadReply to CURP-HO `curp-ho/defs.go`
+
+Add the same message types from CURP-HT:
+- `MWeakRead { CommandId int32, ClientId int32, Key state.Key }` — 16B fixed
+- `MWeakReadReply { Replica int32, Ballot int32, CmdId CommandId, Rep []byte, Version int32 }` — variable
+- Marshal/Unmarshal, BinarySize, New(), Cache pool
+- Register RPC channels: `weakReadChan`, `weakReadReplyChan`, `weakReadRPC`, `weakReadReplyRPC`
+- Wire into `CommunicationSupply` and `initCs()`
+
+#### 37.4: Add handleWeakRead to CURP-HO replica `curp-ho/curp-ho.go`
+
+- Add `keyVersions cmap.ConcurrentMap` to Replica struct (init in `New()`)
+- Update `keyVersions` in `deliver()` after execution: `if desc.cmd.Op == state.PUT { keyVersions.Set(key, slot) }`
+- Add run loop case: `case m := <-r.cs.weakReadChan: r.handleWeakRead(m.(*MWeakRead))`
+- `handleWeakRead()`: read committed state via `ComputeResult`, look up `keyVersions`, return `MWeakReadReply`
+- ALL replicas handle MWeakRead (same as CURP-HT)
+
+#### 37.5: Port client local cache to CURP-HO `curp-ho/client.go`
+
+Add to Client struct:
+- `localCache map[int64]cacheEntry` — key → (value, version)
+- `weakPendingKeys map[int32]int64` — seqnum → key (for weak writes and reads)
+- `weakPendingValues map[int32]state.Value` — seqnum → value (for weak writes)
+- `strongPendingKeys map[int32]int64` — seqnum → key (for strong ops)
+- `lastReplySlot int32` — slot from last leader MReply
+- `maxVersion int32` — highest version seen
+- Rename `lastWeakSeqNum` → `lastWeakWriteSeqNum` (only track writes for causal chain)
+
+Update handlers:
+- `handleWeakReply`: update cache with (key, value, slot) from weak write commit
+- `handleCausalReply`: no cache update (1-RTT speculative, no slot)
+- `handleSyncReply`: update cache from strong slow-path (use rep.Slot)
+- `handleFastPathAcks`/`handleSlowPathAcks`: update cache from strong ops
+- `SendStrongWrite`/`SendStrongRead`: track key in `strongPendingKeys`
+- `SendWeakWrite` (via `SendCausalWrite`): track key/value in `weakPendingKeys`/`weakPendingValues`
+
+Change weak read routing:
+- `SendWeakRead`: send `MWeakRead` to ClosestId (nearest replica) instead of `MCausalPropose` broadcast
+- Add `handleWeakReadReply`: merge replica response with local cache (max-version rule)
+- Add `weakReadReplyChan` case in `handleMsgs`
+
+#### 37.6: Tests & Verification
+
+- `go build -o swiftpaxos .` — compiles
+- `go test ./curp-ht/ -v` — all tests pass
+- `go test ./curp-ho/ -v` — all tests pass (add serialization tests for MWeakRead/MWeakReadReply)
+- `go test ./...` — no regressions
+- `./run-multi-client.sh -c multi-client.conf -d` with `protocol: curpht` — produces valid results
+- `./run-multi-client.sh -c multi-client.conf -d` with `protocol: curpho` — produces valid results
+- Expected CURP-HT weak write latency: ~50-100ms (2 RTT)
+- Expected CURP-HT weak read latency: ~0ms (local, nearest replica)
+- Expected CURP-HO causal write latency: ~0ms (1 RTT, co-located bound replica)
+- Expected CURP-HO weak read latency: ~0ms (1 RTT, nearest replica)
+
+**Execution order**: 37.1 → 37.2 → 37.3 → 37.4 → 37.5 → 37.6
 
 ---
 

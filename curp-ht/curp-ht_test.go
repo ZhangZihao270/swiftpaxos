@@ -19,6 +19,7 @@ func TestMReplySerialization(t *testing.T) {
 		CmdId:   CommandId{ClientId: 100, SeqNum: 42},
 		Rep:     []byte("test-reply-data"),
 		Ok:      TRUE,
+		Slot:    77,
 	}
 
 	var buf bytes.Buffer
@@ -45,6 +46,9 @@ func TestMReplySerialization(t *testing.T) {
 	if restored.Ok != original.Ok {
 		t.Errorf("Ok mismatch: got %d, want %d", restored.Ok, original.Ok)
 	}
+	if restored.Slot != original.Slot {
+		t.Errorf("Slot mismatch: got %d, want %d", restored.Slot, original.Slot)
+	}
 }
 
 // TestMReplyEmptyRep tests MReply with empty Rep field
@@ -55,6 +59,7 @@ func TestMReplyEmptyRep(t *testing.T) {
 		CmdId:   CommandId{ClientId: 1, SeqNum: 1},
 		Rep:     []byte{},
 		Ok:      FALSE,
+		Slot:    0,
 	}
 
 	var buf bytes.Buffer
@@ -87,6 +92,7 @@ func TestMReplyLargeRep(t *testing.T) {
 		CmdId:   CommandId{ClientId: 50, SeqNum: 200},
 		Rep:     largeRep,
 		Ok:      TRUE,
+		Slot:    12345,
 	}
 
 	var buf bytes.Buffer
@@ -110,6 +116,7 @@ func TestMSyncReplySerialization(t *testing.T) {
 		Ballot:  7,
 		CmdId:   CommandId{ClientId: 200, SeqNum: 99},
 		Rep:     []byte("sync-reply-data"),
+		Slot:    150,
 	}
 
 	var buf bytes.Buffer
@@ -129,6 +136,9 @@ func TestMSyncReplySerialization(t *testing.T) {
 	}
 	if !bytes.Equal(restored.Rep, original.Rep) {
 		t.Errorf("Rep mismatch: got %v, want %v", restored.Rep, original.Rep)
+	}
+	if restored.Slot != original.Slot {
+		t.Errorf("Slot mismatch: got %d, want %d", restored.Slot, original.Slot)
 	}
 }
 
@@ -236,6 +246,7 @@ func BenchmarkMReplyMarshal(b *testing.B) {
 		CmdId:   CommandId{ClientId: 100, SeqNum: 42},
 		Rep:     make([]byte, 100),
 		Ok:      TRUE,
+		Slot:    50,
 	}
 	var buf bytes.Buffer
 
@@ -253,6 +264,7 @@ func BenchmarkMReplyUnmarshal(b *testing.B) {
 		CmdId:   CommandId{ClientId: 100, SeqNum: 42},
 		Rep:     make([]byte, 100),
 		Ok:      TRUE,
+		Slot:    50,
 	}
 	var buf bytes.Buffer
 	msg.Marshal(&buf)
@@ -272,6 +284,7 @@ func BenchmarkMReplyRoundTrip(b *testing.B) {
 		CmdId:   CommandId{ClientId: 100, SeqNum: 42},
 		Rep:     make([]byte, 100),
 		Ok:      TRUE,
+		Slot:    50,
 	}
 	var buf bytes.Buffer
 
@@ -318,6 +331,7 @@ func BenchmarkMWeakReplyMarshal(b *testing.B) {
 		Ballot:  5,
 		CmdId:   CommandId{ClientId: 100, SeqNum: 42},
 		Rep:     make([]byte, 100),
+		Slot:    42,
 	}
 	var buf bytes.Buffer
 
@@ -406,7 +420,8 @@ func TestMWeakReplySerialization(t *testing.T) {
 			ClientId: 100,
 			SeqNum:   42,
 		},
-		Rep: []byte("result-value"),
+		Rep:  []byte("result-value"),
+		Slot: 33,
 	}
 
 	// Serialize
@@ -435,6 +450,9 @@ func TestMWeakReplySerialization(t *testing.T) {
 	}
 	if !bytes.Equal(restored.Rep, original.Rep) {
 		t.Errorf("Rep mismatch: got %v, want %v", restored.Rep, original.Rep)
+	}
+	if restored.Slot != original.Slot {
+		t.Errorf("Slot mismatch: got %d, want %d", restored.Slot, original.Slot)
 	}
 }
 
@@ -631,7 +649,8 @@ func TestMWeakReplyWithEmptyRep(t *testing.T) {
 			ClientId: 1,
 			SeqNum:   1,
 		},
-		Rep: []byte{},
+		Rep:  []byte{},
+		Slot: 5,
 	}
 
 	var buf bytes.Buffer
@@ -645,6 +664,9 @@ func TestMWeakReplyWithEmptyRep(t *testing.T) {
 
 	if len(restored.Rep) != 0 {
 		t.Errorf("Rep should be empty, got %v", restored.Rep)
+	}
+	if restored.Slot != original.Slot {
+		t.Errorf("Slot mismatch: got %d, want %d", restored.Slot, original.Slot)
 	}
 }
 
@@ -985,7 +1007,8 @@ func TestWeakReplyMessageFields(t *testing.T) {
 			ClientId: 100,
 			SeqNum:   42,
 		},
-		Rep: []byte("response-data"),
+		Rep:  []byte("response-data"),
+		Slot: 99,
 	}
 
 	// Verify all fields
@@ -1003,6 +1026,9 @@ func TestWeakReplyMessageFields(t *testing.T) {
 	}
 	if !bytes.Equal(msg.Rep, []byte("response-data")) {
 		t.Errorf("Rep mismatch")
+	}
+	if msg.Slot != 99 {
+		t.Errorf("Slot = %d, want 99", msg.Slot)
 	}
 }
 
@@ -1161,181 +1187,340 @@ func TestMixedStrongWeakSlotOrdering(t *testing.T) {
 }
 
 // ============================================================================
-// Phase 10: Non-Blocking Speculative Reads Tests
+// Phase 36: MWeakRead / MWeakReadReply Serialization Tests
 // ============================================================================
 
-// TestPendingWriteKey verifies the key generation for pending writes
-func TestPendingWriteKey(t *testing.T) {
-	r := &Replica{} // Create minimal replica for testing
-
-	key1 := r.pendingWriteKey(100, state.Key(42))
-	expected := "100:42"
-	if key1 != expected {
-		t.Errorf("pendingWriteKey(100, 42) = %q, want %q", key1, expected)
+// TestMWeakReadSerialization tests MWeakRead Marshal/Unmarshal round-trip
+func TestMWeakReadSerialization(t *testing.T) {
+	original := &MWeakRead{
+		CommandId: 42,
+		ClientId:  100,
+		Key:       state.Key(999),
 	}
 
-	key2 := r.pendingWriteKey(200, state.Key(999))
-	expected2 := "200:999"
-	if key2 != expected2 {
-		t.Errorf("pendingWriteKey(200, 999) = %q, want %q", key2, expected2)
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	if buf.Len() != 16 {
+		t.Errorf("MWeakRead should serialize to 16 bytes, got %d", buf.Len())
+	}
+
+	restored := &MWeakRead{}
+	err := restored.Unmarshal(&buf)
+	if err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if restored.CommandId != original.CommandId {
+		t.Errorf("CommandId mismatch: got %d, want %d", restored.CommandId, original.CommandId)
+	}
+	if restored.ClientId != original.ClientId {
+		t.Errorf("ClientId mismatch: got %d, want %d", restored.ClientId, original.ClientId)
+	}
+	if restored.Key != original.Key {
+		t.Errorf("Key mismatch: got %d, want %d", restored.Key, original.Key)
 	}
 }
 
-// TestPendingWriteStruct verifies the pendingWrite struct
-func TestPendingWriteStruct(t *testing.T) {
-	pw := &pendingWrite{
-		seqNum: 5,
-		value:  state.Value([]byte("test-value")),
+// TestMWeakReadBinarySize tests MWeakRead fixed size
+func TestMWeakReadBinarySize(t *testing.T) {
+	m := &MWeakRead{}
+	size, known := m.BinarySize()
+	if !known {
+		t.Error("MWeakRead should have known binary size")
+	}
+	if size != 16 {
+		t.Errorf("MWeakRead BinarySize = %d, want 16", size)
+	}
+}
+
+// TestMWeakReadNew tests New() method
+func TestMWeakReadNew(t *testing.T) {
+	m := &MWeakRead{}
+	newObj := m.New()
+	if newObj == nil {
+		t.Fatal("New() returned nil")
+	}
+	if _, ok := newObj.(*MWeakRead); !ok {
+		t.Fatal("New() returned wrong type")
+	}
+}
+
+// TestMWeakReadReplyNew tests New() method
+func TestMWeakReadReplyNew(t *testing.T) {
+	m := &MWeakReadReply{}
+	newObj := m.New()
+	if newObj == nil {
+		t.Fatal("New() returned nil")
+	}
+	if _, ok := newObj.(*MWeakReadReply); !ok {
+		t.Fatal("New() returned wrong type")
+	}
+}
+
+// TestMWeakReadReplySerialization tests MWeakReadReply Marshal/Unmarshal round-trip
+func TestMWeakReadReplySerialization(t *testing.T) {
+	original := &MWeakReadReply{
+		Replica: 2,
+		Ballot:  10,
+		CmdId:   CommandId{ClientId: 100, SeqNum: 42},
+		Rep:     []byte("read-result"),
+		Version: 77,
 	}
 
-	if pw.seqNum != 5 {
-		t.Errorf("seqNum = %d, want 5", pw.seqNum)
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	restored := &MWeakReadReply{}
+	err := restored.Unmarshal(&buf)
+	if err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
 	}
-	if !bytes.Equal(pw.value, []byte("test-value")) {
+
+	if restored.Replica != original.Replica {
+		t.Errorf("Replica mismatch: got %d, want %d", restored.Replica, original.Replica)
+	}
+	if restored.Ballot != original.Ballot {
+		t.Errorf("Ballot mismatch: got %d, want %d", restored.Ballot, original.Ballot)
+	}
+	if restored.CmdId != original.CmdId {
+		t.Errorf("CmdId mismatch: got %v, want %v", restored.CmdId, original.CmdId)
+	}
+	if !bytes.Equal(restored.Rep, original.Rep) {
+		t.Errorf("Rep mismatch: got %v, want %v", restored.Rep, original.Rep)
+	}
+	if restored.Version != original.Version {
+		t.Errorf("Version mismatch: got %d, want %d", restored.Version, original.Version)
+	}
+}
+
+// TestMWeakReadReplyEmptyRep tests MWeakReadReply with empty Rep
+func TestMWeakReadReplyEmptyRep(t *testing.T) {
+	original := &MWeakReadReply{
+		Replica: 0,
+		Ballot:  0,
+		CmdId:   CommandId{ClientId: 1, SeqNum: 1},
+		Rep:     []byte{},
+		Version: 0,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	restored := &MWeakReadReply{}
+	err := restored.Unmarshal(&buf)
+	if err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if len(restored.Rep) != 0 {
+		t.Errorf("Rep should be empty, got %v", restored.Rep)
+	}
+	if restored.Version != 0 {
+		t.Errorf("Version should be 0, got %d", restored.Version)
+	}
+}
+
+// TestMWeakReadReplyBinarySize tests BinarySize
+func TestMWeakReadReplyBinarySize(t *testing.T) {
+	m := &MWeakReadReply{}
+	_, known := m.BinarySize()
+	if known {
+		t.Error("MWeakReadReply should have unknown binary size (variable Rep)")
+	}
+}
+
+// TestMWeakReadCache tests object pool for MWeakRead
+func TestMWeakReadCache(t *testing.T) {
+	cache := NewMWeakReadCache()
+
+	obj1 := cache.Get()
+	if obj1 == nil {
+		t.Fatal("Get from empty cache returned nil")
+	}
+
+	obj1.CommandId = 123
+	cache.Put(obj1)
+
+	obj2 := cache.Get()
+	if obj2 == nil {
+		t.Fatal("Get after Put returned nil")
+	}
+}
+
+// TestMWeakReadReplyCache tests object pool for MWeakReadReply
+func TestMWeakReadReplyCache(t *testing.T) {
+	cache := NewMWeakReadReplyCache()
+
+	obj1 := cache.Get()
+	if obj1 == nil {
+		t.Fatal("Get from empty cache returned nil")
+	}
+
+	obj1.Replica = 5
+	cache.Put(obj1)
+
+	obj2 := cache.Get()
+	if obj2 == nil {
+		t.Fatal("Get after Put returned nil")
+	}
+}
+
+// ============================================================================
+// Phase 36: Client Local Cache Tests
+// ============================================================================
+
+// TestClientCacheMergeReplicaWins tests that replica value wins when version is higher
+func TestClientCacheMergeReplicaWins(t *testing.T) {
+	cache := make(map[int64]cacheEntry)
+
+	// Cache has version 5
+	cache[100] = cacheEntry{value: []byte("old"), version: 5}
+
+	// Replica returns version 10 (higher)
+	replicaVal := state.Value([]byte("new"))
+	replicaVer := int32(10)
+
+	cached := cache[100]
+	var finalVal state.Value
+	var finalVer int32
+	if cached.version > replicaVer {
+		finalVal = cached.value
+		finalVer = cached.version
+	} else {
+		finalVal = replicaVal
+		finalVer = replicaVer
+	}
+
+	if !bytes.Equal(finalVal, []byte("new")) {
+		t.Errorf("Expected replica value 'new', got %v", finalVal)
+	}
+	if finalVer != 10 {
+		t.Errorf("Expected version 10, got %d", finalVer)
+	}
+}
+
+// TestClientCacheMergeCacheWins tests that cache value wins when version is higher
+func TestClientCacheMergeCacheWins(t *testing.T) {
+	cache := make(map[int64]cacheEntry)
+
+	// Cache has version 10
+	cache[100] = cacheEntry{value: []byte("cached"), version: 10}
+
+	// Replica returns version 5 (lower)
+	replicaVal := state.Value([]byte("stale"))
+	replicaVer := int32(5)
+
+	cached := cache[100]
+	var finalVal state.Value
+	var finalVer int32
+	if cached.version > replicaVer {
+		finalVal = cached.value
+		finalVer = cached.version
+	} else {
+		finalVal = replicaVal
+		finalVer = replicaVer
+	}
+
+	if !bytes.Equal(finalVal, []byte("cached")) {
+		t.Errorf("Expected cached value 'cached', got %v", finalVal)
+	}
+	if finalVer != 10 {
+		t.Errorf("Expected version 10, got %d", finalVer)
+	}
+}
+
+// TestClientCacheMergeNoCache tests merge when cache has no entry for the key
+func TestClientCacheMergeNoCache(t *testing.T) {
+	cache := make(map[int64]cacheEntry)
+
+	// No cache entry for key 100
+	replicaVal := state.Value([]byte("from-replica"))
+	replicaVer := int32(3)
+
+	cached, hasCached := cache[100]
+	var finalVal state.Value
+	var finalVer int32
+	if hasCached && cached.version > replicaVer {
+		finalVal = cached.value
+		finalVer = cached.version
+	} else {
+		finalVal = replicaVal
+		finalVer = replicaVer
+	}
+
+	if !bytes.Equal(finalVal, []byte("from-replica")) {
+		t.Errorf("Expected replica value, got %v", finalVal)
+	}
+	if finalVer != 3 {
+		t.Errorf("Expected version 3, got %d", finalVer)
+	}
+}
+
+// TestClientCacheEntryStruct tests cacheEntry struct fields
+func TestClientCacheEntryStruct(t *testing.T) {
+	entry := cacheEntry{
+		value:   state.Value([]byte("test-value")),
+		version: 42,
+	}
+
+	if !bytes.Equal(entry.value, []byte("test-value")) {
 		t.Errorf("value mismatch")
 	}
-}
-
-// TestSameClientReadAfterWrite tests that a read sees pending write from same client
-// This is the key test for Phase 10 optimization
-func TestSameClientReadAfterWrite(t *testing.T) {
-	// Simulate the scenario:
-	// Client 100 sends: W1 = PUT(key=1, "A"), R1 = GET(key=1) with CausalDep=W1
-	// R1 should return "A" immediately via pending writes
-
-	st := state.InitState()
-
-	// Initial state: key 1 doesn't exist
-	getCmd := state.Command{Op: state.GET, K: state.Key(1), V: state.NIL()}
-	result := getCmd.ComputeResult(st)
-	if len(result) != 0 {
-		t.Error("Key should not exist initially")
-	}
-
-	// Simulate pending write: PUT(key=1, "A") with seqNum=1
-	// In real implementation, this would be tracked in pendingWrites map
-	pendingValue := state.Value([]byte("A"))
-	pw := &pendingWrite{seqNum: 1, value: pendingValue}
-
-	// Now simulate a read with CausalDep=1
-	// The read should see the pending value, not the committed state
-	if pw.seqNum <= 1 { // CausalDep=1
-		// Read sees pending value
-		if !bytes.Equal(pw.value, []byte("A")) {
-			t.Errorf("Read should see pending value 'A', got %v", pw.value)
-		}
+	if entry.version != 42 {
+		t.Errorf("version = %d, want 42", entry.version)
 	}
 }
 
-// TestPendingWritesCleanup verifies that pending writes are cleaned up after commit
-func TestPendingWritesCleanup(t *testing.T) {
-	// This is a conceptual test - full integration requires replica setup
-	// We verify the cleanup logic: after commit, pending write should be removed
+// TestClientCacheWeakWriteUpdate tests cache update after weak write commit
+func TestClientCacheWeakWriteUpdate(t *testing.T) {
+	cache := make(map[int64]cacheEntry)
 
-	pw := &pendingWrite{seqNum: 5, value: state.Value([]byte("pending"))}
+	// Simulate weak write commit: key=100, value="written", slot=5
+	key := int64(100)
+	val := state.Value([]byte("written"))
+	slot := int32(5)
 
-	// Before cleanup
-	if pw.seqNum != 5 {
-		t.Error("Pending write should exist before cleanup")
+	cache[key] = cacheEntry{value: val, version: slot}
+
+	// Verify
+	entry, exists := cache[key]
+	if !exists {
+		t.Fatal("Cache entry should exist after weak write")
 	}
-
-	// After cleanup (simulate by setting to nil)
-	// In real implementation, r.removePendingWrite() is called
-	pw = nil
-	if pw != nil {
-		t.Error("Pending write should be nil after cleanup")
+	if !bytes.Equal(entry.value, []byte("written")) {
+		t.Errorf("value mismatch: got %v", entry.value)
 	}
-}
-
-// TestCrossClientIsolation verifies that clients can't see each other's pending writes
-func TestCrossClientIsolation(t *testing.T) {
-	// Client A (100) has pending write on key 1
-	// Client B (200) reads key 1 - should NOT see A's pending write
-
-	r := &Replica{} // Create minimal replica for testing
-	clientA := int32(100)
-	clientB := int32(200)
-	key := state.Key(1)
-
-	// Client A's pending write
-	keyA := r.pendingWriteKey(clientA, key)
-	keyB := r.pendingWriteKey(clientB, key)
-
-	// Keys should be different
-	if keyA == keyB {
-		t.Error("Different clients should have different pending write keys")
-	}
-
-	// Verify key format includes client ID
-	if keyA != "100:1" {
-		t.Errorf("Client A key = %q, want '100:1'", keyA)
-	}
-	if keyB != "200:1" {
-		t.Errorf("Client B key = %q, want '200:1'", keyB)
+	if entry.version != 5 {
+		t.Errorf("version = %d, want 5", entry.version)
 	}
 }
 
-// TestPendingWriteSequenceOrdering verifies newer writes overwrite older ones
-func TestPendingWriteSequenceOrdering(t *testing.T) {
-	// If client sends W1 then W2 on same key, W2 should be the pending write
+// TestClientCacheStrongUpdate tests cache update after strong op completion
+func TestClientCacheStrongUpdate(t *testing.T) {
+	cache := make(map[int64]cacheEntry)
+	maxVersion := int32(0)
 
-	pw1 := &pendingWrite{seqNum: 1, value: state.Value([]byte("v1"))}
-	pw2 := &pendingWrite{seqNum: 2, value: state.Value([]byte("v2"))}
+	// Simulate strong fast-path: key=200, slot from reply=10
+	key := int64(200)
+	val := state.Value([]byte("strong-value"))
+	slot := int32(10)
 
-	// W2 should overwrite W1 (seqNum 2 > 1)
-	if pw2.seqNum <= pw1.seqNum {
-		t.Error("W2.seqNum should be greater than W1.seqNum")
+	if slot > maxVersion {
+		maxVersion = slot
 	}
+	cache[key] = cacheEntry{value: val, version: slot}
 
-	// The latest pending write should be used
-	latest := pw2
-	if !bytes.Equal(latest.value, []byte("v2")) {
-		t.Errorf("Latest value should be 'v2', got %v", latest.value)
+	// Verify
+	if maxVersion != 10 {
+		t.Errorf("maxVersion = %d, want 10", maxVersion)
 	}
-}
-
-// TestComputeSpeculativeResultGETWithPending tests GET with pending writes
-func TestComputeSpeculativeResultGETWithPending(t *testing.T) {
-	// This is a logic test for the computeSpeculativeResult behavior
-	// When there's a pending write matching the key and satisfying CausalDep,
-	// it should return the pending value instead of committed state
-
-	st := state.InitState()
-
-	// Committed state: key 1 = "committed"
-	commitCmd := state.Command{Op: state.PUT, K: state.Key(1), V: state.Value([]byte("committed"))}
-	commitCmd.Execute(st)
-
-	// Pending write: key 1 = "pending" with seqNum=5
-	pendingVal := state.Value([]byte("pending"))
-	pw := &pendingWrite{seqNum: 5, value: pendingVal}
-
-	// A read with CausalDep=5 should see the pending value
-	// (simulating the logic in computeSpeculativeResult)
-	causalDep := int32(5)
-	if pw.seqNum <= causalDep {
-		// Should use pending value
-		if !bytes.Equal(pw.value, []byte("pending")) {
-			t.Error("Should return pending value when CausalDep is satisfied")
-		}
+	entry := cache[key]
+	if !bytes.Equal(entry.value, []byte("strong-value")) {
+		t.Errorf("value mismatch")
 	}
-
-	// A read with CausalDep=4 should NOT see this pending value
-	causalDep = 4
-	if pw.seqNum <= causalDep {
-		t.Error("Should NOT return pending value when CausalDep is not satisfied")
-	}
-}
-
-// TestComputeSpeculativeResultPUT tests PUT returns NIL
-func TestComputeSpeculativeResultPUT(t *testing.T) {
-	st := state.InitState()
-	putCmd := state.Command{Op: state.PUT, K: state.Key(1), V: state.Value([]byte("test"))}
-
-	// ComputeResult for PUT should return NIL
-	result := putCmd.ComputeResult(st)
-	if len(result) != 0 {
-		t.Errorf("ComputeResult(PUT) should return NIL, got %v", result)
+	if entry.version != 10 {
+		t.Errorf("version = %d, want 10", entry.version)
 	}
 }
 

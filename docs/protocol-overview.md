@@ -6,7 +6,7 @@ A natural-language description of both hybrid consistency protocols.
 
 ## CURP-HT (Hybrid + Transparency)
 
-**Key Idea**: Weak ops go to leader only; strong ops broadcast to all. The leader's log serialization satisfies hybrid consistency (C1–C3) without modifying the strong operation code path.
+**Key Idea**: Weak writes go to the leader and wait for full consensus before completing. Weak reads go to the nearest replica and merge with the client's local cache using slot-based versioning. Strong ops are completely unchanged from the original CURP protocol (transparency).
 
 ### Strong Operations (Linearizable)
 
@@ -18,20 +18,43 @@ Meanwhile, the leader coordinates consensus in the background: it sends an Accep
 
 Non-leaders are entirely unaware of weak operations. Their witness pools contain only strong commands, and their conflict detection logic is unchanged from the original CURP protocol. This is how CURP-HT achieves transparency.
 
-### Weak Operations (Causal)
+### Weak Writes
 
-Client sends a propose to the **leader only**. The leader assigns a slot, then **immediately** replies with a speculative result — no quorum, no waiting. For a weak write, the reply value is NIL; for a weak read, the leader checks its `pendingWrites` map for the same client's uncommitted writes on the same key (read-your-writes), and if found, returns that pending value; otherwise it reads committed state.
+Client sends a weak write to the **leader only**. The leader assigns a slot in its log, replicates the entry through the standard Accept-Commit cycle, executes it in slot order, and only then replies to the client with a commit confirmation that includes the **slot number**. The client updates its local cache with the written key-value pair and the slot number as the version.
 
-Replication happens asynchronously in the background. The leader sends Accept to other replicas, waits for commit, then executes the command in slot order. Execution also respects the per-client causal chain: each weak command carries a `CausalDep` (the SeqNum of this client's previous weak command), and the leader waits for that dependency to be executed before executing the current one.
+Weak write latency is 2 RTTs to the leader (1 RTT for the client's propose to reach the leader + 1 RTT for the Accept-Commit cycle). This ensures that every weak write is fully committed and executed before the client can issue subsequent operations.
 
-Because weak commands only go to the leader, they have low network overhead but their latency equals the round-trip time to the leader.
+### Weak Reads
+
+Client sends a weak read to the **nearest replica** (not the leader). The nearest replica reads from its committed state and returns `(value, version)`, where version is the slot number of the last committed write to that key. The client then **merges** this result with its local cache to determine the final read value.
+
+Merge rule: compare the replica's version with the client's cached version for the same key. The higher version wins:
+
+- If `replica_version >= cache_version`: use the replica's value (the replica has fresher state).
+- If `replica_version < cache_version`: use the client's cached value (the replica hasn't caught up yet).
+
+The client updates its local cache with the merged result.
+
+Weak read latency is 1 RTT to the nearest replica, regardless of leader placement.
+
+### Client Local Cache
+
+The client maintains a local cache: `key → (value, version)`, where version is the slot number of the last write to that key. The cache is updated from three sources:
+
+1. **Weak write commit**: When the leader confirms a weak write with its slot number, the client inserts `(key, value, slot)` into the cache.
+2. **Strong write commit**: When a strong write completes (fast or slow path), the client inserts `(key, value, slot)` into the cache.
+3. **Weak read merge**: After merging with the nearest replica's response, the cache is updated with the winning `(value, version)`.
+4. **Strong read result**: When a strong read completes (fast or slow path), the result and its version are added to the cache.
+
+The slot number provides a **total order** over all writes because the leader assigns slots monotonically. This makes version comparison straightforward — no vector clocks needed.
+
+Cache entries can be evicted when the nearest replica's committed state is known to have caught up. The nearest replica can piggyback its current committed index on read responses; when `replica_committed_index >= cached_version` for an entry, that entry can be safely removed.
 
 ### Satisfying Hybrid Consistency (C1–C3)
 
-All operations (weak and strong) are assigned slots in the leader's log:
-
-- **C1 & C2**: A weak write from a given session occupies an earlier log slot than any subsequent strong operation from the same session. Log-ordered replication ensures the weak write is committed before the strong operation. Execution in slot order guarantees the strong operation observes the correct state.
-- **C3**: Weak writes are processed only at the leader and remain invisible to other replicas until committed. Cross-session causal chains at non-leader replicas cannot include unreplicated weak writes.
+- **C1 (same-session read-from)**: Weak writes complete only after full consensus and execution. When a subsequent weak read on the same key is issued, the client's local cache contains the write's value with its slot number. Even if the nearest replica hasn't caught up yet, the merge rule returns the client's cached value (higher version). If a subsequent strong read is issued, the committed state at the leader already reflects the weak write, so the speculative result is correct.
+- **C2 (same-session causal delivery)**: Because weak writes are committed before the client can issue the next operation, all preceding weak writes are in the committed state when a strong write is issued. The strong write occupies a later log slot, and log-ordered execution guarantees correct ordering.
+- **C3 (cross-session visibility barrier)**: Weak writes are sent only to the leader and remain invisible to other replicas until committed through the Accept-Commit cycle. The nearest replica's committed state includes only fully replicated writes, so no uncommitted weak writes can leak into cross-session causal chains.
 
 ### Conflict Detection
 
@@ -40,7 +63,58 @@ Non-leaders maintain an `unsynced` map keyed by the operation's key. Each entry 
 - Counter > 0 → conflict → `Ok=FALSE`
 - Counter = 0 → no conflict → `Ok=TRUE`
 
-Weak commands do not appear in the non-leader's unsynced map (they only go to the leader), so they never cause conflicts for strong commands at non-leaders.
+Weak commands do not appear in the non-leader's unsynced map (weak writes go only to the leader, weak reads go to the nearest replica without entering any witness pool), so they never cause conflicts for strong commands at non-leaders.
+
+### Example Scenarios
+
+**Scenario 1: Read-your-writes via cache (weak write → weak read, same key)**
+```
+Client issues: WeakWrite(x=1) → WeakRead(x)
+
+1. WeakWrite(x=1) → leader assigns slot=5, Accept-Commit cycle, executes
+2. Leader replies with commit confirmation (slot=5)
+3. Client cache: {x → (1, version=5)}
+4. WeakRead(x) → nearest replica, which is at committed index 3
+5. Nearest replica returns (old_value, version=2)
+6. Client merge: cache_version=5 > replica_version=2 → use cached value
+→ Returns 1 (correct, read-your-writes satisfied)
+```
+
+**Scenario 2: Replica has fresher state (cross-session)**
+```
+Session A: WeakWrite(x=1) at slot=5 (committed)
+Session B: WeakWrite(x=2) at slot=8 (committed)
+Session A: WeakRead(x)
+
+1. Session A's cache: {x → (1, version=5)}
+2. WeakRead(x) → nearest replica, which has applied up to slot=10
+3. Nearest replica returns (2, version=8)  [from Session B's write]
+4. Client merge: replica_version=8 > cache_version=5 → use replica's value
+→ Returns 2 (correct, observes the more recent write)
+```
+
+**Scenario 3: Monotonic reads**
+```
+Client previously did StrongRead(x) → got (3, version=12)
+Client now does WeakRead(x) → nearest replica at committed index 9
+
+1. Client cache: {x → (3, version=12)}
+2. Nearest replica returns (old_value, version=7)
+3. Client merge: cache_version=12 > replica_version=7 → use cached value
+→ Returns 3 (correct, monotonic read guaranteed)
+```
+
+**Scenario 4: Weak write → strong read (same key, C1)**
+```
+Client issues: WeakWrite(x=1) → StrongRead(x)
+
+1. WeakWrite(x=1) → leader, committed at slot=5, client gets confirmation
+2. Client cache: {x → (1, version=5)}
+3. StrongRead(x) broadcasts to all replicas
+4. Leader speculatively reads committed state → x=1 (slot=5 is committed)
+5. Non-leaders check witness pool (no strong conflicts) → Ok=TRUE
+→ Fast path succeeds, returns 1 (C1 satisfied)
+```
 
 ---
 
@@ -199,19 +273,21 @@ This is why CURP-HO achieves optimal weak latency: the bound replica is physical
 
 |  | CURP-HT | CURP-HO |
 |--|---------|---------|
-| **Weak command destination** | Leader only | All replicas (broadcast) |
-| **Weak completion source** | Leader | Bound replica (closest) |
-| **Weak latency** | 1-RTT to leader | 1-RTT to closest replica |
+| **Weak write destination** | Leader only | All replicas (broadcast) |
+| **Weak write latency** | 2-RTT to leader (full consensus) | 1-RTT to closest replica |
+| **Weak read destination** | Nearest replica | Bound replica (closest) |
+| **Weak read latency** | 1-RTT to nearest replica | 1-RTT to closest replica |
+| **Client-side state** | Local cache: key → (value, version) | Write set: uncommitted writes |
+| **Weak read mechanism** | Merge with local cache (max version) | Speculative reply from bound replica |
 | **Non-leader witness pool** | Strong commands only | Strong + weak commands |
-| **Network cost for weak ops** | Low (leader only) | Higher (broadcast to all) |
-| **Strong reads see weak writes?** | No (committed state only) | Yes (via ReadDep + leader speculative execution) |
+| **Network cost for weak writes** | Low (leader only) | Higher (broadcast to all) |
+| **Strong ops modified?** | No (transparency) | Yes (causal deps + ReadDep) |
 | **Witness checks for strong ops** | Per-key conflict (strong only) | Per-key conflict + per-session causal deps + per-key ReadDep |
-| **Client write set** | Not needed | Maintained; cleared on leader commit confirmation |
 | **Fast-path extra checks** | None | Causal dep check (all) + ReadDep consistency (reads) |
-| **Speculative execution on leader** | Reads committed state only | Reads committed state + uncommitted weak writes (same key) |
+| **Version mechanism** | Slot number (total order) | N/A (dependency-based) |
 | **HOT properties** | H + T | H + O |
 
 ### When to use which?
 
-- **CURP-HT**: When weak commands are infrequent or the leader is already close to clients. Simpler design, lower network overhead for weak ops, and strong operations are completely unchanged from the original CURP protocol (transparency).
-- **CURP-HO**: When weak command latency matters and clients are geographically distributed. The bound-replica mechanism ensures optimal latency regardless of leader placement. Causal dependency tracking ensures same-session weak writes are fault-tolerant before strong operations complete. ReadDep consistency ensures strong reads correctly observe same-key weak writes across sessions.
+- **CURP-HT**: When transparency and simplicity matter most. Strong operations are completely unchanged from the original CURP protocol. Weak reads achieve optimal latency via the nearest replica with client-side cache merge. Weak writes pay 2 RTTs but have low network overhead (leader only) and don't interfere with strong operations' fast path. Best for read-heavy weak workloads or when the leader is close to clients.
+- **CURP-HO**: When weak write latency matters and clients are geographically distributed. Both weak reads and writes complete in 1 RTT to the closest replica. Causal dependency tracking ensures same-session weak writes are fault-tolerant before strong operations complete. ReadDep consistency ensures strong reads correctly observe same-key weak writes across sessions. The cost is increased complexity in the strong operation code path.

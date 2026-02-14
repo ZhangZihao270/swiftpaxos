@@ -56,6 +56,7 @@ type MReply struct {
 	CmdId   CommandId
 	Rep     []byte
 	Ok      uint8
+	Slot    int32
 }
 
 type MAccept struct {
@@ -99,6 +100,7 @@ type MSyncReply struct {
 	Ballot  int32
 	CmdId   CommandId
 	Rep     []byte
+	Slot    int32
 }
 
 // MWeakPropose - Weak command propose (sent only to Leader)
@@ -110,12 +112,29 @@ type MWeakPropose struct {
 	CausalDep int32 // Sequence number of the previous weak command from this client (0 if none)
 }
 
-// MWeakReply - Weak command reply (Leader replies immediately)
+// MWeakReply - Weak command reply (Leader replies after commit with slot)
 type MWeakReply struct {
 	Replica int32
 	Ballot  int32
 	CmdId   CommandId
 	Rep     []byte
+	Slot    int32
+}
+
+// MWeakRead - Weak read request (sent to nearest replica)
+type MWeakRead struct {
+	CommandId int32
+	ClientId  int32
+	Key       state.Key
+}
+
+// MWeakReadReply - Weak read reply from nearest replica (value + version)
+type MWeakReadReply struct {
+	Replica int32
+	Ballot  int32
+	CmdId   CommandId
+	Rep     []byte
+	Version int32
 }
 
 func (m *MReply) New() fastrpc.Serializable {
@@ -158,6 +177,14 @@ func (m *MWeakReply) New() fastrpc.Serializable {
 	return new(MWeakReply)
 }
 
+func (m *MWeakRead) New() fastrpc.Serializable {
+	return new(MWeakRead)
+}
+
+func (m *MWeakReadReply) New() fastrpc.Serializable {
+	return new(MWeakReadReply)
+}
+
 type CommunicationSupply struct {
 	maxLatency time.Duration
 
@@ -171,8 +198,10 @@ type CommunicationSupply struct {
 	syncReplyChan chan fastrpc.Serializable
 
 	// Weak command channels
-	weakProposeChan chan fastrpc.Serializable
-	weakReplyChan   chan fastrpc.Serializable
+	weakProposeChan   chan fastrpc.Serializable
+	weakReplyChan     chan fastrpc.Serializable
+	weakReadChan      chan fastrpc.Serializable
+	weakReadReplyChan chan fastrpc.Serializable
 
 	replyRPC     uint8
 	acceptRPC    uint8
@@ -184,8 +213,10 @@ type CommunicationSupply struct {
 	syncReplyRPC uint8
 
 	// Weak command RPCs
-	weakProposeRPC uint8
-	weakReplyRPC   uint8
+	weakProposeRPC   uint8
+	weakReplyRPC     uint8
+	weakReadRPC      uint8
+	weakReadReplyRPC uint8
 }
 
 func initCs(cs *CommunicationSupply, t *fastrpc.Table) {
@@ -212,10 +243,14 @@ func initCs(cs *CommunicationSupply, t *fastrpc.Table) {
 	// Initialize weak command channels
 	cs.weakProposeChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
 	cs.weakReplyChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
+	cs.weakReadChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
+	cs.weakReadReplyChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
 
 	// Register weak command RPCs
 	cs.weakProposeRPC = t.Register(new(MWeakPropose), cs.weakProposeChan)
 	cs.weakReplyRPC = t.Register(new(MWeakReply), cs.weakReplyChan)
+	cs.weakReadRPC = t.Register(new(MWeakRead), cs.weakReadChan)
+	cs.weakReadReplyRPC = t.Register(new(MWeakReadReply), cs.weakReadReplyChan)
 }
 
 type byteReader interface {
@@ -359,6 +394,13 @@ func (t *MSyncReply) Marshal(wire io.Writer) {
 		wire.Write(b[0:wlen])
 	}
 	wire.Write(t.Rep)
+	bs = b[:4]
+	tmp32 = t.Slot
+	bs[0] = byte(tmp32)
+	bs[1] = byte(tmp32 >> 8)
+	bs[2] = byte(tmp32 >> 16)
+	bs[3] = byte(tmp32 >> 24)
+	wire.Write(bs)
 }
 
 func (t *MSyncReply) Unmarshal(rr io.Reader) error {
@@ -387,6 +429,11 @@ func (t *MSyncReply) Unmarshal(rr io.Reader) error {
 			return err
 		}
 	}
+	bs = b[:4]
+	if _, err := io.ReadAtLeast(wire, bs, 4); err != nil {
+		return err
+	}
+	t.Slot = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
 	return nil
 }
 
@@ -549,6 +596,13 @@ func (t *MReply) Marshal(wire io.Writer) {
 	bs = b[:1]
 	bs[0] = byte(t.Ok)
 	wire.Write(bs)
+	bs = b[:4]
+	tmp32 = t.Slot
+	bs[0] = byte(tmp32)
+	bs[1] = byte(tmp32 >> 8)
+	bs[2] = byte(tmp32 >> 16)
+	bs[3] = byte(tmp32 >> 24)
+	wire.Write(bs)
 }
 
 func (t *MReply) Unmarshal(rr io.Reader) error {
@@ -582,6 +636,11 @@ func (t *MReply) Unmarshal(rr io.Reader) error {
 		return err
 	}
 	t.Ok = uint8(bs[0])
+	bs = b[:4]
+	if _, err := io.ReadAtLeast(wire, bs, 4); err != nil {
+		return err
+	}
+	t.Slot = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
 	return nil
 }
 
@@ -1130,6 +1189,13 @@ func (t *MWeakReply) Marshal(wire io.Writer) {
 		wire.Write(b[0:wlen])
 	}
 	wire.Write(t.Rep)
+	bs = b[:4]
+	tmp32 = t.Slot
+	bs[0] = byte(tmp32)
+	bs[1] = byte(tmp32 >> 8)
+	bs[2] = byte(tmp32 >> 16)
+	bs[3] = byte(tmp32 >> 24)
+	wire.Write(bs)
 }
 
 func (t *MWeakReply) Unmarshal(rr io.Reader) error {
@@ -1158,5 +1224,197 @@ func (t *MWeakReply) Unmarshal(rr io.Reader) error {
 			return err
 		}
 	}
+	bs = b[:4]
+	if _, err := io.ReadAtLeast(wire, bs, 4); err != nil {
+		return err
+	}
+	t.Slot = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
+	return nil
+}
+
+// MWeakRead serialization
+
+func (t *MWeakRead) BinarySize() (nbytes int, sizeKnown bool) {
+	return 16, true // 4 + 4 + 8
+}
+
+type MWeakReadCache struct {
+	mu    sync.Mutex
+	cache []*MWeakRead
+}
+
+func NewMWeakReadCache() *MWeakReadCache {
+	c := &MWeakReadCache{}
+	c.cache = make([]*MWeakRead, 0)
+	return c
+}
+
+func (p *MWeakReadCache) Get() *MWeakRead {
+	var t *MWeakRead
+	p.mu.Lock()
+	if len(p.cache) > 0 {
+		t = p.cache[len(p.cache)-1]
+		p.cache = p.cache[0:(len(p.cache) - 1)]
+	}
+	p.mu.Unlock()
+	if t == nil {
+		t = &MWeakRead{}
+	}
+	return t
+}
+
+func (p *MWeakReadCache) Put(t *MWeakRead) {
+	p.mu.Lock()
+	p.cache = append(p.cache, t)
+	p.mu.Unlock()
+}
+
+func (t *MWeakRead) Marshal(wire io.Writer) {
+	var b [16]byte
+	var bs []byte
+	bs = b[:16]
+	tmp32 := t.CommandId
+	bs[0] = byte(tmp32)
+	bs[1] = byte(tmp32 >> 8)
+	bs[2] = byte(tmp32 >> 16)
+	bs[3] = byte(tmp32 >> 24)
+	tmp32 = t.ClientId
+	bs[4] = byte(tmp32)
+	bs[5] = byte(tmp32 >> 8)
+	bs[6] = byte(tmp32 >> 16)
+	bs[7] = byte(tmp32 >> 24)
+	tmp64 := int64(t.Key)
+	bs[8] = byte(tmp64)
+	bs[9] = byte(tmp64 >> 8)
+	bs[10] = byte(tmp64 >> 16)
+	bs[11] = byte(tmp64 >> 24)
+	bs[12] = byte(tmp64 >> 32)
+	bs[13] = byte(tmp64 >> 40)
+	bs[14] = byte(tmp64 >> 48)
+	bs[15] = byte(tmp64 >> 56)
+	wire.Write(bs)
+}
+
+func (t *MWeakRead) Unmarshal(wire io.Reader) error {
+	var b [16]byte
+	var bs []byte
+	bs = b[:16]
+	if _, err := io.ReadAtLeast(wire, bs, 16); err != nil {
+		return err
+	}
+	t.CommandId = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
+	t.ClientId = int32((uint32(bs[4]) | (uint32(bs[5]) << 8) | (uint32(bs[6]) << 16) | (uint32(bs[7]) << 24)))
+	t.Key = state.Key(uint64(bs[8]) | (uint64(bs[9]) << 8) | (uint64(bs[10]) << 16) | (uint64(bs[11]) << 24) | (uint64(bs[12]) << 32) | (uint64(bs[13]) << 40) | (uint64(bs[14]) << 48) | (uint64(bs[15]) << 56))
+	return nil
+}
+
+// MWeakReadReply serialization
+
+func (t *MWeakReadReply) BinarySize() (nbytes int, sizeKnown bool) {
+	return 0, false // Variable size due to Rep
+}
+
+type MWeakReadReplyCache struct {
+	mu    sync.Mutex
+	cache []*MWeakReadReply
+}
+
+func NewMWeakReadReplyCache() *MWeakReadReplyCache {
+	c := &MWeakReadReplyCache{}
+	c.cache = make([]*MWeakReadReply, 0)
+	return c
+}
+
+func (p *MWeakReadReplyCache) Get() *MWeakReadReply {
+	var t *MWeakReadReply
+	p.mu.Lock()
+	if len(p.cache) > 0 {
+		t = p.cache[len(p.cache)-1]
+		p.cache = p.cache[0:(len(p.cache) - 1)]
+	}
+	p.mu.Unlock()
+	if t == nil {
+		t = &MWeakReadReply{}
+	}
+	return t
+}
+
+func (p *MWeakReadReplyCache) Put(t *MWeakReadReply) {
+	p.mu.Lock()
+	p.cache = append(p.cache, t)
+	p.mu.Unlock()
+}
+
+func (t *MWeakReadReply) Marshal(wire io.Writer) {
+	var b [16]byte
+	var bs []byte
+	bs = b[:16]
+	tmp32 := t.Replica
+	bs[0] = byte(tmp32)
+	bs[1] = byte(tmp32 >> 8)
+	bs[2] = byte(tmp32 >> 16)
+	bs[3] = byte(tmp32 >> 24)
+	tmp32 = t.Ballot
+	bs[4] = byte(tmp32)
+	bs[5] = byte(tmp32 >> 8)
+	bs[6] = byte(tmp32 >> 16)
+	bs[7] = byte(tmp32 >> 24)
+	tmp32 = t.CmdId.ClientId
+	bs[8] = byte(tmp32)
+	bs[9] = byte(tmp32 >> 8)
+	bs[10] = byte(tmp32 >> 16)
+	bs[11] = byte(tmp32 >> 24)
+	tmp32 = t.CmdId.SeqNum
+	bs[12] = byte(tmp32)
+	bs[13] = byte(tmp32 >> 8)
+	bs[14] = byte(tmp32 >> 16)
+	bs[15] = byte(tmp32 >> 24)
+	wire.Write(bs)
+	bs = b[:]
+	alen1 := int64(len(t.Rep))
+	if wlen := binary.PutVarint(bs, alen1); wlen >= 0 {
+		wire.Write(b[0:wlen])
+	}
+	wire.Write(t.Rep)
+	bs = b[:4]
+	tmp32 = t.Version
+	bs[0] = byte(tmp32)
+	bs[1] = byte(tmp32 >> 8)
+	bs[2] = byte(tmp32 >> 16)
+	bs[3] = byte(tmp32 >> 24)
+	wire.Write(bs)
+}
+
+func (t *MWeakReadReply) Unmarshal(rr io.Reader) error {
+	var wire byteReader
+	var ok bool
+	if wire, ok = rr.(byteReader); !ok {
+		wire = bufio.NewReader(rr)
+	}
+	var b [16]byte
+	var bs []byte
+	bs = b[:16]
+	if _, err := io.ReadAtLeast(wire, bs, 16); err != nil {
+		return err
+	}
+	t.Replica = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
+	t.Ballot = int32((uint32(bs[4]) | (uint32(bs[5]) << 8) | (uint32(bs[6]) << 16) | (uint32(bs[7]) << 24)))
+	t.CmdId.ClientId = int32((uint32(bs[8]) | (uint32(bs[9]) << 8) | (uint32(bs[10]) << 16) | (uint32(bs[11]) << 24)))
+	t.CmdId.SeqNum = int32((uint32(bs[12]) | (uint32(bs[13]) << 8) | (uint32(bs[14]) << 16) | (uint32(bs[15]) << 24)))
+	alen1, err := binary.ReadVarint(wire)
+	if err != nil {
+		return err
+	}
+	t.Rep = make([]byte, alen1)
+	if alen1 > 0 {
+		if _, err := io.ReadFull(wire, t.Rep); err != nil {
+			return err
+		}
+	}
+	bs = b[:4]
+	if _, err := io.ReadAtLeast(wire, bs, 4); err != nil {
+		return err
+	}
+	t.Version = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
 	return nil
 }

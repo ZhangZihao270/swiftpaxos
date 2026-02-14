@@ -58,9 +58,9 @@ type Replica struct {
 	// Key: clientId, Value: last executed weak command seqnum
 	weakExecuted cmap.ConcurrentMap
 
-	// Track pending (uncommitted) writes per client for non-blocking speculative reads
-	// Key: "clientId:key", Value: *pendingWrite
-	pendingWrites cmap.ConcurrentMap
+	// Track per-key version (slot of last write) for weak read responses
+	// Key: key as string, Value: int (slot number)
+	keyVersions cmap.ConcurrentMap
 
 	// Notification channels for async waiting (replaces spin-waits)
 	commitNotify  map[int]chan struct{} // slot -> notification channel for commit
@@ -77,12 +77,6 @@ type Replica struct {
 	// Channel-based causal dep notification (replaces spin-wait in waitForWeakDep)
 	weakDepNotify map[int32]chan struct{}
 	weakDepMu     sync.Mutex
-}
-
-// pendingWrite tracks an uncommitted write for speculative read computation
-type pendingWrite struct {
-	seqNum int32
-	value  state.Value
 }
 
 type commandDesc struct {
@@ -151,8 +145,8 @@ func New(alias string, rid int, addrs []string, exec bool, pl, f int,
 		executed:  cmap.New(),
 		committed: cmap.New(),
 		delivered:     cmap.New(),
-		weakExecuted:  cmap.New(),
-		pendingWrites: cmap.New(),
+		weakExecuted: cmap.New(),
+		keyVersions:  cmap.New(),
 		history:       make([]commandStaticDesc, HISTORY_SIZE),
 
 		commitNotify:  make(map[int]chan struct{}),
@@ -313,11 +307,16 @@ func (r *Replica) run() {
 			sync := m.(*MSync)
 			val, exists := r.values.Get(sync.CmdId.String())
 			if exists {
+				slotVal := int32(0)
+				if s, ok := r.slots[sync.CmdId]; ok {
+					slotVal = int32(s)
+				}
 				rep := &MSyncReply{
 					Replica: r.Id,
 					Ballot:  r.ballot,
 					CmdId:   sync.CmdId,
 					Rep:     val.([]byte),
+					Slot:    slotVal,
 				}
 				r.sender.SendToClient(sync.CmdId.ClientId, rep, r.cs.syncReplyRPC)
 			}
@@ -328,6 +327,10 @@ func (r *Replica) run() {
 				r.handleWeakPropose(weakPropose)
 			}
 			// Non-Leader ignores weak propose (should not receive it)
+
+		case m := <-r.cs.weakReadChan:
+			weakRead := m.(*MWeakRead)
+			r.handleWeakRead(weakRead)
 		}
 	}
 }
@@ -599,6 +602,7 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 				Ballot:  r.ballot,
 				CmdId:   desc.cmdId,
 				Rep:     desc.val,
+				Slot:    int32(slot),
 			}
 			if desc.dep != -1 && !r.committed.Has(strconv.Itoa(desc.dep)) {
 				rep.Ok = FALSE
@@ -616,6 +620,11 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 			desc.val = desc.cmd.Execute(r.State)
 			desc.applied = true
 			r.executed.Set(slotStr, struct{}{})
+			// Track per-key version for weak read responses
+			if desc.cmd.Op == state.PUT {
+				keyStr := r.int32ToString(int32(desc.cmd.K))
+				r.keyVersions.Set(keyStr, slot)
+			}
 			r.notifyExecute(slot) // Notify waiters that slot is executed
 			go func(nextSlot int) {
 				r.deliverChan <- nextSlot
@@ -633,6 +642,7 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 						Ballot:  r.ballot,
 						CmdId:   desc.cmdId,
 						Rep:     desc.val,
+						Slot:    int32(slot),
 					}
 					r.sender.SendToClient(desc.propose.ClientId, rep, r.cs.syncReplyRPC)
 				}
@@ -826,36 +836,14 @@ func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
 	// 3. Create weak command descriptor
 	desc := r.getWeakCmdDesc(slot, propose, dep)
 
-	// 4. Track pending write for non-blocking speculative reads
-	// If this is a PUT, add to pendingWrites so subsequent reads can see it immediately
-	if propose.Command.Op == state.PUT {
-		r.addPendingWrite(propose.ClientId, propose.Command.K, propose.CommandId, propose.Command.V)
-	}
-
-	// 5. Speculative execution: compute result WITHOUT modifying state
-	// Uses pending writes from this client if available (non-blocking read-after-write)
-	// State modification happens after commit in slot order (see asyncReplicateWeak)
-	desc.val = r.computeSpeculativeResult(propose.ClientId, propose.CausalDep, propose.Command)
-	// Note: Do NOT mark as executed yet - that happens after commit
-
-	// 6. Reply to client immediately (don't wait for replication)
-	// Use object pool to reduce allocations
-	rep := r.weakReplyPool.Get().(*MWeakReply)
-	rep.Replica = r.Id
-	rep.Ballot = r.ballot
-	rep.CmdId = desc.cmdId
-	rep.Rep = desc.val
-	r.sender.SendToClient(propose.ClientId, rep, r.cs.weakReplyRPC)
-	// Note: We don't return to pool immediately since sender may still use it
-	// In a production system, we'd need to track send completion for proper recycling
-
-	// 7. Async replication (background, non-blocking)
-	// Actual state modification and marking as executed happens after commit
-	// CausalDep waiting is done in asyncReplicateWeak for execution ordering only
+	// 4. Async replication — reply happens AFTER commit+execute (2 RTT)
 	go r.asyncReplicateWeak(desc, slot, propose.ClientId, propose.CommandId, propose.CausalDep)
 }
 
-// getWeakCmdDesc creates a command descriptor for weak commands
+// getWeakCmdDesc creates a command descriptor for weak commands.
+// The descriptor is registered in cmdDescs so that AcceptAcks arriving via the
+// main run loop are routed to the SAME descriptor used by asyncReplicateWeak.
+// Without this, acks would be split across two descriptors and never reach quorum.
 func (r *Replica) getWeakCmdDesc(slot int, propose *MWeakPropose, dep int) *commandDesc {
 	desc := r.newDesc()
 	desc.isWeak = true
@@ -867,6 +855,17 @@ func (r *Replica) getWeakCmdDesc(slot int, propose *MWeakPropose, dep int) *comm
 	}
 	desc.cmd = propose.Command
 	desc.phase = ACCEPT // Skip START phase for weak commands
+
+	// Register in cmdDescs so AcceptAcks are routed to this descriptor
+	slotStr := strconv.Itoa(slot)
+	desc.slotStr = slotStr
+	r.cmdDescs.Set(slotStr, desc)
+
+	// Start handler goroutine to process incoming messages (AcceptAcks, Commits)
+	if !desc.seq {
+		go r.handleDesc(desc, slot, dep)
+		r.routineCount++
+	}
 
 	// Track dependency
 	if dep != -1 {
@@ -929,26 +928,35 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 		r.waitForWeakDep(clientId, causalDep)
 	}
 
-	// Now execute and mark as executed (state modification happens here)
+	// Execute if not already done by deliver() (race: deliver() may run first)
 	if !desc.applied {
 		desc.val = desc.cmd.Execute(r.State)
 		desc.applied = true
 		r.executed.Set(slotStr, struct{}{})
-		r.notifyExecute(slot) // Notify waiters that slot is executed
-
-		// Mark this weak command as executed for causal ordering
-		r.markWeakExecuted(clientId, seqNum)
-
-		// Clean up pending write after execution (for PUT commands)
+		// Track per-key version for weak read responses
 		if desc.cmd.Op == state.PUT {
-			r.removePendingWrite(clientId, desc.cmd.K, seqNum)
+			keyStr := r.int32ToString(int32(desc.cmd.K))
+			r.keyVersions.Set(keyStr, slot)
 		}
+		r.notifyExecute(slot) // Notify waiters that slot is executed
 
 		// Trigger next slot
 		go func(nextSlot int) {
 			r.deliverChan <- nextSlot
 		}(slot + 1)
 	}
+
+	// Always mark weak executed and send reply — even if deliver() executed first.
+	// deliver() sets desc.val but does NOT send weak replies or mark weak executed.
+	r.markWeakExecuted(clientId, seqNum)
+
+	rep := r.weakReplyPool.Get().(*MWeakReply)
+	rep.Replica = r.Id
+	rep.Ballot = r.ballot
+	rep.CmdId = desc.cmdId
+	rep.Rep = desc.val
+	rep.Slot = int32(slot)
+	r.sender.SendToClient(clientId, rep, r.cs.weakReplyRPC)
 }
 
 // waitForWeakDep waits for a causal dependency to be executed.
@@ -1034,79 +1042,24 @@ func (r *Replica) int32ToString(val int32) string {
 	return str
 }
 
-// pendingWriteKey creates a unique key for pending writes: "clientId:key"
-func (r *Replica) pendingWriteKey(clientId int32, key state.Key) string {
-	return r.int32ToString(clientId) + ":" + r.int32ToString(int32(key))
-}
-
-// addPendingWrite tracks an uncommitted write for speculative read computation
-func (r *Replica) addPendingWrite(clientId int32, key state.Key, seqNum int32, value state.Value) {
-	pwKey := r.pendingWriteKey(clientId, key)
-	r.pendingWrites.Upsert(pwKey, nil,
-		func(exists bool, mapV, _ interface{}) interface{} {
-			if exists {
-				existing := mapV.(*pendingWrite)
-				// Only update if this seqNum is newer
-				if seqNum > existing.seqNum {
-					return &pendingWrite{seqNum: seqNum, value: value}
-				}
-				return existing
-			}
-			return &pendingWrite{seqNum: seqNum, value: value}
-		})
-}
-
-// removePendingWrite removes a pending write after it's been committed and executed
-func (r *Replica) removePendingWrite(clientId int32, key state.Key, seqNum int32) {
-	pwKey := r.pendingWriteKey(clientId, key)
-	// Only remove if the seqNum matches (don't remove a newer pending write)
-	if pw, exists := r.pendingWrites.Get(pwKey); exists {
-		if pw.(*pendingWrite).seqNum == seqNum {
-			r.pendingWrites.Remove(pwKey)
-		}
+// handleWeakRead handles a weak read request from any client (sent to nearest replica)
+// Returns committed value + version (slot of last write to this key)
+func (r *Replica) handleWeakRead(msg *MWeakRead) {
+	cmd := state.Command{Op: state.GET, K: msg.Key, V: state.NIL()}
+	value := cmd.ComputeResult(r.State)
+	version := int32(0)
+	keyStr := r.int32ToString(int32(msg.Key))
+	if v, exists := r.keyVersions.Get(keyStr); exists {
+		version = int32(v.(int))
 	}
-}
-
-// getPendingWrite returns the pending write value if it exists and satisfies the causal dependency
-func (r *Replica) getPendingWrite(clientId int32, key state.Key, causalDep int32) *pendingWrite {
-	pwKey := r.pendingWriteKey(clientId, key)
-	if pw, exists := r.pendingWrites.Get(pwKey); exists {
-		pending := pw.(*pendingWrite)
-		// Only return if this pending write is the one we're looking for (seqNum <= causalDep)
-		if pending.seqNum <= causalDep {
-			return pending
-		}
+	reply := &MWeakReadReply{
+		Replica: r.Id,
+		Ballot:  r.ballot,
+		CmdId:   CommandId{ClientId: msg.ClientId, SeqNum: msg.CommandId},
+		Rep:     value,
+		Version: version,
 	}
-	return nil
-}
-
-// computeSpeculativeResult computes the speculative result for a command
-// For GET: checks pending writes from this client first, then falls back to committed state
-// For SCAN: currently just uses committed state (pending write overlay is complex)
-// For PUT: returns NIL (no value for writes during speculation)
-func (r *Replica) computeSpeculativeResult(clientId int32, causalDep int32, cmd state.Command) state.Value {
-	switch cmd.Op {
-	case state.GET:
-		// Check pending writes from this client for this key
-		if pending := r.getPendingWrite(clientId, cmd.K, causalDep); pending != nil {
-			return pending.value
-		}
-		// Fall back to committed state
-		return cmd.ComputeResult(r.State)
-
-	case state.SCAN:
-		// For SCAN, we need to merge pending writes with committed state
-		// This is complex - for now, just use committed state
-		// TODO: Implement proper SCAN with pending write overlay
-		return cmd.ComputeResult(r.State)
-
-	case state.PUT:
-		// For PUT, return NIL during speculation
-		return state.NIL()
-
-	default:
-		return state.NIL()
-	}
+	r.sender.SendToClient(msg.ClientId, reply, r.cs.weakReadReplyRPC)
 }
 
 // getOrCreateCommitNotify returns a channel that will be closed when the slot is committed

@@ -1160,6 +1160,17 @@ func (r *Replica) getWeakCmdDesc(slot int, propose *MWeakPropose, dep int) *comm
 	desc.cmd = propose.Command
 	desc.phase = ACCEPT // Skip START phase for weak commands
 
+	// Register in cmdDescs so AcceptAcks are routed to this descriptor
+	slotStr := strconv.Itoa(slot)
+	desc.slotStr = slotStr
+	r.cmdDescs.Set(slotStr, desc)
+
+	// Start handler goroutine to process incoming messages (AcceptAcks, Commits)
+	if !desc.seq {
+		go r.handleDesc(desc, slot, dep)
+		r.routineCount++
+	}
+
 	// Track dependency
 	if dep != -1 {
 		depDesc := r.getCmdDesc(dep, nil, -1)
@@ -1220,7 +1231,7 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 		r.waitForWeakDep(clientId, causalDep)
 	}
 
-	// Now execute and mark as executed (state modification happens here)
+	// Execute if not already done by deliver() (race: deliver() may run first)
 	if !desc.applied {
 		desc.val = desc.cmd.Execute(r.State)
 		desc.applied = true
@@ -1228,18 +1239,18 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 		r.executed.Set(slotStr, struct{}{})
 		r.notifyExecute(slot) // Notify waiters that slot is executed
 
-		// Mark this weak command as executed for causal ordering
-		r.markWeakExecuted(clientId, seqNum)
-
-		// Clean up pending write after execution (for PUT commands)
-		if desc.cmd.Op == state.PUT {
-			r.removePendingWrite(clientId, desc.cmd.K, seqNum)
-		}
-
 		// Trigger next slot
 		go func(nextSlot int) {
 			r.deliverChan <- nextSlot
 		}(slot + 1)
+	}
+
+	// Always mark weak executed and clean up — even if deliver() ran first.
+	// deliver() sets desc.applied but does NOT handle weak-specific cleanup.
+	r.markWeakExecuted(clientId, seqNum)
+
+	if desc.cmd.Op == state.PUT {
+		r.removePendingWrite(clientId, desc.cmd.K, seqNum)
 	}
 }
 
@@ -1306,6 +1317,17 @@ func (r *Replica) getCausalCmdDesc(slot int, propose *MCausalPropose, dep int) *
 	desc.cmd = propose.Command
 	desc.phase = ACCEPT // Skip START phase for causal commands
 
+	// Register in cmdDescs so AcceptAcks are routed to this descriptor
+	slotStr := strconv.Itoa(slot)
+	desc.slotStr = slotStr
+	r.cmdDescs.Set(slotStr, desc)
+
+	// Start handler goroutine to process incoming messages (AcceptAcks, Commits)
+	if !desc.seq {
+		go r.handleDesc(desc, slot, dep)
+		r.routineCount++
+	}
+
 	// Track dependency
 	if dep != -1 {
 		depDesc := r.getCmdDesc(dep, nil, -1)
@@ -1360,7 +1382,7 @@ func (r *Replica) asyncReplicateCausal(desc *commandDesc, slot int, clientId int
 		r.waitForWeakDep(clientId, causalDep)
 	}
 
-	// Execute and mark as executed (state modification happens here)
+	// Execute if not already done by deliver() (race: deliver() may run first)
 	if !desc.applied {
 		desc.val = desc.cmd.Execute(r.State)
 		desc.applied = true
@@ -1368,22 +1390,21 @@ func (r *Replica) asyncReplicateCausal(desc *commandDesc, slot int, clientId int
 		r.executed.Set(slotStr, struct{}{})
 		r.notifyExecute(slot)
 
-		// Mark this causal command as executed for causal ordering
-		r.markWeakExecuted(clientId, seqNum)
-
-		// Clean up pending write after execution (for PUT commands)
-		if desc.cmd.Op == state.PUT {
-			r.removePendingWrite(clientId, desc.cmd.K, seqNum)
-		}
-
-		// Clean up leader unsynced entry
-		r.syncLeader(desc.cmdId, desc.cmd)
-
 		// Trigger next slot
 		go func(nextSlot int) {
 			r.deliverChan <- nextSlot
 		}(slot + 1)
 	}
+
+	// Always mark weak executed, clean up, and sync — even if deliver() ran first.
+	// deliver() sets desc.applied but does NOT handle causal-specific cleanup.
+	r.markWeakExecuted(clientId, seqNum)
+
+	if desc.cmd.Op == state.PUT {
+		r.removePendingWrite(clientId, desc.cmd.K, seqNum)
+	}
+
+	r.syncLeader(desc.cmdId, desc.cmd)
 }
 
 // waitForWeakDep waits for a causal dependency to be executed.
