@@ -373,8 +373,8 @@ func (c *Client) handleWeakReadReply(rep *MWeakReadReply) {
 	c.RegisterReply(c.val, rep.CmdId.SeqNum)
 }
 
-// SendWeakWrite sends a weak consistency write operation to leader only
-// Leader waits for Accept-Commit cycle before replying (2 RTT)
+// SendWeakWrite sends a weak consistency write operation to leader only.
+// Leader replies immediately with speculative result (0-RTT), then replicates async.
 func (c *Client) SendWeakWrite(key int64, value []byte) int32 {
 	seqnum := c.getNextSeqnum()
 

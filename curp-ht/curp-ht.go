@@ -843,7 +843,20 @@ func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
 	// 3. Create weak command descriptor
 	desc := r.getWeakCmdDesc(slot, propose, dep)
 
-	// 4. Async replication — reply happens AFTER commit+execute (2 RTT)
+	// 4. Reply to client IMMEDIATELY with speculative result (0-RTT from leader)
+	// Weak writes are always PUTs, which return NIL during speculation.
+	// Actual state modification happens after commit in slot order (asyncReplicateWeak).
+	desc.val = state.NIL()
+	rep := r.weakReplyPool.Get().(*MWeakReply)
+	rep.Replica = r.Id
+	rep.Ballot = r.ballot
+	rep.CmdId = desc.cmdId
+	rep.Rep = desc.val
+	rep.Slot = int32(slot)
+	r.sender.SendToClient(propose.ClientId, rep, r.cs.weakReplyRPC)
+
+	// 5. Async replication (background, non-blocking)
+	// Actual state modification and execution happens after commit
 	go r.asyncReplicateWeak(desc, slot, propose.ClientId, propose.CommandId, propose.CausalDep)
 }
 
@@ -887,8 +900,9 @@ func (r *Replica) getWeakCmdDesc(slot int, propose *MWeakPropose, dep int) *comm
 	return desc
 }
 
-// asyncReplicateWeak replicates weak command to other replicas asynchronously
-// After replication completes (commit), it executes the command in slot order
+// asyncReplicateWeak replicates weak command to other replicas asynchronously.
+// Reply was already sent to client in handleWeakPropose (0-RTT).
+// This function handles background commit, slot-ordered execution, and cleanup.
 func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32, seqNum int32, causalDep int32) {
 	// Send Accept to other replicas
 	acc := &MAccept{
@@ -956,17 +970,10 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 		}(slot + 1)
 	}
 
-	// Always mark weak executed and send reply — even if deliver() executed first.
+	// Always mark weak executed — even if deliver() executed first.
 	// deliver() skips cleanup for weak commands on leader, so we own the full lifecycle.
+	// Reply was already sent immediately in handleWeakPropose (0-RTT).
 	r.markWeakExecuted(clientId, seqNum)
-
-	rep := r.weakReplyPool.Get().(*MWeakReply)
-	rep.Replica = r.Id
-	rep.Ballot = r.ballot
-	rep.CmdId = desc.cmdId
-	rep.Rep = desc.val
-	rep.Slot = int32(slot)
-	r.sender.SendToClient(clientId, rep, r.cs.weakReplyRPC)
 
 	// Cleanup: save result for MSyncReply, mark delivered, then trigger handler exit.
 	// deliver() skipped this for weak commands on leader to avoid freeing desc too early.
