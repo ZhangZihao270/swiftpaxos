@@ -843,20 +843,7 @@ func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
 	// 3. Create weak command descriptor
 	desc := r.getWeakCmdDesc(slot, propose, dep)
 
-	// 4. Reply to client IMMEDIATELY with speculative result (0-RTT from leader)
-	// Weak writes are always PUTs, which return NIL during speculation.
-	// Actual state modification happens after commit in slot order (asyncReplicateWeak).
-	desc.val = state.NIL()
-	rep := r.weakReplyPool.Get().(*MWeakReply)
-	rep.Replica = r.Id
-	rep.Ballot = r.ballot
-	rep.CmdId = desc.cmdId
-	rep.Rep = desc.val
-	rep.Slot = int32(slot)
-	r.sender.SendToClient(propose.ClientId, rep, r.cs.weakReplyRPC)
-
-	// 5. Async replication (background, non-blocking)
-	// Actual state modification and execution happens after commit
+	// 4. Async replication — reply after commit, execute in background
 	go r.asyncReplicateWeak(desc, slot, propose.ClientId, propose.CommandId, propose.CausalDep)
 }
 
@@ -901,8 +888,8 @@ func (r *Replica) getWeakCmdDesc(slot int, propose *MWeakPropose, dep int) *comm
 }
 
 // asyncReplicateWeak replicates weak command to other replicas asynchronously.
-// Reply was already sent to client in handleWeakPropose (0-RTT).
-// This function handles background commit, slot-ordered execution, and cleanup.
+// Waits for commit (majority acks), then replies to client immediately.
+// Execution (slot-ordered) continues in background after the reply.
 func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32, seqNum int32, causalDep int32) {
 	// Send Accept to other replicas
 	acc := &MAccept{
@@ -919,13 +906,8 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 	// in the single handler goroutine, avoiding concurrent access to the non-thread-safe MsgSet.
 	desc.msgs <- acc
 
-	// The accept/commit flow will continue through normal message handling
-	// Once majority acks are received, the command will be committed
-	// The actual execution happens through the deliver() mechanism which
-	// ensures slot ordering is maintained
-
-	// After commit is complete (tracked via committed map), execute in slot order
-	// Wait for commit using channel notification (replaces spin-wait)
+	// ---- Phase 1: Wait for commit (majority acks) ----
+	// This is required for durability before replying to client.
 	slotStr := strconv.Itoa(slot)
 	commitCh := r.getOrCreateCommitNotify(slot)
 	select {
@@ -935,6 +917,18 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 		// Timeout - proceed anyway to avoid deadlock
 	}
 
+	// ---- Reply to client immediately after commit ----
+	// Don't wait for execution — weak writes return NIL (PUT result).
+	// Execution happens in background for state machine consistency.
+	rep := r.weakReplyPool.Get().(*MWeakReply)
+	rep.Replica = r.Id
+	rep.Ballot = r.ballot
+	rep.CmdId = desc.cmdId
+	rep.Rep = state.NIL()
+	rep.Slot = int32(slot)
+	r.sender.SendToClient(clientId, rep, r.cs.weakReplyRPC)
+
+	// ---- Phase 2: Execute in slot order (background) ----
 	// Wait for slot-1 to be executed (slot ordering)
 	if slot > 0 {
 		executeCh := r.getOrCreateExecuteNotify(slot - 1)
@@ -947,7 +941,6 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 	}
 
 	// Wait for causal dependency (session ordering within client)
-	// This is now done here instead of blocking the speculative result computation
 	if causalDep > 0 {
 		r.waitForWeakDep(clientId, causalDep)
 	}
@@ -972,7 +965,6 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 
 	// Always mark weak executed — even if deliver() executed first.
 	// deliver() skips cleanup for weak commands on leader, so we own the full lifecycle.
-	// Reply was already sent immediately in handleWeakPropose (0-RTT).
 	r.markWeakExecuted(clientId, seqNum)
 
 	// Cleanup: save result for MSyncReply, mark delivered, then trigger handler exit.

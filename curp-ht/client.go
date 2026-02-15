@@ -374,7 +374,7 @@ func (c *Client) handleWeakReadReply(rep *MWeakReadReply) {
 }
 
 // SendWeakWrite sends a weak consistency write operation to leader only.
-// Leader replies immediately with speculative result (0-RTT), then replicates async.
+// Leader replicates (1 RTT for commit), then replies. Execution is background.
 func (c *Client) SendWeakWrite(key int64, value []byte) int32 {
 	seqnum := c.getNextSeqnum()
 
