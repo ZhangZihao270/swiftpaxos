@@ -86,15 +86,15 @@ func TestNewHybridMetrics(t *testing.T) {
 // TestComputePercentiles tests percentile computation
 func TestComputePercentiles(t *testing.T) {
 	// Empty slice
-	median, p99, p999 := computePercentiles([]float64{})
-	if median != 0 || p99 != 0 || p999 != 0 {
+	avg, median, p99, p999 := computePercentiles([]float64{})
+	if avg != 0 || median != 0 || p99 != 0 || p999 != 0 {
 		t.Error("Empty slice should return zeros")
 	}
 
 	// Single element
-	median, p99, p999 = computePercentiles([]float64{5.0})
-	if median != 5.0 || p99 != 5.0 || p999 != 5.0 {
-		t.Errorf("Single element: got median=%v, p99=%v, p999=%v", median, p99, p999)
+	avg, median, p99, p999 = computePercentiles([]float64{5.0})
+	if avg != 5.0 || median != 5.0 || p99 != 5.0 || p999 != 5.0 {
+		t.Errorf("Single element: got avg=%v, median=%v, p99=%v, p999=%v", avg, median, p99, p999)
 	}
 
 	// Known distribution
@@ -102,7 +102,12 @@ func TestComputePercentiles(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		data[i] = float64(i + 1) // 1 to 100
 	}
-	median, p99, p999 = computePercentiles(data)
+	avg, median, p99, p999 = computePercentiles(data)
+
+	// Avg should be 50.5
+	if avg < 50.4 || avg > 50.6 {
+		t.Errorf("Avg should be 50.5, got %v", avg)
+	}
 
 	// Median should be around 50-51
 	if median < 50 || median > 51 {

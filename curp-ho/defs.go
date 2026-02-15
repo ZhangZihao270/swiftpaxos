@@ -126,6 +126,8 @@ type MWeakPropose struct {
 	CausalDep int32 // Sequence number of the previous weak command from this client (0 if none)
 }
 
+func (m *MWeakPropose) GetClientId() int32 { return m.ClientId }
+
 // MWeakReply - Weak command reply (Leader replies immediately)
 type MWeakReply struct {
 	Replica int32
@@ -145,6 +147,8 @@ type MCausalPropose struct {
 	CausalDep int32 // Sequence number of the previous causal command from this client (0 if none)
 }
 
+func (m *MCausalPropose) GetClientId() int32 { return m.ClientId }
+
 // MCausalReply - CURP-HO causal command reply (bound replica replies immediately).
 // The bound replica (closest to client) sends this after speculative execution.
 // No Ballot field: causal replies don't participate in ballot-based voting.
@@ -160,6 +164,8 @@ type MWeakRead struct {
 	ClientId  int32
 	Key       state.Key
 }
+
+func (m *MWeakRead) GetClientId() int32 { return m.ClientId }
 
 // MWeakReadReply - Weak read reply from nearest replica (value + version)
 type MWeakReadReply struct {

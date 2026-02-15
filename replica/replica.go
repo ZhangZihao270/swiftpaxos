@@ -273,6 +273,8 @@ func (r *Replica) SendClientMsg(id int32, code uint8, msg fastrpc.Serializable) 
 // SendClientMsgFast sends a message to a client via a dedicated per-client
 // goroutine, bypassing the Sender queue. This avoids head-of-line blocking
 // where slow remote flushes delay fast local replies.
+// Non-blocking: drops the message if the per-client channel is full, to prevent
+// the caller (run loop or Sender goroutine) from blocking on a slow/disconnected client.
 func (r *Replica) SendClientMsgFast(id int32, code uint8, msg fastrpc.Serializable) {
 	r.M.Lock()
 	ch := r.ClientFastChan[id]
@@ -280,7 +282,12 @@ func (r *Replica) SendClientMsgFast(id int32, code uint8, msg fastrpc.Serializab
 	if ch == nil {
 		return
 	}
-	ch <- clientSendArg{code: code, msg: msg}
+	select {
+	case ch <- clientSendArg{code: code, msg: msg}:
+	default:
+		// Channel full — drop message to avoid blocking the caller.
+		// Client-side MSync retry recovers dropped strong replies.
+	}
 }
 
 func (r *Replica) SendMsgNoFlush(peerId int32, code uint8, msg fastrpc.Serializable) {
@@ -505,7 +512,8 @@ func (r *Replica) replicaListener(rid int, reader *bufio.Reader) {
 					p.Chan <- obj
 				}(obj)
 			} else {
-				r.Fatal("Error: received unknown message type ", msgType, " from ", rid)
+				r.Println("Warning: received unknown message type", msgType, "from peer", rid, "- closing connection")
+				break
 			}
 		}
 	}
@@ -549,23 +557,7 @@ func (r *Replica) clientListener(conn net.Conn) {
 			if err = propose.Unmarshal(reader); err != nil {
 				break
 			}
-			r.M.Lock()
-			r.ClientWriters[propose.ClientId] = writer
-			r.ClientAddrs[propose.ClientId] = addr
-			if r.ClientMu[propose.ClientId] == nil {
-				r.ClientMu[propose.ClientId] = &sync.Mutex{}
-			}
-			if r.ClientFastChan[propose.ClientId] == nil {
-				ch := make(chan clientSendArg, 256)
-				r.ClientFastChan[propose.ClientId] = ch
-				cid := propose.ClientId
-				go func() {
-					for arg := range ch {
-						r.SendClientMsg(cid, arg.code, arg.msg)
-					}
-				}()
-			}
-			r.M.Unlock()
+			r.registerClient(propose.ClientId, writer, addr, mutex)
 			op := propose.Command.Op
 			if r.LRead && (op == state.GET || op == state.SCAN) {
 				r.ReplyProposeTS(&defs.ProposeReplyTS{
@@ -623,18 +615,48 @@ func (r *Replica) clientListener(conn net.Conn) {
 				if err = obj.Unmarshal(reader); err != nil {
 					break
 				}
+				// Register client infrastructure if the message carries a ClientId.
+				// This ensures ClientWriters/ClientFastChan are initialized even when
+				// the first message from a client is not a PROPOSE (e.g., MCausalPropose).
+				if cm, ok := obj.(interface{ GetClientId() int32 }); ok {
+					r.registerClient(cm.GetClientId(), writer, addr, mutex)
+				}
 				go func(obj fastrpc.Serializable) {
 					time.Sleep(r.Dt.WaitDuration(addr))
 					p.Chan <- obj
 				}(obj)
 			} else {
-				r.Fatal("Error: received unknown client message ", msgType)
+				r.Println("Warning: received unknown client message", msgType, "from", conn.RemoteAddr(), "- closing connection")
+				break
 			}
 		}
 	}
 
 	conn.Close()
 	r.Println("Client down", conn.RemoteAddr())
+}
+
+// registerClient initializes per-client send infrastructure (writer, mutex,
+// fast channel) if not already set up. Called on every client message to ensure
+// the infrastructure exists regardless of which message type arrives first.
+func (r *Replica) registerClient(clientId int32, writer *bufio.Writer, addr string, mutex *sync.Mutex) {
+	r.M.Lock()
+	r.ClientWriters[clientId] = writer
+	r.ClientAddrs[clientId] = addr
+	if r.ClientMu[clientId] == nil {
+		r.ClientMu[clientId] = &sync.Mutex{}
+	}
+	if r.ClientFastChan[clientId] == nil {
+		ch := make(chan clientSendArg, 8192)
+		r.ClientFastChan[clientId] = ch
+		cid := clientId
+		go func() {
+			for arg := range ch {
+				r.SendClientMsg(cid, arg.code, arg.msg)
+			}
+		}()
+	}
+	r.M.Unlock()
 }
 
 func Leader(ballot int32, repNum int) int32 {

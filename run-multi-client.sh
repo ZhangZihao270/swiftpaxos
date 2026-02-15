@@ -395,11 +395,12 @@ for alias in client_aliases:
             result['strong_writes'] = sw
             result['strong_reads'] = sr
 
-        strong_lat = re.search(r'Strong Operations.*?Median latency: ([\d.]+)ms.*?P99: ([\d.]+)ms', content, re.DOTALL)
+        strong_lat = re.search(r'Strong Operations.*?Avg: ([\d.]+)ms.*?Median: ([\d.]+)ms.*?P99: ([\d.]+)ms', content, re.DOTALL)
         if strong_lat:
-            strong_latencies.append((float(strong_lat.group(1)), float(strong_lat.group(2))))
-            result['strong_median'] = float(strong_lat.group(1))
-            result['strong_p99'] = float(strong_lat.group(2))
+            strong_latencies.append((float(strong_lat.group(1)), float(strong_lat.group(2)), float(strong_lat.group(3))))
+            result['strong_avg'] = float(strong_lat.group(1))
+            result['strong_median'] = float(strong_lat.group(2))
+            result['strong_p99'] = float(strong_lat.group(3))
 
     # Weak operations
     weak_match = re.search(r'Weak Operations: (\d+)', content)
@@ -413,11 +414,12 @@ for alias in client_aliases:
             result['weak_writes'] = ww
             result['weak_reads'] = wr
 
-        weak_lat = re.search(r'Weak Operations.*?Median latency: ([\d.]+)ms.*?P99: ([\d.]+)ms', content, re.DOTALL)
+        weak_lat = re.search(r'Weak Operations.*?Avg: ([\d.]+)ms.*?Median: ([\d.]+)ms.*?P99: ([\d.]+)ms', content, re.DOTALL)
         if weak_lat:
-            weak_latencies.append((float(weak_lat.group(1)), float(weak_lat.group(2))))
-            result['weak_median'] = float(weak_lat.group(1))
-            result['weak_p99'] = float(weak_lat.group(2))
+            weak_latencies.append((float(weak_lat.group(1)), float(weak_lat.group(2)), float(weak_lat.group(3))))
+            result['weak_avg'] = float(weak_lat.group(1))
+            result['weak_median'] = float(weak_lat.group(2))
+            result['weak_p99'] = float(weak_lat.group(3))
 
     client_results.append(result)
 
@@ -438,9 +440,10 @@ if strong_ops > 0:
     print(f"Strong Operations: {strong_ops} ({strong_pct:.1f}%)")
     print(f"  Writes: {strong_writes} | Reads: {strong_reads}")
     if strong_latencies:
-        avg_median = sum(l[0] for l in strong_latencies) / len(strong_latencies)
-        max_p99 = max(l[1] for l in strong_latencies)
-        print(f"  Avg median: {avg_median:.2f}ms | Max P99: {max_p99:.2f}ms")
+        avg_avg = sum(l[0] for l in strong_latencies) / len(strong_latencies)
+        avg_median = sum(l[1] for l in strong_latencies) / len(strong_latencies)
+        max_p99 = max(l[2] for l in strong_latencies)
+        print(f"  Avg: {avg_avg:.2f}ms | Avg median: {avg_median:.2f}ms | Max P99: {max_p99:.2f}ms")
     print()
 
 if weak_ops > 0:
@@ -448,9 +451,10 @@ if weak_ops > 0:
     print(f"Weak Operations: {weak_ops} ({weak_pct:.1f}%)")
     print(f"  Writes: {weak_writes} | Reads: {weak_reads}")
     if weak_latencies:
-        avg_median = sum(l[0] for l in weak_latencies) / len(weak_latencies)
-        max_p99 = max(l[1] for l in weak_latencies)
-        print(f"  Avg median: {avg_median:.2f}ms | Max P99: {max_p99:.2f}ms")
+        avg_avg = sum(l[0] for l in weak_latencies) / len(weak_latencies)
+        avg_median = sum(l[1] for l in weak_latencies) / len(weak_latencies)
+        max_p99 = max(l[2] for l in weak_latencies)
+        print(f"  Avg: {avg_avg:.2f}ms | Avg median: {avg_median:.2f}ms | Max P99: {max_p99:.2f}ms")
     print()
 
 print("--- Per-Client Breakdown ---")

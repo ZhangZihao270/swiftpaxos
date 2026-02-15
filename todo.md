@@ -1845,6 +1845,105 @@ Change weak read routing:
 
 ---
 
+### Phase 38: Fix CURP-HO Client Hang + Peak Throughput Testing
+
+**Priority: HIGH**
+
+#### Background
+
+When running `./run-multi-client.sh -c multi-client.conf -d`, clients intermittently hang at the end of the benchmark (~20-50% failure rate). Multiple root causes have been identified and partially fixed:
+
+**Already applied (uncommitted):**
+- `r.Fatal` → `r.Println + break` for unknown client/peer messages (prevents replica crash)
+- `SendClientMsgFast` made non-blocking (prevents run-loop blocking)
+- Per-client channel buffer 256 → 8192
+- `registerClient` refactored to support non-PROPOSE first messages
+- MSync retry timer on client (2s, sends to all replicas)
+- Sender uses `SendClientMsgFast` instead of `SendClientMsg`
+
+**Remaining symptoms:**
+- "Warning: received unknown client message" still triggers on non-leader replicas when clients disconnect, closing connections and breaking MSync delivery
+- MSync retry sends to all replicas but replies never arrive for stuck commands → commands may never have been committed/executed on any replica
+- Always involves the last ~15 commands (= pipeline window) of a single client thread
+
+#### Phase 38.1: Root-cause the "unknown client message" on disconnect
+
+The `clientListener` receives garbage bytes when a client disconnects mid-stream. Current fix (`break` instead of `Fatal`) prevents crash but still kills the connection. This breaks all future communication with that client on this replica.
+
+- [ ] **38.1a** Add EOF/error handling before the `default` case in `clientListener`: when `reader.ReadByte()` returns `io.EOF` or error, break cleanly without warning
+- [ ] **38.1b** Verify: the `msgType` read at the top of the client loop — if `ReadByte` returns error, skip the `switch` entirely (current code may already do this, but the `Unmarshal` step may read partial data leaving the stream corrupted)
+- [ ] **38.1c** Consider: when a client disconnects cleanly, the first byte of the next "message" is EOF. When it disconnects mid-message, subsequent bytes are garbage. Ensure both cases are handled without `Warning` log spam
+
+#### Phase 38.2: Ensure MSync can always recover stuck commands
+
+Even after fixing disconnect handling, commands can be stuck if:
+1. The leader assigned a slot but the command is stuck in slot ordering (waiting for slot-1)
+2. All replicas are stuck at the same slot because a weak command's `asyncReplicateWeak` goroutine hasn't finished yet (still waiting on causal dep / commit timeout)
+3. `r.values` is only set AFTER full execution + cleanup, so MSync handler silently drops requests for committed-but-not-yet-executed commands
+
+- [ ] **38.2a** On the MSync handler (replica run loop): if `r.values` doesn't have the command, also check `r.delivered` or `r.executed` maps and try to retrieve the value from the descriptor or `r.State` directly
+- [ ] **38.2b** Alternative approach: add a `slots` reverse map (CommandId → slot) and a `results` map that's set earlier (right after `Execute()`), so MSync can reply as soon as the command is executed even before cleanup
+- [ ] **38.2c** Test: verify MSync retry recovers commands within 2 timer cycles (4s)
+
+#### Phase 38.3: Harden the client-side pipeline completion
+
+The client hangs when `HybridLoopWithOptions`'s reply goroutine waits for `reqNum+1` replies on `c.Reply` and even one is missing.
+
+- [ ] **38.3a** Add a timeout to the reply-reading goroutine in `HybridLoopWithOptions`: after the sender goroutine finishes and a grace period (e.g., 30s), check for undelivered commands and trigger MSync for them
+- [ ] **38.3b** Alternative: add a "completion watchdog" in the client that detects no progress for 10s and forces MSync for all pending commands
+- [ ] **38.3c** Ensure the MSync timer keeps running even after the sender goroutine finishes (currently it fires in `handleMsgs` which runs independently — should be OK)
+
+#### Phase 38.4: Validate fix — 5 consecutive clean runs
+
+- [ ] **38.4a** Build, run `go test ./...`
+- [ ] **38.4b** Run `./run-multi-client.sh -c multi-client.conf -d` 5 times consecutively, all must pass
+- [ ] **38.4c** Commit all changes
+
+---
+
+#### Phase 38.5: CURP-HO Peak Throughput Testing
+
+**Goal**: Find peak throughput for CURP-HO by sweeping `clientThreads`. Constraint: avg and median latency ≤ 100ms.
+
+Config base: `multi-client.conf` with `protocol: curpho`
+
+| clientThreads | Throughput | Strong Avg | Strong Median | Weak Avg | Weak Median |
+|---------------|-----------|------------|---------------|----------|-------------|
+| 3×2=6         |           |            |               |          |             |
+| 3×4=12        |           |            |               |          |             |
+| 3×8=24        |           |            |               |          |             |
+| 3×16=48       |           |            |               |          |             |
+| 3×32=96       |           |            |               |          |             |
+
+- [ ] **38.5a** Create `benchmark-curpho-peak.conf` (copy from multi-client.conf, adjust clientThreads)
+- [ ] **38.5b** Run sweep: 2, 4, 8, 16, 32 threads per client
+- [ ] **38.5c** Record results, identify peak (highest throughput where avg & median ≤ 100ms)
+
+#### Phase 38.6: CURP-HT Peak Throughput Testing
+
+**Goal**: Same as 38.5, but for CURP-HT.
+
+Config base: `multi-client.conf` with `protocol: curpht`
+
+| clientThreads | Throughput | Strong Avg | Strong Median | Weak Avg | Weak Median |
+|---------------|-----------|------------|---------------|----------|-------------|
+| 3×2=6         |           |            |               |          |             |
+| 3×4=12        |           |            |               |          |             |
+| 3×8=24        |           |            |               |          |             |
+| 3×16=48       |           |            |               |          |             |
+| 3×32=96       |           |            |               |          |             |
+
+- [ ] **38.6a** Create `benchmark-curpht-peak.conf` (copy from multi-client.conf, change protocol)
+- [ ] **38.6b** Run sweep: 2, 4, 8, 16, 32 threads per client
+- [ ] **38.6c** Record results, identify peak (highest throughput where avg & median ≤ 100ms)
+
+#### Phase 38.7: Final Comparison
+
+- [ ] **38.7a** Summary table: CURP-HO peak vs CURP-HT peak
+- [ ] **38.7b** Commit results and updated todo.md
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task

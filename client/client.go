@@ -270,15 +270,17 @@ func (c *Client) RegisterRPCTable(t *fastrpc.Table) {
 					err     error
 				)
 				if msgType, err = reader.ReadByte(); err != nil {
+					c.Println("reader goroutine for replica", i, "exiting: ReadByte:", err)
 					break
 				}
 				p, exists := t.Get(msgType)
 				if !exists {
-					c.Println("error: received unknown message:", msgType)
+					c.Println("error: received unknown message from replica", i, ":", msgType)
 					continue
 				}
 				obj := p.Obj.New()
 				if err = obj.Unmarshal(reader); err != nil {
+					c.Println("reader goroutine for replica", i, "exiting: Unmarshal:", err)
 					break
 				}
 				go func(obj fastrpc.Serializable) {

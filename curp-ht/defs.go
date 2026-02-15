@@ -112,6 +112,8 @@ type MWeakPropose struct {
 	CausalDep int32 // Sequence number of the previous weak command from this client (0 if none)
 }
 
+func (m *MWeakPropose) GetClientId() int32 { return m.ClientId }
+
 // MWeakReply - Weak command reply (Leader replies after commit with slot)
 type MWeakReply struct {
 	Replica int32
@@ -127,6 +129,8 @@ type MWeakRead struct {
 	ClientId  int32
 	Key       state.Key
 }
+
+func (m *MWeakRead) GetClientId() int32 { return m.ClientId }
 
 // MWeakReadReply - Weak read reply from nearest replica (value + version)
 type MWeakReadReply struct {

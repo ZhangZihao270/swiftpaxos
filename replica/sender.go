@@ -43,7 +43,7 @@ func NewSender(r *Replica) Sender {
 			case SEND_EXCEPT:
 				sendExcept(r, arg.quorum, arg.msg, arg.rpc)
 			case SEND_CLIENT:
-				r.SendClientMsg(arg.id, arg.rpc, arg.msg)
+				r.SendClientMsgFast(arg.id, arg.rpc, arg.msg)
 			case SEND_SINGLE:
 				r.SendMsg(arg.id, arg.rpc, arg.msg)
 			case SEND_ALL_EXCEPT:

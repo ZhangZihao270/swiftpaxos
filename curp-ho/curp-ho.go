@@ -1222,7 +1222,22 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 	// Route self-Accept through the handler goroutine (via desc.msgs) instead of
 	// calling handleAccept directly. This ensures ALL desc.acks.Add() calls happen
 	// in the single handler goroutine, avoiding concurrent access to the non-thread-safe MsgSet.
-	desc.msgs <- acc
+	//
+	// For seq mode (desc.seq=true): no handler goroutine exists, so desc.msgs is
+	// never read. Instead, send AcceptAck directly via batcher (to non-leaders) and
+	// acceptAckChan (for run-loop self-counting). This ensures the AcceptAck quorum
+	// is reachable and non-leaders can commit the weak command.
+	if desc.seq {
+		selfAck := &MAcceptAck{
+			Replica: r.Id,
+			Ballot:  r.ballot,
+			CmdSlot: slot,
+		}
+		r.batcher.SendAcceptAck(selfAck)
+		r.cs.acceptAckChan <- selfAck
+	} else {
+		desc.msgs <- acc
+	}
 
 	// After commit is complete (tracked via committed map), execute in slot order
 	// Wait for commit using channel notification (replaces spin-wait)
@@ -1276,7 +1291,13 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 	// deliver() skipped this for weak commands on leader to avoid freeing desc too early.
 	r.values.Set(desc.cmdId.String(), desc.val)
 	r.delivered.Set(slotStr, struct{}{})
-	desc.msgs <- slot // triggers handler goroutine cleanup (freeDesc) and exit
+	if desc.seq {
+		// No handler goroutine to clean up — just remove from cmdDescs.
+		// Don't call freeDesc (unsafe from goroutine — run loop may still reference desc).
+		r.cmdDescs.Remove(slotStr)
+	} else {
+		desc.msgs <- slot // triggers handler goroutine cleanup (freeDesc) and exit
+	}
 }
 
 // handleCausalPropose handles a CURP-HO causal command received from a client.
@@ -1383,7 +1404,22 @@ func (r *Replica) asyncReplicateCausal(desc *commandDesc, slot int, clientId int
 	// Route self-Accept through the handler goroutine (via desc.msgs) instead of
 	// calling handleAccept directly. This ensures ALL desc.acks.Add() calls happen
 	// in the single handler goroutine, avoiding concurrent access to the non-thread-safe MsgSet.
-	desc.msgs <- acc
+	//
+	// For seq mode (desc.seq=true): no handler goroutine exists, so desc.msgs is
+	// never read. Instead, send AcceptAck directly via batcher (to non-leaders) and
+	// acceptAckChan (for run-loop self-counting). This ensures the AcceptAck quorum
+	// is reachable and non-leaders can commit the causal command.
+	if desc.seq {
+		selfAck := &MAcceptAck{
+			Replica: r.Id,
+			Ballot:  r.ballot,
+			CmdSlot: slot,
+		}
+		r.batcher.SendAcceptAck(selfAck)
+		r.cs.acceptAckChan <- selfAck
+	} else {
+		desc.msgs <- acc
+	}
 
 	// Wait for commit using channel notification
 	slotStr := strconv.Itoa(slot)
@@ -1438,7 +1474,13 @@ func (r *Replica) asyncReplicateCausal(desc *commandDesc, slot int, clientId int
 	// deliver() skipped this for weak commands on leader to avoid freeing desc too early.
 	r.values.Set(desc.cmdId.String(), desc.val)
 	r.delivered.Set(slotStr, struct{}{})
-	desc.msgs <- slot // triggers handler goroutine cleanup (freeDesc) and exit
+	if desc.seq {
+		// No handler goroutine to clean up — just remove from cmdDescs.
+		// Don't call freeDesc (unsafe from goroutine — run loop may still reference desc).
+		r.cmdDescs.Remove(slotStr)
+	} else {
+		desc.msgs <- slot // triggers handler goroutine cleanup (freeDesc) and exit
+	}
 }
 
 // waitForWeakDep waits for a causal dependency to be executed.

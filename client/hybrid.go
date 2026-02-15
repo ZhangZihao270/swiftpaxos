@@ -352,16 +352,16 @@ func (c *HybridBufferClient) PrintMetrics(duration time.Duration) {
 
 		allStrongLatencies := append(c.Metrics.StrongWriteLatency, c.Metrics.StrongReadLatency...)
 		if len(allStrongLatencies) > 0 {
-			median, p99, p999 := computePercentiles(allStrongLatencies)
-			c.Printf("  Median latency: %.2fms | P99: %.2fms | P99.9: %.2fms\n", median, p99, p999)
+			avg, median, p99, p999 := computePercentiles(allStrongLatencies)
+			c.Printf("  Avg: %.2fms | Median: %.2fms | P99: %.2fms | P99.9: %.2fms\n", avg, median, p99, p999)
 		}
 		if len(c.Metrics.StrongWriteLatency) > 0 {
-			median, p99, p999 := computePercentiles(c.Metrics.StrongWriteLatency)
-			c.Printf("  Strong Write: Median: %.2fms | P99: %.2fms | P99.9: %.2fms\n", median, p99, p999)
+			avg, median, p99, p999 := computePercentiles(c.Metrics.StrongWriteLatency)
+			c.Printf("  Strong Write: Avg: %.2fms | Median: %.2fms | P99: %.2fms | P99.9: %.2fms\n", avg, median, p99, p999)
 		}
 		if len(c.Metrics.StrongReadLatency) > 0 {
-			median, p99, p999 := computePercentiles(c.Metrics.StrongReadLatency)
-			c.Printf("  Strong Read:  Median: %.2fms | P99: %.2fms | P99.9: %.2fms\n", median, p99, p999)
+			avg, median, p99, p999 := computePercentiles(c.Metrics.StrongReadLatency)
+			c.Printf("  Strong Read:  Avg: %.2fms | Median: %.2fms | P99: %.2fms | P99.9: %.2fms\n", avg, median, p99, p999)
 		}
 	}
 
@@ -372,16 +372,16 @@ func (c *HybridBufferClient) PrintMetrics(duration time.Duration) {
 
 		allWeakLatencies := append(c.Metrics.WeakWriteLatency, c.Metrics.WeakReadLatency...)
 		if len(allWeakLatencies) > 0 {
-			median, p99, p999 := computePercentiles(allWeakLatencies)
-			c.Printf("  Median latency: %.2fms | P99: %.2fms | P99.9: %.2fms\n", median, p99, p999)
+			avg, median, p99, p999 := computePercentiles(allWeakLatencies)
+			c.Printf("  Avg: %.2fms | Median: %.2fms | P99: %.2fms | P99.9: %.2fms\n", avg, median, p99, p999)
 		}
 		if len(c.Metrics.WeakWriteLatency) > 0 {
-			median, p99, p999 := computePercentiles(c.Metrics.WeakWriteLatency)
-			c.Printf("  Weak Write:  Median: %.2fms | P99: %.2fms | P99.9: %.2fms\n", median, p99, p999)
+			avg, median, p99, p999 := computePercentiles(c.Metrics.WeakWriteLatency)
+			c.Printf("  Weak Write:  Avg: %.2fms | Median: %.2fms | P99: %.2fms | P99.9: %.2fms\n", avg, median, p99, p999)
 		}
 		if len(c.Metrics.WeakReadLatency) > 0 {
-			median, p99, p999 := computePercentiles(c.Metrics.WeakReadLatency)
-			c.Printf("  Weak Read:   Median: %.2fms | P99: %.2fms | P99.9: %.2fms\n", median, p99, p999)
+			avg, median, p99, p999 := computePercentiles(c.Metrics.WeakReadLatency)
+			c.Printf("  Weak Read:   Avg: %.2fms | Median: %.2fms | P99: %.2fms | P99.9: %.2fms\n", avg, median, p99, p999)
 		}
 	}
 
@@ -389,9 +389,9 @@ func (c *HybridBufferClient) PrintMetrics(duration time.Duration) {
 }
 
 // computePercentiles computes median, P99, and P99.9 from a slice of latencies.
-func computePercentiles(latencies []float64) (median, p99, p999 float64) {
+func computePercentiles(latencies []float64) (avg, median, p99, p999 float64) {
 	if len(latencies) == 0 {
-		return 0, 0, 0
+		return 0, 0, 0, 0
 	}
 
 	sorted := make([]float64, len(latencies))
@@ -399,6 +399,11 @@ func computePercentiles(latencies []float64) (median, p99, p999 float64) {
 	sort.Float64s(sorted)
 
 	n := len(sorted)
+	sum := 0.0
+	for _, v := range sorted {
+		sum += v
+	}
+	avg = sum / float64(n)
 	median = sorted[n/2]
 	p99 = sorted[int(float64(n)*0.99)]
 	p999Idx := int(float64(n) * 0.999)
@@ -407,7 +412,7 @@ func computePercentiles(latencies []float64) (median, p99, p999 float64) {
 	}
 	p999 = sorted[p999Idx]
 
-	return median, p99, p999
+	return avg, median, p99, p999
 }
 
 // MetricsString returns a formatted string of the metrics (for logging/testing).
@@ -593,16 +598,16 @@ func (m *HybridMetrics) Print(p Printer, totalOps int, duration time.Duration) {
 
 		allStrongLatencies := append(m.StrongWriteLatency, m.StrongReadLatency...)
 		if len(allStrongLatencies) > 0 {
-			median, p99, p999 := computePercentiles(allStrongLatencies)
-			p.Printf("  Median latency: %.2fms | P99: %.2fms | P99.9: %.2fms\n", median, p99, p999)
+			avg, median, p99, p999 := computePercentiles(allStrongLatencies)
+			p.Printf("  Avg: %.2fms | Median: %.2fms | P99: %.2fms | P99.9: %.2fms\n", avg, median, p99, p999)
 		}
 		if len(m.StrongWriteLatency) > 0 {
-			median, p99, p999 := computePercentiles(m.StrongWriteLatency)
-			p.Printf("  Strong Write: Median: %.2fms | P99: %.2fms | P99.9: %.2fms\n", median, p99, p999)
+			avg, median, p99, p999 := computePercentiles(m.StrongWriteLatency)
+			p.Printf("  Strong Write: Avg: %.2fms | Median: %.2fms | P99: %.2fms | P99.9: %.2fms\n", avg, median, p99, p999)
 		}
 		if len(m.StrongReadLatency) > 0 {
-			median, p99, p999 := computePercentiles(m.StrongReadLatency)
-			p.Printf("  Strong Read:  Median: %.2fms | P99: %.2fms | P99.9: %.2fms\n", median, p99, p999)
+			avg, median, p99, p999 := computePercentiles(m.StrongReadLatency)
+			p.Printf("  Strong Read:  Avg: %.2fms | Median: %.2fms | P99: %.2fms | P99.9: %.2fms\n", avg, median, p99, p999)
 		}
 	}
 
@@ -613,16 +618,16 @@ func (m *HybridMetrics) Print(p Printer, totalOps int, duration time.Duration) {
 
 		allWeakLatencies := append(m.WeakWriteLatency, m.WeakReadLatency...)
 		if len(allWeakLatencies) > 0 {
-			median, p99, p999 := computePercentiles(allWeakLatencies)
-			p.Printf("  Median latency: %.2fms | P99: %.2fms | P99.9: %.2fms\n", median, p99, p999)
+			avg, median, p99, p999 := computePercentiles(allWeakLatencies)
+			p.Printf("  Avg: %.2fms | Median: %.2fms | P99: %.2fms | P99.9: %.2fms\n", avg, median, p99, p999)
 		}
 		if len(m.WeakWriteLatency) > 0 {
-			median, p99, p999 := computePercentiles(m.WeakWriteLatency)
-			p.Printf("  Weak Write:  Median: %.2fms | P99: %.2fms | P99.9: %.2fms\n", median, p99, p999)
+			avg, median, p99, p999 := computePercentiles(m.WeakWriteLatency)
+			p.Printf("  Weak Write:  Avg: %.2fms | Median: %.2fms | P99: %.2fms | P99.9: %.2fms\n", avg, median, p99, p999)
 		}
 		if len(m.WeakReadLatency) > 0 {
-			median, p99, p999 := computePercentiles(m.WeakReadLatency)
-			p.Printf("  Weak Read:   Median: %.2fms | P99: %.2fms | P99.9: %.2fms\n", median, p99, p999)
+			avg, median, p99, p999 := computePercentiles(m.WeakReadLatency)
+			p.Printf("  Weak Read:   Avg: %.2fms | Median: %.2fms | P99: %.2fms | P99.9: %.2fms\n", avg, median, p99, p999)
 		}
 	}
 

@@ -2,6 +2,7 @@ package curpho
 
 import (
 	"sync"
+	"time"
 
 	"github.com/imdea-software/swiftpaxos/client"
 	"github.com/imdea-software/swiftpaxos/replica"
@@ -133,6 +134,11 @@ func NewClient(b *client.BufferClient, repNum, reqNum, pclients int) *Client {
 
 	go c.handleMsgs()
 
+	// Start MSync retry timer: periodically retransmit MSync for pending
+	// strong commands whose replies may have been dropped by the non-blocking
+	// SendClientMsgFast on the replica side.
+	c.t.Start(2 * time.Second)
+
 	return c
 }
 
@@ -150,7 +156,7 @@ func (c *Client) initMsgSets(cmdId CommandId) {
 		c.acks[cmdId] = c.acks[cmdId].ReinitMsgSet(c.Q, accept, func(interface{}) {}, c.handleFastPathAcks)
 	}
 	if initMacks {
-		c.macks[cmdId] = c.macks[cmdId].ReinitMsgSet(c.Q, accept, func(interface{}) {}, c.handleSlowPathAcks)
+		c.macks[cmdId] = c.macks[cmdId].ReinitMsgSet(c.M, accept, func(interface{}) {}, c.handleSlowPathAcks)
 	}
 }
 
@@ -182,9 +188,40 @@ func (c *Client) handleMsgs() {
 			c.handleWeakReadReply(rep)
 
 		case <-c.t.c:
-			// Timer-triggered sync intentionally disabled (see CURP paper §4.2).
-			// The slow path via SyncReply handles retransmission.
-			break
+			// Retry MSync for pending commands whose replies may have
+			// been dropped by the non-blocking SendClientMsgFast, or
+			// whose delivery is stuck in slot ordering on the proxy.
+			// Send to ALL replicas so any replica that has executed the
+			// command can reply.
+			c.mu.Lock()
+			var pendingSeqnums []int32
+			// Strong commands pending delivery
+			for seqnum := range c.strongPendingKeys {
+				if _, delivered := c.delivered[seqnum]; !delivered {
+					pendingSeqnums = append(pendingSeqnums, seqnum)
+				}
+			}
+			// Weak/causal commands pending delivery
+			for seqnum := range c.weakPending {
+				if _, delivered := c.delivered[seqnum]; !delivered {
+					pendingSeqnums = append(pendingSeqnums, seqnum)
+				}
+			}
+			clientId := c.ClientId
+			n := c.N
+			c.mu.Unlock()
+
+			if len(pendingSeqnums) > 0 {
+				c.Println("MSync retry:", len(pendingSeqnums), "pending commands")
+			}
+			for _, seqnum := range pendingSeqnums {
+				sync := &MSync{
+					CmdId: CommandId{ClientId: clientId, SeqNum: seqnum},
+				}
+				for r := int32(0); r < int32(n); r++ {
+					c.SendMsg(r, c.cs.syncRPC, sync)
+				}
+			}
 		}
 	}
 }
@@ -268,6 +305,10 @@ func (c *Client) handleSyncReply(rep *MSyncReply) {
 		c.localCache[key] = cacheEntry{value: c.val, version: c.maxVersion}
 		delete(c.strongPendingKeys, rep.CmdId.SeqNum)
 	}
+	// Clean up weak command tracking (MSync retry may deliver weak commands here)
+	delete(c.weakPending, rep.CmdId.SeqNum)
+	delete(c.weakPendingKeys, rep.CmdId.SeqNum)
+	delete(c.weakPendingValues, rep.CmdId.SeqNum)
 	c.mu.Unlock()
 	c.RegisterReply(c.val, rep.CmdId.SeqNum)
 	c.Println("Slow Paths:", c.slowPaths)
