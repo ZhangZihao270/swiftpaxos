@@ -158,6 +158,8 @@ func (m *mockHybridClient) SupportsWeak() bool {
 	return m.supportsWeak
 }
 
+func (m *mockHybridClient) MarkAllSent() {}
+
 // TestHybridClientInterface tests the HybridClient interface
 func TestHybridClientInterface(t *testing.T) {
 	mock := &mockHybridClient{supportsWeak: true}

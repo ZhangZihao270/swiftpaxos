@@ -467,3 +467,5 @@ func (c *Client) SendStrongRead(key int64) int32 {
 func (c *Client) SupportsWeak() bool {
 	return true
 }
+
+func (c *Client) MarkAllSent() {}

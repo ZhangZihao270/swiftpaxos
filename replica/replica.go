@@ -513,6 +513,7 @@ func (r *Replica) replicaListener(rid int, reader *bufio.Reader) {
 				}(obj)
 			} else {
 				r.Println("Warning: received unknown message type", msgType, "from peer", rid, "- closing connection")
+				err = io.ErrUnexpectedEOF
 				break
 			}
 		}
@@ -627,6 +628,7 @@ func (r *Replica) clientListener(conn net.Conn) {
 				}(obj)
 			} else {
 				r.Println("Warning: received unknown client message", msgType, "from", conn.RemoteAddr(), "- closing connection")
+				err = io.ErrUnexpectedEOF
 				break
 			}
 		}

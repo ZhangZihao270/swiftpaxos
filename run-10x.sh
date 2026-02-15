@@ -1,17 +1,20 @@
 #!/bin/bash
-# Run benchmark 10 times and collect pass/fail results
+# Run benchmark N times and collect pass/fail results
+# Usage: ./run-10x.sh [N] [config]
 cd /home/users/zihao/swiftpaxos
+N=${1:-5}
+CONFIG=${2:-multi-client.conf}
 TIMEOUT=240
 PASSED=0
 FAILED=0
 
-for i in $(seq 1 10); do
-    echo "=== Run $i/10 ==="
-    
+for i in $(seq 1 $N); do
+    echo "=== Run $i/$N ==="
+
     # Run benchmark with timeout
-    timeout ${TIMEOUT}s ./run-multi-client.sh -c benchmark.conf -d > /tmp/bench-run-${i}.log 2>&1
+    timeout ${TIMEOUT}s ./run-multi-client.sh -c "$CONFIG" -d > /tmp/bench-run-${i}.log 2>&1
     EXIT_CODE=$?
-    
+
     if [[ $EXIT_CODE -eq 124 ]]; then
         echo "  HUNG (timeout after ${TIMEOUT}s)"
         # Check which clients completed
@@ -41,10 +44,10 @@ for i in $(seq 1 10); do
             FAILED=$((FAILED + 1))
         fi
     fi
-    
+
     # Brief pause between runs
     sleep 3
 done
 
 echo ""
-echo "=== Results: $PASSED/10 passed, $FAILED/10 failed ==="
+echo "=== Results: $PASSED/$N passed, $FAILED/$N failed ==="

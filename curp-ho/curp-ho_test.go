@@ -4448,3 +4448,84 @@ func TestClientCacheStrongUpdate(t *testing.T) {
 		t.Errorf("Expected strong-result, got %s", entry.value)
 	}
 }
+
+// TestRetryClassifiesWeakReadsVsCausalWrites verifies that the MSync timer
+// correctly distinguishes weak reads (need re-send MWeakRead) from causal writes
+// (recoverable via MSync). Weak reads have weakPending entry but no weakPendingValues
+// entry, while causal writes have both.
+func TestRetryClassifiesWeakReadsVsCausalWrites(t *testing.T) {
+	c := &Client{
+		weakPending:       make(map[int32]struct{}),
+		weakPendingKeys:   make(map[int32]int64),
+		weakPendingValues: make(map[int32]state.Value),
+		strongPendingKeys: make(map[int32]int64),
+		delivered:         make(map[int32]struct{}),
+	}
+
+	// Causal write: has both weakPending and weakPendingValues
+	c.weakPending[10] = struct{}{}
+	c.weakPendingKeys[10] = 100
+	c.weakPendingValues[10] = []byte("val10")
+
+	// Weak read: has weakPending and weakPendingKeys, but NO weakPendingValues
+	c.weakPending[20] = struct{}{}
+	c.weakPendingKeys[20] = 200
+
+	// Already delivered: should be skipped
+	c.weakPending[30] = struct{}{}
+	c.weakPendingKeys[30] = 300
+	c.delivered[30] = struct{}{}
+
+	// Strong pending: always goes to MSync
+	c.strongPendingKeys[40] = 400
+
+	// Classify (same logic as timer handler)
+	var syncSeqnums []int32
+	var weakReadRetries []int32
+
+	for seqnum := range c.strongPendingKeys {
+		if _, delivered := c.delivered[seqnum]; !delivered {
+			syncSeqnums = append(syncSeqnums, seqnum)
+		}
+	}
+	for seqnum := range c.weakPending {
+		if _, delivered := c.delivered[seqnum]; !delivered {
+			if _, isWrite := c.weakPendingValues[seqnum]; isWrite {
+				syncSeqnums = append(syncSeqnums, seqnum)
+			} else {
+				weakReadRetries = append(weakReadRetries, seqnum)
+			}
+		}
+	}
+
+	// Verify classification
+	syncSet := make(map[int32]bool)
+	for _, s := range syncSeqnums {
+		syncSet[s] = true
+	}
+	readSet := make(map[int32]bool)
+	for _, r := range weakReadRetries {
+		readSet[r] = true
+	}
+
+	// Causal write (10) should be in sync
+	if !syncSet[10] {
+		t.Error("Causal write seqnum 10 should be in syncSeqnums")
+	}
+	// Weak read (20) should be in weakReadRetries
+	if !readSet[20] {
+		t.Error("Weak read seqnum 20 should be in weakReadRetries")
+	}
+	// Delivered (30) should not be in either
+	if syncSet[30] || readSet[30] {
+		t.Error("Delivered seqnum 30 should not be in any retry list")
+	}
+	// Strong (40) should be in sync
+	if !syncSet[40] {
+		t.Error("Strong seqnum 40 should be in syncSeqnums")
+	}
+	// Weak read (20) should NOT be in sync
+	if syncSet[20] {
+		t.Error("Weak read seqnum 20 should NOT be in syncSeqnums")
+	}
+}

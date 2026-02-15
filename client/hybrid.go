@@ -53,6 +53,10 @@ type HybridClient interface {
 
 	// SupportsWeak returns true if the client supports weak consistency commands.
 	SupportsWeak() bool
+
+	// MarkAllSent signals that all commands have been sent (drain mode).
+	// Used by protocols with MSync retry to force-deliver permanently stuck commands.
+	MarkAllSent()
 }
 
 // HybridMetrics tracks per-consistency-level metrics for the hybrid benchmark.
@@ -304,6 +308,9 @@ func (c *HybridBufferClient) HybridLoop() {
 		}
 	}
 
+	// Signal drain mode: all commands sent, waiting for final replies
+	c.hybrid.MarkAllSent()
+
 	if !c.seq {
 		<-wait
 	}
@@ -524,6 +531,9 @@ func (c *HybridBufferClient) HybridLoopWithOptions(printResults bool) {
 			<-wait
 		}
 	}
+
+	// Signal drain mode: all commands sent, waiting for final replies
+	c.hybrid.MarkAllSent()
 
 	if !c.seq {
 		<-wait

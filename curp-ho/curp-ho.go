@@ -337,6 +337,58 @@ func (r *Replica) run() {
 					Rep:     val.([]byte),
 				}
 				r.sender.SendToClient(sync.CmdId.ClientId, rep, r.cs.syncReplyRPC)
+			} else {
+				// Value not in r.values yet. Try to recover by finding the
+				// command descriptor and computing the result if committed.
+				// This handles cases where deliver() is stuck in slot ordering
+				// or the leader's run loop missed the original propose.
+				slot, hasSlot := r.slots[sync.CmdId]
+				recovered := false
+				if hasSlot {
+					slotStr := strconv.Itoa(slot)
+					if d, ok := r.cmdDescs.Get(slotStr); ok {
+						desc := d.(*commandDesc)
+						// Get the command data: from desc.cmd (causal, set via Accept)
+						// or from r.proposes (strong, set via Propose channel)
+						cmd := desc.cmd
+						if cmd.Op == 0 {
+							if p, pExists := r.proposes.Get(sync.CmdId.String()); pExists {
+								cmd = p.(*defs.GPropose).Command
+							}
+						}
+						if desc.phase == COMMIT && cmd.Op != 0 {
+							// Command is committed and we have the command data.
+							// Compute result read-only (no state modification) to
+							// unblock the client. deliver() will execute in order later.
+							result := cmd.ComputeResult(r.State)
+							rep := &MSyncReply{
+								Replica: r.Id,
+								Ballot:  r.ballot,
+								CmdId:   sync.CmdId,
+								Rep:     result,
+							}
+							r.sender.SendToClient(sync.CmdId.ClientId, rep, r.cs.syncReplyRPC)
+							recovered = true
+						}
+					}
+				}
+				if !recovered {
+					// Log details to diagnose why recovery failed
+					phase := -1
+					hasDesc := false
+					cmdOp := state.Operation(0)
+					if hasSlot {
+						slotStr2 := strconv.Itoa(slot)
+						if d2, ok2 := r.cmdDescs.Get(slotStr2); ok2 {
+							hasDesc = true
+							desc2 := d2.(*commandDesc)
+							phase = desc2.phase
+							cmdOp = desc2.cmd.Op
+						}
+					}
+					r.Printf("MSync: cmd %v not recoverable (hasSlot=%v slot=%d hasDesc=%v phase=%d cmdOp=%d)\n",
+						sync.CmdId, hasSlot, slot, hasDesc, phase, cmdOp)
+				}
 			}
 
 		case m := <-r.cs.weakProposeChan:
@@ -914,6 +966,10 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 			}
 			r.notifyExecute(slot) // Notify waiters that slot is executed
 
+			// Set r.values immediately after execution so MSync can reply
+			// even before the descriptor cleanup phase completes.
+			r.values.Set(desc.cmdId.String(), desc.val)
+
 			// CURP-HO: Clean up unsynced entry on leader after execution.
 			// On non-leaders, sync() handles cleanup. On leader, we clean up here
 			// by decrementing the count or removing the entry if no other pending ops.
@@ -1279,6 +1335,10 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 		}(slot + 1)
 	}
 
+	// Set r.values immediately after execution so MSync can reply
+	// even before the full cleanup completes.
+	r.values.Set(desc.cmdId.String(), desc.val)
+
 	// Always mark weak executed and clean up — even if deliver() ran first.
 	// deliver() skips cleanup for weak commands on leader, so we own the full lifecycle.
 	r.markWeakExecuted(clientId, seqNum)
@@ -1287,9 +1347,8 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 		r.removePendingWrite(clientId, desc.cmd.K, seqNum)
 	}
 
-	// Cleanup: save result for MSyncReply, mark delivered, then trigger handler exit.
+	// Cleanup: mark delivered, then trigger handler exit.
 	// deliver() skipped this for weak commands on leader to avoid freeing desc too early.
-	r.values.Set(desc.cmdId.String(), desc.val)
 	r.delivered.Set(slotStr, struct{}{})
 	if desc.seq {
 		// No handler goroutine to clean up — just remove from cmdDescs.
@@ -1460,6 +1519,10 @@ func (r *Replica) asyncReplicateCausal(desc *commandDesc, slot int, clientId int
 		}(slot + 1)
 	}
 
+	// Set r.values immediately after execution so MSync can reply
+	// even before the full cleanup completes.
+	r.values.Set(desc.cmdId.String(), desc.val)
+
 	// Always mark weak executed, clean up, and sync — even if deliver() ran first.
 	// deliver() skips cleanup for weak commands on leader, so we own the full lifecycle.
 	r.markWeakExecuted(clientId, seqNum)
@@ -1470,9 +1533,8 @@ func (r *Replica) asyncReplicateCausal(desc *commandDesc, slot int, clientId int
 
 	r.syncLeader(desc.cmdId, desc.cmd)
 
-	// Cleanup: save result for MSyncReply, mark delivered, then trigger handler exit.
+	// Cleanup: mark delivered, then trigger handler exit.
 	// deliver() skipped this for weak commands on leader to avoid freeing desc too early.
-	r.values.Set(desc.cmdId.String(), desc.val)
 	r.delivered.Set(slotStr, struct{}{})
 	if desc.seq {
 		// No handler goroutine to clean up — just remove from cmdDescs.
