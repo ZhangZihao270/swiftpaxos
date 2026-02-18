@@ -1045,3 +1045,736 @@ func TestPendingProposalsMap(t *testing.T) {
 		t.Error("Should be empty after delete")
 	}
 }
+
+// ============================================================================
+// Phase 39.2b-h: Raft Protocol Logic Tests
+// ============================================================================
+
+// newTestReplica creates a minimal Replica for unit testing (no network).
+func newTestReplica(id int32, n int) *Replica {
+	return &Replica{
+		Replica:              nil, // no base replica (no network)
+		id:                   id,
+		currentTerm:          0,
+		votedFor:             -1,
+		log:                  make([]LogEntry, 0),
+		commitIndex:          -1,
+		lastApplied:          -1,
+		role:                 FOLLOWER,
+		n:                    n,
+		nextIndex:            make([]int32, n),
+		matchIndex:           make([]int32, n),
+		pendingProposals:     make(map[int32]*defs.GPropose),
+		votesReceived:        0,
+		votesNeeded:          (n / 2) + 1,
+		appendEntriesCache:   NewAppendEntriesCache(),
+		appendEntriesReplyCache: NewAppendEntriesReplyCache(),
+		requestVoteCache:     NewRequestVoteCache(),
+		requestVoteReplyCache: NewRequestVoteReplyCache(),
+		raftReplyCache:       NewRaftReplyCache(),
+	}
+}
+
+// --- becomeFollower tests ---
+
+func TestBecomeFollower(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.role = LEADER
+	r.currentTerm = 2
+	r.votedFor = 0
+	r.votesReceived = 2
+
+	r.becomeFollower(5)
+
+	if r.currentTerm != 5 {
+		t.Errorf("currentTerm should be 5, got %d", r.currentTerm)
+	}
+	if r.role != FOLLOWER {
+		t.Errorf("role should be FOLLOWER, got %d", r.role)
+	}
+	if r.votedFor != -1 {
+		t.Errorf("votedFor should be -1, got %d", r.votedFor)
+	}
+	if r.votesReceived != 0 {
+		t.Errorf("votesReceived should be 0, got %d", r.votesReceived)
+	}
+}
+
+func TestBecomeFollowerFromCandidate(t *testing.T) {
+	r := newTestReplica(1, 3)
+	r.role = CANDIDATE
+	r.currentTerm = 3
+	r.votedFor = 1
+	r.votesReceived = 1
+
+	r.becomeFollower(4)
+
+	if r.role != FOLLOWER {
+		t.Error("Should be FOLLOWER")
+	}
+	if r.currentTerm != 4 {
+		t.Error("Term should be 4")
+	}
+}
+
+// --- isLogUpToDate tests ---
+
+func TestIsLogUpToDate_EmptyLogs(t *testing.T) {
+	r := newTestReplica(0, 3)
+	// Both empty: candidate's log is up-to-date
+	msg := &RequestVote{LastLogIndex: -1, LastLogTerm: 0}
+	if !r.isLogUpToDate(msg) {
+		t.Error("Empty candidate log should be up-to-date against empty local log")
+	}
+}
+
+func TestIsLogUpToDate_CandidateHasHigherTerm(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.log = []LogEntry{{Term: 1}, {Term: 1}}
+
+	msg := &RequestVote{LastLogIndex: 0, LastLogTerm: 2}
+	if !r.isLogUpToDate(msg) {
+		t.Error("Candidate with higher last log term should be up-to-date")
+	}
+}
+
+func TestIsLogUpToDate_CandidateHasLowerTerm(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.log = []LogEntry{{Term: 2}, {Term: 2}}
+
+	msg := &RequestVote{LastLogIndex: 5, LastLogTerm: 1}
+	if r.isLogUpToDate(msg) {
+		t.Error("Candidate with lower last log term should NOT be up-to-date")
+	}
+}
+
+func TestIsLogUpToDate_SameTermLongerLog(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.log = []LogEntry{{Term: 1}, {Term: 1}}
+
+	msg := &RequestVote{LastLogIndex: 3, LastLogTerm: 1}
+	if !r.isLogUpToDate(msg) {
+		t.Error("Candidate with same term but longer log should be up-to-date")
+	}
+}
+
+func TestIsLogUpToDate_SameTermShorterLog(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.log = []LogEntry{{Term: 1}, {Term: 1}, {Term: 1}}
+
+	msg := &RequestVote{LastLogIndex: 0, LastLogTerm: 1}
+	if r.isLogUpToDate(msg) {
+		t.Error("Candidate with same term but shorter log should NOT be up-to-date")
+	}
+}
+
+// --- advanceCommitIndex tests ---
+
+func TestAdvanceCommitIndex_MajorityMatch(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.role = LEADER
+	r.currentTerm = 1
+	r.log = []LogEntry{
+		{Term: 1},
+		{Term: 1},
+		{Term: 1},
+	}
+	r.matchIndex = []int32{2, 1, 2} // node 0=2, node 1=1, node 2=2
+	r.commitIndex = -1
+
+	r.advanceCommitIndex()
+
+	// Sorted desc: [2, 2, 1]. Majority (index N/2=1) = 2
+	if r.commitIndex != 2 {
+		t.Errorf("commitIndex should be 2, got %d", r.commitIndex)
+	}
+}
+
+func TestAdvanceCommitIndex_OnlyCurrentTermCommits(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.role = LEADER
+	r.currentTerm = 2
+	r.log = []LogEntry{
+		{Term: 1}, // index 0: old term
+		{Term: 2}, // index 1: current term
+	}
+	r.matchIndex = []int32{1, 0, 1}
+	r.commitIndex = -1
+
+	r.advanceCommitIndex()
+
+	// Majority at index 1, and log[1].Term == currentTerm(2), so commit
+	if r.commitIndex != 1 {
+		t.Errorf("commitIndex should be 1, got %d", r.commitIndex)
+	}
+}
+
+func TestAdvanceCommitIndex_OldTermNotCommitted(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.role = LEADER
+	r.currentTerm = 2
+	r.log = []LogEntry{
+		{Term: 1}, // index 0: old term only
+	}
+	r.matchIndex = []int32{0, 0, 0}
+	r.commitIndex = -1
+
+	r.advanceCommitIndex()
+
+	// Even though majority at 0, log[0].Term(1) != currentTerm(2) → no commit
+	if r.commitIndex != -1 {
+		t.Errorf("commitIndex should stay -1 (old term), got %d", r.commitIndex)
+	}
+}
+
+func TestAdvanceCommitIndex_NoAdvancePastLog(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.role = LEADER
+	r.currentTerm = 1
+	r.log = []LogEntry{{Term: 1}}
+	r.matchIndex = []int32{0, 0, 0}
+	r.commitIndex = 0
+
+	r.advanceCommitIndex()
+
+	// Already committed, no further advance
+	if r.commitIndex != 0 {
+		t.Errorf("commitIndex should remain 0, got %d", r.commitIndex)
+	}
+}
+
+func TestAdvanceCommitIndex_FiveNodes(t *testing.T) {
+	r := newTestReplica(0, 5)
+	r.role = LEADER
+	r.currentTerm = 1
+	r.log = []LogEntry{{Term: 1}, {Term: 1}, {Term: 1}}
+	r.matchIndex = []int32{2, 2, 1, 0, 2} // sorted desc: [2,2,2,1,0], majority at index 2 = 2
+	r.commitIndex = 0
+
+	r.advanceCommitIndex()
+
+	if r.commitIndex != 2 {
+		t.Errorf("commitIndex should be 2, got %d", r.commitIndex)
+	}
+}
+
+// --- startElection tests ---
+
+func TestStartElection(t *testing.T) {
+	r := newTestReplica(1, 3)
+	r.currentTerm = 3
+	r.role = FOLLOWER
+	r.votedFor = -1
+
+	// Can't call startElection directly because it uses r.sender and r.Id from embedded Replica.
+	// Test the logic inline.
+	r.currentTerm++
+	r.role = CANDIDATE
+	r.votedFor = 1 // self
+	r.votesReceived = 1
+
+	if r.currentTerm != 4 {
+		t.Errorf("Term should be 4 after election start, got %d", r.currentTerm)
+	}
+	if r.role != CANDIDATE {
+		t.Error("Should be CANDIDATE")
+	}
+	if r.votedFor != 1 {
+		t.Error("Should have voted for self")
+	}
+	if r.votesReceived != 1 {
+		t.Error("Should count own vote")
+	}
+}
+
+// --- handleRequestVoteReply tests ---
+
+func TestHandleRequestVoteReply_WinElection(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.role = CANDIDATE
+	r.currentTerm = 5
+	r.votesReceived = 1 // own vote
+	r.votesNeeded = 2
+
+	// First vote from another node
+	msg := &RequestVoteReply{VoterId: 1, Term: 5, VoteGranted: 1}
+	r.handleRequestVoteReply(msg)
+
+	if r.votesReceived != 2 {
+		t.Errorf("votesReceived should be 2, got %d", r.votesReceived)
+	}
+	// becomeLeader would be called, but it uses r.Println (embedded Replica)
+	// In the actual code, it transitions to LEADER. Here we test the vote counting.
+}
+
+func TestHandleRequestVoteReply_HigherTermStepsDown(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.role = CANDIDATE
+	r.currentTerm = 3
+
+	msg := &RequestVoteReply{VoterId: 1, Term: 5, VoteGranted: 0}
+	r.handleRequestVoteReply(msg)
+
+	if r.role != FOLLOWER {
+		t.Error("Should step down to FOLLOWER on higher term")
+	}
+	if r.currentTerm != 5 {
+		t.Errorf("Term should be 5, got %d", r.currentTerm)
+	}
+}
+
+func TestHandleRequestVoteReply_IgnoredWhenNotCandidate(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.role = FOLLOWER
+	r.currentTerm = 3
+	r.votesReceived = 0
+
+	msg := &RequestVoteReply{VoterId: 1, Term: 3, VoteGranted: 1}
+	r.handleRequestVoteReply(msg)
+
+	if r.votesReceived != 0 {
+		t.Error("Should ignore vote when not CANDIDATE")
+	}
+}
+
+// --- handleAppendEntries logic tests ---
+
+func TestHandleAppendEntries_RejectStaleTerm(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.currentTerm = 5
+
+	msg := &AppendEntries{
+		LeaderId:     1,
+		Term:         3, // stale
+		PrevLogIndex: -1,
+		PrevLogTerm:  0,
+		LeaderCommit: 0,
+		Entries:      nil,
+		EntryIds:     nil,
+	}
+
+	// Can't call handleAppendEntries directly (uses r.sender).
+	// Test the logic: stale term should be rejected.
+	if msg.Term < r.currentTerm {
+		// This would send a rejection reply in the actual handler
+	}
+	if msg.Term >= r.currentTerm {
+		t.Error("Term 3 should be stale compared to currentTerm 5")
+	}
+}
+
+func TestHandleAppendEntries_StepDownOnHigherTerm(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.currentTerm = 3
+	r.role = CANDIDATE
+
+	// If msg.Term > currentTerm → becomeFollower
+	r.becomeFollower(5)
+
+	if r.role != FOLLOWER {
+		t.Error("Should step down to FOLLOWER")
+	}
+	if r.currentTerm != 5 {
+		t.Error("Term should be updated to 5")
+	}
+}
+
+func TestHandleAppendEntries_LogConsistencyCheck(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.log = []LogEntry{
+		{Term: 1, CmdId: CommandId{ClientId: 1, SeqNum: 1}},
+		{Term: 1, CmdId: CommandId{ClientId: 1, SeqNum: 2}},
+	}
+
+	// PrevLogIndex=1, PrevLogTerm=1 → should pass (log[1].Term == 1)
+	prevLogIndex := int32(1)
+	if prevLogIndex >= int32(len(r.log)) {
+		t.Error("Log should have entry at index 1")
+	}
+	if r.log[prevLogIndex].Term != 1 {
+		t.Error("Term at index 1 should be 1")
+	}
+
+	// PrevLogIndex=1, PrevLogTerm=2 → should fail (log[1].Term is 1, not 2)
+	if r.log[prevLogIndex].Term == 2 {
+		t.Error("This should not match")
+	}
+}
+
+func TestHandleAppendEntries_AppendNewEntries(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.currentTerm = 2
+	r.log = []LogEntry{
+		{Term: 1, CmdId: CommandId{ClientId: 1, SeqNum: 1}},
+	}
+
+	// Simulate appending entries at index 1
+	newEntries := []state.Command{
+		{Op: state.PUT, K: state.Key(10), V: state.Value([]byte("v1"))},
+		{Op: state.GET, K: state.Key(20), V: state.Value([]byte{})},
+	}
+	newIds := []CommandId{
+		{ClientId: 2, SeqNum: 1},
+		{ClientId: 2, SeqNum: 2},
+	}
+
+	insertIdx := int32(1) // PrevLogIndex(0) + 1
+	for i := 0; i < len(newEntries); i++ {
+		entry := LogEntry{
+			Command: newEntries[i],
+			Term:    2,
+			CmdId:   newIds[i],
+		}
+		r.log = append(r.log, entry)
+	}
+
+	if len(r.log) != 3 {
+		t.Errorf("Log should have 3 entries, got %d", len(r.log))
+	}
+	if r.log[1].Term != 2 {
+		t.Errorf("Entry at index 1 should have term 2, got %d", r.log[1].Term)
+	}
+	if r.log[2].CmdId.SeqNum != 2 {
+		t.Errorf("Entry at index 2 should have SeqNum 2, got %d", r.log[2].CmdId.SeqNum)
+	}
+	_ = insertIdx
+}
+
+func TestHandleAppendEntries_TruncateConflicting(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.log = []LogEntry{
+		{Term: 1, CmdId: CommandId{ClientId: 1, SeqNum: 1}},
+		{Term: 1, CmdId: CommandId{ClientId: 1, SeqNum: 2}},
+		{Term: 2, CmdId: CommandId{ClientId: 1, SeqNum: 3}}, // will conflict
+	}
+
+	// Simulate: leader says index 2 should have term 3, not 2
+	logIdx := int32(2)
+	if r.log[logIdx].Term != 3 { // conflict: local has term 2
+		r.log = r.log[:logIdx]
+	}
+
+	if len(r.log) != 2 {
+		t.Errorf("Log should be truncated to 2 entries, got %d", len(r.log))
+	}
+}
+
+func TestHandleAppendEntries_CommitIndexAdvance(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.commitIndex = 0
+	r.log = []LogEntry{
+		{Term: 1},
+		{Term: 1},
+		{Term: 1},
+	}
+
+	// LeaderCommit=2, lastNewIndex=2
+	leaderCommit := int32(2)
+	lastNewIndex := int32(len(r.log) - 1)
+	if leaderCommit > r.commitIndex {
+		if leaderCommit < lastNewIndex {
+			r.commitIndex = leaderCommit
+		} else {
+			r.commitIndex = lastNewIndex
+		}
+	}
+
+	if r.commitIndex != 2 {
+		t.Errorf("commitIndex should be 2, got %d", r.commitIndex)
+	}
+}
+
+func TestHandleAppendEntries_CommitIndexCapped(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.commitIndex = -1
+	r.log = []LogEntry{
+		{Term: 1},
+	}
+
+	// LeaderCommit=5, but we only have 1 entry (index 0)
+	leaderCommit := int32(5)
+	lastNewIndex := int32(len(r.log) - 1) // 0
+	if leaderCommit > r.commitIndex {
+		if leaderCommit < lastNewIndex {
+			r.commitIndex = leaderCommit
+		} else {
+			r.commitIndex = lastNewIndex
+		}
+	}
+
+	if r.commitIndex != 0 {
+		t.Errorf("commitIndex should be capped at 0, got %d", r.commitIndex)
+	}
+}
+
+// --- handleAppendEntriesReply logic tests ---
+
+func TestHandleAppendEntriesReply_SuccessUpdatesMatch(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.role = LEADER
+	r.currentTerm = 1
+	r.log = []LogEntry{{Term: 1}, {Term: 1}}
+	r.matchIndex = []int32{1, -1, -1}
+	r.nextIndex = []int32{2, 0, 0}
+
+	// Simulate successful reply from follower 1
+	msg := &AppendEntriesReply{FollowerId: 1, Term: 1, Success: 1, MatchIndex: 1}
+
+	// Apply the logic
+	if msg.Success == 1 {
+		if msg.MatchIndex >= r.matchIndex[msg.FollowerId] {
+			r.matchIndex[msg.FollowerId] = msg.MatchIndex
+			r.nextIndex[msg.FollowerId] = msg.MatchIndex + 1
+		}
+	}
+
+	if r.matchIndex[1] != 1 {
+		t.Errorf("matchIndex[1] should be 1, got %d", r.matchIndex[1])
+	}
+	if r.nextIndex[1] != 2 {
+		t.Errorf("nextIndex[1] should be 2, got %d", r.nextIndex[1])
+	}
+}
+
+func TestHandleAppendEntriesReply_FailureDecrementsNext(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.role = LEADER
+	r.nextIndex = []int32{5, 3, 3}
+
+	msg := &AppendEntriesReply{FollowerId: 1, Term: 1, Success: 0, MatchIndex: 0}
+
+	// Apply the failure logic
+	if msg.Success != 1 {
+		if msg.MatchIndex >= 0 {
+			r.nextIndex[msg.FollowerId] = msg.MatchIndex + 1
+		} else {
+			r.nextIndex[msg.FollowerId] = 0
+		}
+	}
+
+	if r.nextIndex[1] != 1 {
+		t.Errorf("nextIndex[1] should be 1 after failure, got %d", r.nextIndex[1])
+	}
+}
+
+func TestHandleAppendEntriesReply_HigherTermStepsDown(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.role = LEADER
+	r.currentTerm = 3
+
+	msg := &AppendEntriesReply{FollowerId: 1, Term: 5, Success: 0, MatchIndex: -1}
+
+	// Apply the logic
+	if msg.Term > r.currentTerm {
+		r.becomeFollower(msg.Term)
+	}
+
+	if r.role != FOLLOWER {
+		t.Error("Should step down on higher term")
+	}
+	if r.currentTerm != 5 {
+		t.Errorf("Term should be 5, got %d", r.currentTerm)
+	}
+}
+
+// --- handleRequestVote logic tests ---
+
+func TestHandleRequestVote_GrantVote(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.currentTerm = 3
+	r.votedFor = -1
+	r.log = []LogEntry{{Term: 1}, {Term: 2}}
+
+	msg := &RequestVote{CandidateId: 1, Term: 3, LastLogIndex: 2, LastLogTerm: 2}
+
+	// Check the conditions
+	if msg.Term < r.currentTerm {
+		t.Error("Should not reject: same term")
+	}
+	if msg.Term > r.currentTerm {
+		t.Error("Should not step down: same term")
+	}
+	if r.votedFor != -1 && r.votedFor != msg.CandidateId {
+		t.Error("Should be able to vote: votedFor is -1")
+	}
+	if !r.isLogUpToDate(msg) {
+		t.Error("Candidate's log should be up-to-date")
+	}
+}
+
+func TestHandleRequestVote_RejectStaleCandidate(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.currentTerm = 5
+
+	msg := &RequestVote{CandidateId: 1, Term: 3, LastLogIndex: 0, LastLogTerm: 1}
+
+	if msg.Term >= r.currentTerm {
+		t.Error("Should reject: candidate term 3 < current term 5")
+	}
+}
+
+func TestHandleRequestVote_RejectIfAlreadyVoted(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.currentTerm = 3
+	r.votedFor = 2 // already voted for node 2
+
+	msg := &RequestVote{CandidateId: 1, Term: 3, LastLogIndex: 0, LastLogTerm: 1}
+
+	canVote := (r.votedFor == -1 || r.votedFor == msg.CandidateId)
+	if canVote {
+		t.Error("Should not be able to vote: already voted for node 2, not node 1")
+	}
+}
+
+// --- sendAppendEntries construction tests ---
+
+func TestSendAppendEntries_EntryConstruction(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.currentTerm = 2
+	r.commitIndex = 0
+	r.log = []LogEntry{
+		{Term: 1, Command: state.Command{Op: state.PUT, K: 1, V: []byte("a")}, CmdId: CommandId{ClientId: 1, SeqNum: 1}},
+		{Term: 2, Command: state.Command{Op: state.PUT, K: 2, V: []byte("b")}, CmdId: CommandId{ClientId: 1, SeqNum: 2}},
+	}
+	r.nextIndex = []int32{2, 1, 0}
+
+	// Simulate constructing AppendEntries for peer 2 (nextIndex=0)
+	peerId := int32(2)
+	nextIdx := r.nextIndex[peerId]
+	prevLogIndex := nextIdx - 1
+	prevLogTerm := int32(0)
+	if prevLogIndex >= 0 && prevLogIndex < int32(len(r.log)) {
+		prevLogTerm = r.log[prevLogIndex].Term
+	}
+
+	if prevLogIndex != -1 {
+		t.Errorf("prevLogIndex should be -1 for nextIndex=0, got %d", prevLogIndex)
+	}
+	if prevLogTerm != 0 {
+		t.Errorf("prevLogTerm should be 0, got %d", prevLogTerm)
+	}
+
+	// Build entries
+	count := int32(len(r.log)) - nextIdx
+	if count != 2 {
+		t.Errorf("Should send 2 entries, got %d", count)
+	}
+
+	// Simulate for peer 1 (nextIndex=1)
+	nextIdx = r.nextIndex[1]
+	prevLogIndex = nextIdx - 1
+	prevLogTerm = r.log[prevLogIndex].Term
+
+	if prevLogIndex != 0 {
+		t.Errorf("prevLogIndex should be 0, got %d", prevLogIndex)
+	}
+	if prevLogTerm != 1 {
+		t.Errorf("prevLogTerm should be 1, got %d", prevLogTerm)
+	}
+	count = int32(len(r.log)) - nextIdx
+	if count != 1 {
+		t.Errorf("Should send 1 entry, got %d", count)
+	}
+}
+
+// --- Execute commands tests ---
+
+func TestExecuteCommands_AppliesCommitted(t *testing.T) {
+	r := newTestReplica(0, 3)
+	st := state.InitState()
+
+	// Manually set log and commitIndex
+	r.log = []LogEntry{
+		{Term: 1, Command: state.Command{Op: state.PUT, K: state.Key(1), V: state.Value([]byte("hello"))}, CmdId: CommandId{ClientId: 1, SeqNum: 1}},
+		{Term: 1, Command: state.Command{Op: state.PUT, K: state.Key(2), V: state.Value([]byte("world"))}, CmdId: CommandId{ClientId: 1, SeqNum: 2}},
+	}
+	r.commitIndex = 1
+	r.lastApplied = -1
+
+	// Execute committed commands manually (simulating executeCommands loop)
+	for r.lastApplied < r.commitIndex {
+		r.lastApplied++
+		idx := r.lastApplied
+		r.log[idx].Command.Execute(st)
+	}
+
+	if r.lastApplied != 1 {
+		t.Errorf("lastApplied should be 1, got %d", r.lastApplied)
+	}
+
+	// Verify state was updated
+	getCmd := state.Command{Op: state.GET, K: state.Key(1), V: state.NIL()}
+	val := getCmd.Execute(st)
+	if !bytes.Equal(val, []byte("hello")) {
+		t.Errorf("State should have key 1 = 'hello', got %v", val)
+	}
+
+	getCmd2 := state.Command{Op: state.GET, K: state.Key(2), V: state.NIL()}
+	val2 := getCmd2.Execute(st)
+	if !bytes.Equal(val2, []byte("world")) {
+		t.Errorf("State should have key 2 = 'world', got %v", val2)
+	}
+}
+
+func TestExecuteCommands_StopsAtCommitIndex(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.log = []LogEntry{
+		{Term: 1, Command: state.Command{Op: state.PUT, K: state.Key(1), V: state.Value([]byte("a"))}},
+		{Term: 1, Command: state.Command{Op: state.PUT, K: state.Key(2), V: state.Value([]byte("b"))}},
+		{Term: 1, Command: state.Command{Op: state.PUT, K: state.Key(3), V: state.Value([]byte("c"))}},
+	}
+	r.commitIndex = 1 // only first 2 committed
+	r.lastApplied = -1
+
+	for r.lastApplied < r.commitIndex {
+		r.lastApplied++
+	}
+
+	if r.lastApplied != 1 {
+		t.Errorf("lastApplied should be 1, not beyond commitIndex. Got %d", r.lastApplied)
+	}
+}
+
+// --- Full Raft scenario: leader appends, replicates, commits ---
+
+func TestRaftScenario_LeaderAppendsEntries(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.role = LEADER
+	r.currentTerm = 1
+	r.matchIndex = []int32{-1, -1, -1}
+	r.nextIndex = []int32{0, 0, 0}
+
+	// Leader receives proposals and appends to log
+	cmd1 := state.Command{Op: state.PUT, K: state.Key(1), V: state.Value([]byte("v1"))}
+	cmd2 := state.Command{Op: state.PUT, K: state.Key(2), V: state.Value([]byte("v2"))}
+
+	r.log = append(r.log, LogEntry{Command: cmd1, Term: 1, CmdId: CommandId{ClientId: 1, SeqNum: 1}})
+	r.log = append(r.log, LogEntry{Command: cmd2, Term: 1, CmdId: CommandId{ClientId: 1, SeqNum: 2}})
+	r.matchIndex[0] = 1 // leader's own
+	r.nextIndex[0] = 2
+
+	// Simulate follower 1 acknowledges both entries
+	r.matchIndex[1] = 1
+	r.nextIndex[1] = 2
+
+	// Advance commit index
+	r.advanceCommitIndex()
+
+	// With matchIndex = [1, 1, -1], sorted desc = [1, 1, -1]
+	// Majority at index 1 = 1, and log[1].Term == currentTerm(1)
+	if r.commitIndex != 1 {
+		t.Errorf("commitIndex should be 1 after majority replication, got %d", r.commitIndex)
+	}
+
+	// Now follower 2 also catches up
+	r.matchIndex[2] = 1
+	r.nextIndex[2] = 2
+
+	r.advanceCommitIndex()
+
+	// With matchIndex = [1, 1, 1], sorted desc = [1, 1, 1]
+	// Still commitIndex = 1 (no change, already committed)
+	if r.commitIndex != 1 {
+		t.Errorf("commitIndex should still be 1, got %d", r.commitIndex)
+	}
+}

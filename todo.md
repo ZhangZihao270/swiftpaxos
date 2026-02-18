@@ -2059,13 +2059,13 @@ heartbeatTimer  → sendHeartbeats (empty AppendEntries to all followers)
 
 **Tasks**:
 - [x] **39.2a** Define Replica struct, LogEntry, RaftState constants, New() constructor
-- [ ] **39.2b** Implement run() event loop with election/heartbeat timers
-- [ ] **39.2c** Implement handlePropose() — batch proposals, append to log, broadcast AppendEntries
-- [ ] **39.2d** Implement handleAppendEntries() — term check, log matching, entry append, commitIndex advance
-- [ ] **39.2e** Implement handleAppendEntriesReply() — update nextIndex/matchIndex, advance commitIndex, reply to clients
-- [ ] **39.2f** Implement handleRequestVote() and handleRequestVoteReply()
-- [ ] **39.2g** Implement startElection() and sendHeartbeats()
-- [ ] **39.2h** Implement executeCommands() goroutine — apply committed entries, send RaftReply
+- [x] **39.2b** Implement run() event loop with election/heartbeat timers
+- [x] **39.2c** Implement handlePropose() — batch proposals, append to log, broadcast AppendEntries
+- [x] **39.2d** Implement handleAppendEntries() — term check, log matching, entry append, commitIndex advance
+- [x] **39.2e** Implement handleAppendEntriesReply() — update nextIndex/matchIndex, advance commitIndex, reply to clients
+- [x] **39.2f** Implement handleRequestVote() and handleRequestVoteReply()
+- [x] **39.2g** Implement startElection() and sendHeartbeats()
+- [x] **39.2h** Implement executeCommands() goroutine — apply committed entries, send RaftReply
 - [x] **39.2i** Implement BeTheLeader() for master-based initial leader assignment (done in 39.2a)
 
 ### Phase 39.3: Client Logic — `raft/client.go` (~150 LOC)

@@ -1,6 +1,8 @@
 package raft
 
 import (
+	"math/rand"
+	"sort"
 	"sync"
 	"time"
 
@@ -61,6 +63,13 @@ type Replica struct {
 	electionTimeout  time.Duration
 	heartbeatTimeout time.Duration
 
+	// Replica identity and cluster size
+	id int32
+	n  int
+
+	// Batching
+	batchWait int // batch delay in microseconds (0 = disabled)
+
 	// Cache pools for message allocation
 	appendEntriesCache      *AppendEntriesCache
 	appendEntriesReplyCache *AppendEntriesReplyCache
@@ -87,6 +96,8 @@ func New(alias string, id int, addrs []string, isLeader bool, f int,
 		lastApplied: -1,
 		role:        FOLLOWER,
 
+		id:         int32(id),
+		n:          n,
 		nextIndex:  make([]int32, n),
 		matchIndex: make([]int32, n),
 
@@ -100,6 +111,15 @@ func New(alias string, id int, addrs []string, isLeader bool, f int,
 		requestVoteCache:        NewRequestVoteCache(),
 		requestVoteReplyCache:   NewRequestVoteReplyCache(),
 		raftReplyCache:          NewRaftReplyCache(),
+	}
+
+	// Set timer durations
+	r.electionTimeout = time.Duration(300+rand.Intn(200)) * time.Millisecond
+	r.heartbeatTimeout = 100 * time.Millisecond
+
+	// Set batch delay from config
+	if conf.BatchDelayUs > 0 {
+		r.batchWait = conf.BatchDelayUs
 	}
 
 	// Initialize leader volatile state
@@ -129,45 +149,80 @@ func New(alias string, id int, addrs []string, isLeader bool, f int,
 // For Raft, this means transitioning to LEADER state and initializing leader state.
 func (r *Replica) BeTheLeader(args *defs.BeTheLeaderArgs, reply *defs.BeTheLeaderReply) error {
 	r.role = LEADER
-	r.votedFor = r.Id
+	r.votedFor = r.id
 
 	// Initialize nextIndex and matchIndex for all peers
 	lastLogIndex := int32(len(r.log) - 1)
-	for i := 0; i < r.N; i++ {
+	for i := 0; i < r.n; i++ {
 		r.nextIndex[i] = lastLogIndex + 1
 		r.matchIndex[i] = -1
 	}
 	// Leader knows its own match index
-	r.matchIndex[r.Id] = lastLogIndex
+	r.matchIndex[r.id] = lastLogIndex
 
-	r.Println("I am the Raft leader at term", r.currentTerm)
+	r.println("I am the Raft leader at term", r.currentTerm)
 
 	if reply != nil {
-		reply.Leader = r.Id
-		reply.NextLeader = r.Id
+		reply.Leader = r.id
+		reply.NextLeader = r.id
 	}
 	return nil
 }
 
 // run is the main event loop for the Raft replica.
-// It handles all incoming messages and timer events in a single goroutine.
+// All message handling and timer events are processed in this single goroutine.
 func (r *Replica) run() {
 	r.ConnectToPeers()
 	r.ComputeClosestPeers()
 
-	go r.WaitForClientConnections()
+	// Launch command execution goroutine
+	go r.executeCommands()
 
-	// TODO(39.2b): Implement event loop with election/heartbeat timers
-	// TODO(39.2h): Launch executeCommands() goroutine
+	// Set up batch timer
+	var batchClockChan chan bool
+	if r.batchWait > 0 {
+		batchClockChan = make(chan bool, 1)
+		go func() {
+			for !r.Shutdown {
+				time.Sleep(time.Duration(r.batchWait) * time.Microsecond)
+				batchClockChan <- true
+			}
+		}()
+	}
+
+	// Set up election and heartbeat timers
+	electionTimer := time.NewTimer(r.electionTimeout)
+	heartbeatTimer := time.NewTimer(r.heartbeatTimeout)
+
+	// Leader doesn't need election timer; followers don't need heartbeat timer
+	if r.role == LEADER {
+		electionTimer.Stop()
+	} else {
+		heartbeatTimer.Stop()
+	}
+
+	onOffProposeChan := r.ProposeChan
+
+	go r.WaitForClientConnections()
 
 	for !r.Shutdown {
 		select {
-		case propose := <-r.ProposeChan:
+		case propose := <-onOffProposeChan:
 			r.handlePropose(propose)
+			if r.batchWait > 0 {
+				onOffProposeChan = nil
+			}
+
+		case <-batchClockChan:
+			onOffProposeChan = r.ProposeChan
 
 		case m := <-r.cs.appendEntriesChan:
 			ae := m.(*AppendEntries)
 			r.handleAppendEntries(ae)
+			// Reset election timer on valid AppendEntries (leader is alive)
+			if ae.Term >= r.currentTerm {
+				r.resetElectionTimer(electionTimer)
+			}
 
 		case m := <-r.cs.appendEntriesReplyChan:
 			aer := m.(*AppendEntriesReply)
@@ -180,28 +235,453 @@ func (r *Replica) run() {
 		case m := <-r.cs.requestVoteReplyChan:
 			rvr := m.(*RequestVoteReply)
 			r.handleRequestVoteReply(rvr)
+
+		case <-electionTimer.C:
+			if r.role != LEADER {
+				r.startElection()
+				r.resetElectionTimer(electionTimer)
+			}
+
+		case <-heartbeatTimer.C:
+			if r.role == LEADER {
+				r.sendHeartbeats()
+				heartbeatTimer.Reset(r.heartbeatTimeout)
+			}
 		}
 	}
 }
 
-// --- Stub handlers (to be implemented in subsequent phases) ---
+// println logs a message if the base replica is available.
+func (r *Replica) println(v ...interface{}) {
+	if r.Replica != nil {
+		r.Replica.Println(v...)
+	}
+}
+
+// resetElectionTimer resets the election timer with a randomized timeout.
+func (r *Replica) resetElectionTimer(t *time.Timer) {
+	timeout := time.Duration(300+rand.Intn(200)) * time.Millisecond
+	t.Reset(timeout)
+}
+
+// becomeFollower transitions to follower state for a new term.
+func (r *Replica) becomeFollower(term int32) {
+	r.currentTerm = term
+	r.role = FOLLOWER
+	r.votedFor = -1
+	r.votesReceived = 0
+}
+
+// becomeLeader transitions to leader state after winning an election.
+func (r *Replica) becomeLeader() {
+	r.role = LEADER
+	r.println("Became Raft leader at term", r.currentTerm)
+
+	lastLogIndex := int32(len(r.log) - 1)
+	for i := 0; i < r.n; i++ {
+		r.nextIndex[i] = lastLogIndex + 1
+		r.matchIndex[i] = -1
+	}
+	r.matchIndex[r.id] = lastLogIndex
+
+	// Send immediate heartbeat to assert authority
+	if r.Replica != nil {
+		r.sendHeartbeats()
+	}
+}
+
+// --- handlePropose: Batch proposals, append to log, broadcast AppendEntries ---
 
 func (r *Replica) handlePropose(propose *defs.GPropose) {
-	// TODO(39.2c): Batch proposals, append to log, broadcast AppendEntries
+	if r.role != LEADER {
+		// Reject: only leader accepts proposals
+		preply := &defs.ProposeReplyTS{
+			OK:        defs.FALSE,
+			CommandId: propose.CommandId,
+			Value:     state.NIL(),
+			Timestamp: propose.Timestamp,
+		}
+		r.ReplyProposeTS(preply, propose.Reply, propose.Mutex)
+		return
+	}
+
+	// Batch: drain all queued proposals
+	batchSize := len(r.ProposeChan) + 1
+	proposals := make([]*defs.GPropose, batchSize)
+	proposals[0] = propose
+	for i := 1; i < batchSize; i++ {
+		proposals[i] = <-r.ProposeChan
+	}
+
+	// Append entries to log
+	entries := make([]state.Command, batchSize)
+	entryIds := make([]CommandId, batchSize)
+	startIndex := int32(len(r.log))
+
+	for i, p := range proposals {
+		cmdId := CommandId{ClientId: p.ClientId, SeqNum: p.CommandId}
+		entry := LogEntry{
+			Command: p.Command,
+			Term:    r.currentTerm,
+			CmdId:   cmdId,
+		}
+		r.log = append(r.log, entry)
+		entries[i] = p.Command
+		entryIds[i] = cmdId
+
+		// Store pending proposal for reply on commit
+		idx := startIndex + int32(i)
+		r.pendingMu.Lock()
+		r.pendingProposals[idx] = p
+		r.pendingMu.Unlock()
+	}
+
+	// Update leader's own matchIndex
+	r.matchIndex[r.id] = int32(len(r.log) - 1)
+
+	// Broadcast AppendEntries to all followers
+	r.broadcastAppendEntries()
 }
+
+// broadcastAppendEntries sends AppendEntries RPCs to all followers.
+func (r *Replica) broadcastAppendEntries() {
+	for i := int32(0); i < int32(r.n); i++ {
+		if i == r.id {
+			continue
+		}
+		r.sendAppendEntries(i)
+	}
+}
+
+// sendAppendEntries sends an AppendEntries RPC to a specific follower.
+func (r *Replica) sendAppendEntries(peerId int32) {
+	nextIdx := r.nextIndex[peerId]
+	if nextIdx < 0 {
+		nextIdx = 0
+	}
+
+	prevLogIndex := nextIdx - 1
+	prevLogTerm := int32(0)
+	if prevLogIndex >= 0 && prevLogIndex < int32(len(r.log)) {
+		prevLogTerm = r.log[prevLogIndex].Term
+	}
+
+	// Collect entries from nextIndex to end of log
+	var entries []state.Command
+	var entryIds []CommandId
+	if nextIdx < int32(len(r.log)) {
+		count := int32(len(r.log)) - nextIdx
+		entries = make([]state.Command, count)
+		entryIds = make([]CommandId, count)
+		for j := int32(0); j < count; j++ {
+			entries[j] = r.log[nextIdx+j].Command
+			entryIds[j] = r.log[nextIdx+j].CmdId
+		}
+	}
+
+	ae := r.appendEntriesCache.Get()
+	ae.LeaderId = r.id
+	ae.Term = r.currentTerm
+	ae.PrevLogIndex = prevLogIndex
+	ae.PrevLogTerm = prevLogTerm
+	ae.LeaderCommit = r.commitIndex
+	ae.EntryCnt = int32(len(entries))
+	ae.Entries = entries
+	ae.EntryIds = entryIds
+
+	r.sender.SendTo(peerId, ae, r.cs.appendEntriesRPC)
+}
+
+// --- handleAppendEntries: Term check, log matching, entry append, commitIndex advance ---
 
 func (r *Replica) handleAppendEntries(msg *AppendEntries) {
-	// TODO(39.2d): Term check, log matching, entry append, commitIndex advance
+	// Reply false if term < currentTerm (§5.1)
+	if msg.Term < r.currentTerm {
+		reply := r.appendEntriesReplyCache.Get()
+		reply.FollowerId = r.id
+		reply.Term = r.currentTerm
+		reply.Success = 0
+		reply.MatchIndex = -1
+		r.sender.SendTo(msg.LeaderId, reply, r.cs.appendEntriesReplyRPC)
+		return
+	}
+
+	// If term > currentTerm, step down
+	if msg.Term > r.currentTerm {
+		r.becomeFollower(msg.Term)
+	} else if r.role == CANDIDATE {
+		// Same term but valid leader exists — step down from candidacy
+		r.role = FOLLOWER
+		r.votesReceived = 0
+	}
+
+	// Log consistency check: verify entry at PrevLogIndex has matching term
+	if msg.PrevLogIndex >= 0 {
+		if msg.PrevLogIndex >= int32(len(r.log)) {
+			// Log too short
+			reply := r.appendEntriesReplyCache.Get()
+			reply.FollowerId = r.id
+			reply.Term = r.currentTerm
+			reply.Success = 0
+			reply.MatchIndex = int32(len(r.log) - 1)
+			r.sender.SendTo(msg.LeaderId, reply, r.cs.appendEntriesReplyRPC)
+			return
+		}
+		if r.log[msg.PrevLogIndex].Term != msg.PrevLogTerm {
+			// Term mismatch: delete this entry and all that follow (§5.3)
+			r.log = r.log[:msg.PrevLogIndex]
+			reply := r.appendEntriesReplyCache.Get()
+			reply.FollowerId = r.id
+			reply.Term = r.currentTerm
+			reply.Success = 0
+			reply.MatchIndex = int32(len(r.log) - 1)
+			r.sender.SendTo(msg.LeaderId, reply, r.cs.appendEntriesReplyRPC)
+			return
+		}
+	}
+
+	// Append new entries (not already in the log)
+	insertIdx := msg.PrevLogIndex + 1
+	for i := 0; i < len(msg.Entries); i++ {
+		logIdx := insertIdx + int32(i)
+		if logIdx < int32(len(r.log)) {
+			if r.log[logIdx].Term != msg.Term {
+				// Conflict: truncate from here
+				r.log = r.log[:logIdx]
+			} else {
+				continue // already have this entry
+			}
+		}
+		// Append new entry
+		entry := LogEntry{
+			Command: msg.Entries[i],
+			Term:    msg.Term,
+		}
+		if i < len(msg.EntryIds) {
+			entry.CmdId = msg.EntryIds[i]
+		}
+		r.log = append(r.log, entry)
+	}
+
+	// Advance commitIndex if leader's commit is ahead
+	if msg.LeaderCommit > r.commitIndex {
+		lastNewIndex := int32(len(r.log) - 1)
+		if msg.LeaderCommit < lastNewIndex {
+			r.commitIndex = msg.LeaderCommit
+		} else {
+			r.commitIndex = lastNewIndex
+		}
+	}
+
+	// Reply success
+	reply := r.appendEntriesReplyCache.Get()
+	reply.FollowerId = r.id
+	reply.Term = r.currentTerm
+	reply.Success = 1
+	reply.MatchIndex = int32(len(r.log) - 1)
+	r.sender.SendTo(msg.LeaderId, reply, r.cs.appendEntriesReplyRPC)
 }
+
+// --- handleAppendEntriesReply: Update nextIndex/matchIndex, advance commitIndex ---
 
 func (r *Replica) handleAppendEntriesReply(msg *AppendEntriesReply) {
-	// TODO(39.2e): Update nextIndex/matchIndex, advance commitIndex, reply clients
+	if r.role != LEADER {
+		return
+	}
+
+	// If reply has higher term, step down
+	if msg.Term > r.currentTerm {
+		r.becomeFollower(msg.Term)
+		return
+	}
+
+	if msg.Success == 1 {
+		// Update nextIndex and matchIndex for follower
+		if msg.MatchIndex >= r.matchIndex[msg.FollowerId] {
+			r.matchIndex[msg.FollowerId] = msg.MatchIndex
+			r.nextIndex[msg.FollowerId] = msg.MatchIndex + 1
+		}
+		// Try to advance commitIndex
+		r.advanceCommitIndex()
+	} else {
+		// Decrement nextIndex and retry
+		if msg.MatchIndex >= 0 {
+			r.nextIndex[msg.FollowerId] = msg.MatchIndex + 1
+		} else {
+			r.nextIndex[msg.FollowerId] = 0
+		}
+		// Retry with earlier entries
+		r.sendAppendEntries(msg.FollowerId)
+	}
 }
+
+// advanceCommitIndex checks if any new entries can be committed.
+// A log entry is committed when it has been replicated on a majority
+// of servers AND its term equals the current term (§5.4.2).
+func (r *Replica) advanceCommitIndex() {
+	// Collect all matchIndex values and sort
+	matches := make([]int32, r.n)
+	copy(matches, r.matchIndex)
+	sort.Slice(matches, func(i, j int) bool { return matches[i] > matches[j] })
+
+	// The median (majority) matchIndex is the highest index replicated on majority
+	majorityMatch := matches[r.n/2]
+
+	if majorityMatch > r.commitIndex && majorityMatch < int32(len(r.log)) &&
+		r.log[majorityMatch].Term == r.currentTerm {
+		r.commitIndex = majorityMatch
+	}
+}
+
+// --- handleRequestVote: Grant vote if term higher + log up-to-date ---
 
 func (r *Replica) handleRequestVote(msg *RequestVote) {
-	// TODO(39.2f): Grant vote if term higher + log up-to-date
+	// If candidate's term is stale, reject
+	if msg.Term < r.currentTerm {
+		reply := r.requestVoteReplyCache.Get()
+		reply.VoterId = r.id
+		reply.Term = r.currentTerm
+		reply.VoteGranted = 0
+		r.sender.SendTo(msg.CandidateId, reply, r.cs.requestVoteReplyRPC)
+		return
+	}
+
+	// If term is higher, step down
+	if msg.Term > r.currentTerm {
+		r.becomeFollower(msg.Term)
+	}
+
+	// Grant vote if: haven't voted yet (or voted for this candidate)
+	// AND candidate's log is at least as up-to-date as ours
+	voteGranted := int32(0)
+	if (r.votedFor == -1 || r.votedFor == msg.CandidateId) && r.isLogUpToDate(msg) {
+		voteGranted = 1
+		r.votedFor = msg.CandidateId
+	}
+
+	reply := r.requestVoteReplyCache.Get()
+	reply.VoterId = r.id
+	reply.Term = r.currentTerm
+	reply.VoteGranted = voteGranted
+	r.sender.SendTo(msg.CandidateId, reply, r.cs.requestVoteReplyRPC)
 }
 
+// isLogUpToDate checks if the candidate's log is at least as up-to-date as ours (§5.4.1).
+func (r *Replica) isLogUpToDate(msg *RequestVote) bool {
+	lastLogIndex := int32(len(r.log) - 1)
+	lastLogTerm := int32(0)
+	if lastLogIndex >= 0 {
+		lastLogTerm = r.log[lastLogIndex].Term
+	}
+
+	if msg.LastLogTerm != lastLogTerm {
+		return msg.LastLogTerm > lastLogTerm
+	}
+	return msg.LastLogIndex >= lastLogIndex
+}
+
+// --- handleRequestVoteReply: Count votes, become leader on majority ---
+
 func (r *Replica) handleRequestVoteReply(msg *RequestVoteReply) {
-	// TODO(39.2f): Count votes, become leader on majority
+	if r.role != CANDIDATE {
+		return
+	}
+
+	// If reply has higher term, step down
+	if msg.Term > r.currentTerm {
+		r.becomeFollower(msg.Term)
+		return
+	}
+
+	if msg.VoteGranted == 1 {
+		r.votesReceived++
+		if r.votesReceived >= r.votesNeeded {
+			r.becomeLeader()
+		}
+	}
+}
+
+// --- startElection: Increment term, vote self, broadcast RequestVote ---
+
+func (r *Replica) startElection() {
+	r.currentTerm++
+	r.role = CANDIDATE
+	r.votedFor = r.id
+	r.votesReceived = 1 // vote for self
+
+	r.println("Starting election for term", r.currentTerm)
+
+	lastLogIndex := int32(len(r.log) - 1)
+	lastLogTerm := int32(0)
+	if lastLogIndex >= 0 {
+		lastLogTerm = r.log[lastLogIndex].Term
+	}
+
+	for i := int32(0); i < int32(r.n); i++ {
+		if i == r.id {
+			continue
+		}
+		rv := r.requestVoteCache.Get()
+		rv.CandidateId = r.id
+		rv.Term = r.currentTerm
+		rv.LastLogIndex = lastLogIndex
+		rv.LastLogTerm = lastLogTerm
+		r.sender.SendTo(i, rv, r.cs.requestVoteRPC)
+	}
+}
+
+// --- sendHeartbeats: Empty AppendEntries to all followers ---
+
+func (r *Replica) sendHeartbeats() {
+	for i := int32(0); i < int32(r.n); i++ {
+		if i == r.id {
+			continue
+		}
+		r.sendAppendEntries(i)
+	}
+}
+
+// --- executeCommands: Apply committed entries, send RaftReply ---
+
+const EXEC_SLEEP = 1 * time.Millisecond
+
+func (r *Replica) executeCommands() {
+	for !r.Shutdown {
+		executed := false
+
+		for r.lastApplied < r.commitIndex {
+			r.lastApplied++
+			idx := r.lastApplied
+
+			if idx < 0 || idx >= int32(len(r.log)) {
+				break
+			}
+
+			entry := r.log[idx]
+			val := entry.Command.Execute(r.State)
+			executed = true
+
+			// If we're leader and have a pending proposal for this index, reply to client
+			r.pendingMu.Lock()
+			propose, ok := r.pendingProposals[idx]
+			if ok {
+				delete(r.pendingProposals, idx)
+			}
+			r.pendingMu.Unlock()
+
+			if ok && propose != nil {
+				propreply := &defs.ProposeReplyTS{
+					OK:        defs.TRUE,
+					CommandId: propose.CommandId,
+					Value:     val,
+					Timestamp: propose.Timestamp,
+				}
+				r.ReplyProposeTS(propreply, propose.Reply, propose.Mutex)
+			}
+		}
+
+		if !executed {
+			time.Sleep(EXEC_SLEEP)
+		}
+	}
 }
