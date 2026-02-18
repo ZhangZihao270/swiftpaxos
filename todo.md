@@ -1969,6 +1969,194 @@ Key observations:
 
 ---
 
+# Raft (Standard Baseline)
+
+## Status: 🔧 **IN PROGRESS** (Phase 39)
+
+## Design Summary
+
+**Key Idea**: Standard Raft consensus protocol as a performance baseline for comparison with CURP-HT and CURP-HO. Reuses the existing framework (replica.New(), BufferClient, HybridBufferClient, RPC table, batcher).
+
+| Aspect | Details |
+|--------|---------|
+| **Leader election** | Term-based, randomized election timeout (300-500ms), heartbeat 100ms |
+| **Log replication** | AppendEntries RPC with prevLogIndex/prevLogTerm consistency check |
+| **Recovery** | New leader backtracks nextIndex per follower until log matches |
+| **Client interaction** | All ops (read+write) go to leader, reply after commit+execute |
+| **Weak consistency** | Not supported — SupportsWeak()=false, all ops are strong |
+| **Batching** | Proposal batching (multiple cmds per AppendEntries) + configurable batch delay |
+
+**Advantages**:
+- ✅ Well-understood standard protocol, good baseline for comparison
+- ✅ Simpler than CURP — no witness pool, no causal deps, no fast path
+
+**Disadvantages**:
+- ❌ All ops are 2-RTT (propose → replicate → commit → reply)
+- ❌ No weak/causal consistency support
+- ❌ Leader bottleneck for all reads and writes
+
+---
+
+## Implementation Plan
+
+### Phase 39.1: Message Types — `raft/defs.go` (~350 LOC)
+
+**Goal**: Define Raft RPC message types with manual binary serialization, following `paxos/defs.go` pattern.
+
+**Messages**:
+
+| Message | Key Fields | Purpose |
+|---------|------------|---------|
+| `AppendEntries` | LeaderId, Term, PrevLogIndex, PrevLogTerm, Entries []Command, EntryIds []CommandId, LeaderCommit | Log replication + heartbeat |
+| `AppendEntriesReply` | FollowerId, Term, Success (bool), MatchIndex | Follower ack |
+| `RequestVote` | CandidateId, Term, LastLogIndex, LastLogTerm | Election |
+| `RequestVoteReply` | VoterId, Term, VoteGranted (bool) | Vote response |
+| `RaftReply` | CmdId (CommandId), Value []byte | Leader → client result |
+
+**Supporting types**:
+- `CommandId { ClientId int32; SeqNum int32 }` — client command identifier
+- `CommunicationSupply` — channels + RPC IDs for all 5 message types
+- `initCs(cs, table)` — register all types with fastrpc.Table
+- Per-type Cache pool (New/Get/Put pattern) for allocation reuse
+
+**Tasks**:
+- [ ] **39.1a** Define CommandId, all 5 message structs
+- [ ] **39.1b** Implement Marshal/Unmarshal for fixed-size messages (RequestVote, RequestVoteReply, AppendEntriesReply, RaftReply)
+- [ ] **39.1c** Implement Marshal/Unmarshal for AppendEntries (variable-length Entries + EntryIds arrays, varint-prefixed)
+- [ ] **39.1d** Implement Cache pools (New/Get/Put) for all 5 types
+- [ ] **39.1e** Implement CommunicationSupply + initCs()
+
+### Phase 39.2: Replica Logic — `raft/raft.go` (~500 LOC)
+
+**Goal**: Implement Raft replica with leader election, log replication, and recovery.
+
+**Replica state**:
+```
+Persistent: currentTerm, votedFor, log []LogEntry
+Volatile:   commitIndex, lastApplied, state (FOLLOWER/CANDIDATE/LEADER)
+Leader:     nextIndex[], matchIndex[]
+Pending:    pendingProposals map[int32]*GPropose (index → client proposal)
+```
+
+**Event loop** (single-threaded select):
+```
+propose         → handlePropose (batch from ProposeChan, append to log, bcast AppendEntries)
+appendEntries   → handleAppendEntries (check term, match log, append, advance commitIndex)
+appendEntriesReply → handleAppendEntriesReply (update matchIndex, advance commitIndex, reply clients)
+requestVote     → handleRequestVote (grant if term higher + log up-to-date)
+requestVoteReply → handleRequestVoteReply (count votes, become leader on majority)
+electionTimer   → startElection (increment term, vote self, bcast RequestVote)
+heartbeatTimer  → sendHeartbeats (empty AppendEntries to all followers)
+```
+
+**Key design decisions**:
+1. If `isLeader` from master → immediately become leader at term 0 (skip election at startup)
+2. Election timeout 300-500ms (randomized), heartbeat 100ms
+3. Proposal batching: drain ProposeChan, pack multiple commands into one AppendEntries
+4. Batch delay: use `batchDelayUs` from config (same as CURP-HT/HO)
+5. `executeCommands()` goroutine: execute committed entries in order, send `RaftReply` to client via `SendClientMsgFast`
+6. Leader commit rule: advance commitIndex when majority of matchIndex[] >= index AND log[index].Term == currentTerm
+
+**Tasks**:
+- [ ] **39.2a** Define Replica struct, LogEntry, RaftState constants, New() constructor
+- [ ] **39.2b** Implement run() event loop with election/heartbeat timers
+- [ ] **39.2c** Implement handlePropose() — batch proposals, append to log, broadcast AppendEntries
+- [ ] **39.2d** Implement handleAppendEntries() — term check, log matching, entry append, commitIndex advance
+- [ ] **39.2e** Implement handleAppendEntriesReply() — update nextIndex/matchIndex, advance commitIndex, reply to clients
+- [ ] **39.2f** Implement handleRequestVote() and handleRequestVoteReply()
+- [ ] **39.2g** Implement startElection() and sendHeartbeats()
+- [ ] **39.2h** Implement executeCommands() goroutine — apply committed entries, send RaftReply
+- [ ] **39.2i** Implement BeTheLeader() for master-based initial leader assignment
+
+### Phase 39.3: Client Logic — `raft/client.go` (~150 LOC)
+
+**Goal**: Implement Raft client with HybridClient interface, following CURP-HT client.go pattern.
+
+**Design**:
+- Embeds `*client.BufferClient`
+- Creates own `fastrpc.Table` via `initCs`, calls `RegisterRPCTable` for reader goroutines
+- `handleMsgs()` goroutine: select on `cs.raftReplyChan`, handle RaftReply → `RegisterReply()`
+- `SupportsWeak() = false` — all commands routed through strong path
+- Weak methods delegate to strong (SendWeakWrite → SendStrongWrite, SendWeakRead → SendStrongRead)
+
+**Tasks**:
+- [ ] **39.3a** Define Client struct, NewClient() constructor
+- [ ] **39.3b** Implement handleMsgs() and handleRaftReply()
+- [ ] **39.3c** Implement HybridClient interface (SendStrongWrite/Read, SendWeakWrite/Read, SupportsWeak, MarkAllSent)
+
+### Phase 39.4: Framework Wiring — Modify `run.go` and `main.go` (~40 LOC)
+
+**Goal**: Wire Raft into the protocol switch so it's runnable with existing infrastructure.
+
+**`run.go`** changes:
+```go
+case "raft":
+    log.Println("Starting Raft replica...")
+    rep := raft.New(c.Alias, replicaId, nodeList, isLeader, f, c, logger)
+    rpc.Register(rep)
+```
+
+**`main.go`** changes:
+1. Add `case "raft":` in protocol config switch (Fast=false, WaitClosest=false)
+2. Add Raft client creation block: `raft.NewClient(b, ...)`, wrap in `HybridBufferClient`, call `HybridLoopWithOptions`
+3. Add `raft` import, add to aggregated metrics printing
+
+**Tasks**:
+- [ ] **39.4a** Add `case "raft"` in run.go replica switch
+- [ ] **39.4b** Add `case "raft"` in main.go client config switch
+- [ ] **39.4c** Add Raft client creation + HybridBufferClient wiring in main.go
+- [ ] **39.4d** Build verification: `go build -o swiftpaxos .` + `go vet ./...`
+
+### Phase 39.5: Tests — `raft/raft_test.go` (~100 LOC)
+
+**Goal**: Unit tests for serialization correctness.
+
+**Tests**:
+- Serialization round-trip for all 5 message types (Marshal → Unmarshal, verify fields match)
+- AppendEntries with empty entries (heartbeat case)
+- AppendEntries with multiple entries (batch case)
+- Cache pool Get/Put cycle
+
+**Tasks**:
+- [ ] **39.5a** Write serialization round-trip tests for all message types
+- [ ] **39.5b** Run `go test -v ./raft/` — all pass
+- [ ] **39.5c** Run `go vet ./raft/` — no warnings
+
+### Phase 39.6: Integration Test + Peak Throughput (~30 min runtime)
+
+**Goal**: Verify Raft runs correctly with 3 replicas + benchmark, achieve >20K peak throughput.
+
+**Steps**:
+1. Set `protocol: raft` in `multi-client.conf`
+2. Run with 3 replicas, 3 clients, networkDelay=25ms
+3. Sweep clientThreads: 2, 4, 8, 16, 32, 64 — find peak throughput
+4. Verify peak > 20K ops/sec with avg latency < 100ms
+
+**Tasks**:
+- [ ] **39.6a** Single-run smoke test: 3 replicas, 1 client, 2 threads — verify commands complete
+- [ ] **39.6b** Multi-client test: 3 clients × 2 threads — verify correct output format
+- [ ] **39.6c** Performance sweep: scale clientThreads, find peak throughput
+- [ ] **39.6d** Record results table in this section
+- [ ] **39.6e** Commit and push
+
+---
+
+## File Summary
+
+| File | Action | Est. LOC |
+|------|--------|----------|
+| `raft/defs.go` | NEW | ~350 |
+| `raft/raft.go` | NEW | ~500 |
+| `raft/client.go` | NEW | ~150 |
+| `raft/raft_test.go` | NEW | ~100 |
+| `run.go` | MODIFY | +5 |
+| `main.go` | MODIFY | +35 |
+| `todo.md` | MODIFY | this section |
+
+**Total estimated**: ~1,140 LOC
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
