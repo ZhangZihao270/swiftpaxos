@@ -2169,9 +2169,9 @@ case "raft":
 
 ---
 
-### Phase 40: Raft Throughput Optimization — Target >20K ops/sec
+### Phase 40: Raft Throughput Optimization [✅ COMPLETE — 23,363 ops/sec peak]
 
-**Priority: HIGH** — Current peak is ~5,933 ops/sec, target is >20,000 ops/sec.
+**Result**: Peak throughput **23,363 ops/sec** at 64 threads/client (192 total), ~4x improvement over pre-optimization 5,933 ops/sec. Target >20K achieved.
 
 #### Bottleneck Analysis
 
@@ -2263,12 +2263,22 @@ The current Raft implementation has **5 major bottlenecks** that explain the 3-1
 **Goal**: Verify optimizations work and measure throughput.
 
 **Tasks**:
-- [ ] **40.6a** `go build -o swiftpaxos .` — clean build
-- [ ] **40.6b** `go test ./raft/` — all tests pass
-- [ ] **40.6c** `go vet ./raft/` — no warnings
-- [ ] **40.6d** Benchmark sweep: clientThreads 2/4/8/16/32/64, record results
-- [ ] **40.6e** Verify peak throughput > 20K ops/sec
-- [ ] **40.6f** Record results table, commit and push
+- [x] **40.6a** `go build -o swiftpaxos .` — clean build ✓
+- [x] **40.6b** `go test ./raft/` — all 80 tests pass ✓
+- [x] **40.6c** `go vet ./raft/` — no warnings ✓
+- [x] **40.6d** Benchmark sweep (3 clients × N threads, 25ms one-way network delay):
+
+| Threads/client | Total threads | Throughput (ops/sec) | Strong Avg Latency | P99 Latency |
+|---|---|---|---|---|
+| 2 | 6 | 1,363 | 68.36ms | 78.42ms |
+| 4 | 12 | 2,721 | 68.47ms | 78.63ms |
+| 8 | 24 | 5,429 | 68.62ms | 78.72ms |
+| 16 | 48 | 10,125 | 73.19ms | 108.21ms |
+| 32 | 96 | 17,768 | 82.45ms | 127.73ms |
+| **64** | **192** | **23,363** | 123.76ms | 207.79ms |
+
+- [x] **40.6e** Peak throughput: **23,363 ops/sec > 20K target** ✓ (~4x improvement over pre-optimization 5,933 ops/sec)
+- [x] **40.6f** Results recorded, committed and pushed
 
 ---
 
