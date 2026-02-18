@@ -156,8 +156,11 @@ func (c *HybridBufferClient) SetHybridClient(h HybridClient) {
 }
 
 // SupportsHybrid returns true if the client has a HybridClient implementation.
+// A HybridClient that does not support weak consistency (e.g., Raft) still
+// benefits from the hybrid loop for metrics tracking and pipelining;
+// DecideCommandType with weakRatio=0 ensures all commands are strong.
 func (c *HybridBufferClient) SupportsHybrid() bool {
-	return c.hybrid != nil && c.hybrid.SupportsWeak()
+	return c.hybrid != nil
 }
 
 // RegisterHybridReply records a command completion with timing and type information.

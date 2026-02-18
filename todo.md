@@ -2169,6 +2169,109 @@ case "raft":
 
 ---
 
+### Phase 40: Raft Throughput Optimization — Target >20K ops/sec
+
+**Priority: HIGH** — Current peak is ~5,933 ops/sec, target is >20,000 ops/sec.
+
+#### Bottleneck Analysis
+
+The current Raft implementation has **5 major bottlenecks** that explain the 3-10x gap vs CURP-HT/HO:
+
+| # | Bottleneck | Impact | Fix |
+|---|-----------|--------|-----|
+| 1 | **Client falls through to generic `WaitReplies+Loop` path** | No multi-thread metrics, no `HybridBufferClient` pipeline. Client uses `b.Loop()` which sends one command, waits for reply, sends next. With 50ms RTT, max ~20 ops/sec per thread. Only pipelining via `pendings` helps, but the generic loop doesn't aggregate metrics. | Wire Raft client through `HybridBufferClient` in `main.go` |
+| 2 | **`executeCommands()` polls with 1ms sleep** | Adds up to 1ms extra latency per batch. At high throughput, this sleep serializes commit→reply and caps throughput. | Replace polling with channel notification from `advanceCommitIndex()` |
+| 3 | **`advanceCommitIndex()` allocates + sorts on every call** | Called on every `AppendEntriesReply`. Allocates `[]int32(n)`, copies, sorts. GC pressure at high RPC rate. | Use in-place nth-element or track sorted matchIndex incrementally |
+| 4 | **`pendingProposals` mutex contention** | `pendingMu.Lock()` in both `handlePropose` (event loop) and `executeCommands` (separate goroutine). Under high throughput, lock bouncing between goroutines. | Move reply logic into event loop via commit notification channel — eliminate mutex entirely |
+| 5 | **`SendMsg` flushes per message** | Each `sendAppendEntries()` calls `SendMsg` which does `w.WriteByte + Marshal + Flush()`. With N-1 followers, that's 2 flushes per batch. No batching of the wire writes. | Use `SendMsgNoFlush` + explicit `Flush` after broadcasting to all followers, or use batch delay |
+
+#### Plan
+
+##### Phase 40.1: Wire Raft through HybridBufferClient (~20 LOC)
+
+**Goal**: Route Raft client through `HybridBufferClient` so it gets multi-threaded benchmarking, metrics aggregation, and proper pipelining.
+
+**Changes**:
+- `main.go`: Add `else if p == "raft"` block before the generic `else`, create `raft.NewClient(b)`, wrap in `HybridBufferClient(b, 0, 0)` (weakRatio=0 means all strong), call `HybridLoopWithOptions`
+- `main.go`: Add `"raft"` to the aggregated metrics printing condition (line 121)
+- `raft/client.go`: Remove `WaitReplies` call from `NewClient` — replies now go through `HybridBufferClient` pipeline
+
+**Tasks**:
+- [x] **40.1a** Add `else if p == "raft"` block in main.go `runSingleClient()`
+- [x] **40.1b** Add `"raft"` to aggregated metrics printing condition (+ import)
+- [x] **40.1c** Fix `SupportsHybrid()` to return `c.hybrid != nil` — allows strong-only protocols (Raft) to use HybridLoop. Kept `WaitReplies` in client since it's needed to feed `c.Reply` channel.
+- [x] **40.1d** Verify: `go build -o swiftpaxos .` ✓, `go test ./...` all pass
+
+##### Phase 40.2: Replace executeCommands polling with channel notification (~40 LOC)
+
+**Goal**: Eliminate 1ms sleep in `executeCommands()`. Instead, `advanceCommitIndex()` sends on a channel when commitIndex advances.
+
+**Changes**:
+- `raft/raft.go`: Add `commitNotify chan struct{}` (buffered 1) to Replica
+- `advanceCommitIndex()`: After advancing commitIndex, non-blocking send on `commitNotify`
+- `executeCommands()`: Replace `time.Sleep(1ms)` with `<-commitNotify` (blocking wait)
+- Also notify from `handleAppendEntries()` when follower advances commitIndex
+
+**Tasks**:
+- [ ] **40.2a** Add `commitNotify` channel to Replica struct, initialize in New()
+- [ ] **40.2b** Modify `advanceCommitIndex()` to notify on commit advance
+- [ ] **40.2c** Modify `handleAppendEntries()` to notify on follower commit advance
+- [ ] **40.2d** Rewrite `executeCommands()` to block on channel instead of polling
+
+##### Phase 40.3: Eliminate advanceCommitIndex allocations (~20 LOC)
+
+**Goal**: Avoid allocating + sorting `[]int32` on every `AppendEntriesReply`.
+
+**Changes**:
+- Replace `sort.Slice` approach with simple loop: iterate `matchIndex`, count how many are `>= candidate`, check if count >= majority
+- Start candidate at `commitIndex+1` and scan upward until no majority
+
+**Tasks**:
+- [ ] **40.3a** Rewrite `advanceCommitIndex()` with zero-allocation majority counting
+
+##### Phase 40.4: Remove pendingProposals mutex (~30 LOC)
+
+**Goal**: Eliminate lock contention between event loop and executeCommands goroutine.
+
+**Changes**:
+- Move client reply logic from `executeCommands()` into the event loop
+- `executeCommands()` only does `cmd.Execute(r.State)` and sends result on a channel
+- Event loop receives execution results and calls `ReplyProposeTS`
+- OR: simpler — `executeCommands()` replies directly (it already does), just remove the mutex by making `pendingProposals` access single-goroutine only. Move the `delete` into executeCommands and don't lock.
+- Simplest: use a lock-free approach — `pendingProposals` is written by event loop, read+deleted by executeCommands. Since Go map is not concurrent-safe, use a slice indexed by log index instead (pre-allocated).
+
+**Tasks**:
+- [ ] **40.4a** Replace `pendingProposals map` with pre-allocated `pendingSlice []*defs.GPropose` indexed by log index
+- [ ] **40.4b** Remove `pendingMu` mutex entirely — event loop writes, executeCommands reads+nils (non-overlapping indices since lastApplied < commitIndex ≤ log append index)
+
+##### Phase 40.5: Batch wire writes for AppendEntries broadcast (~30 LOC)
+
+**Goal**: Reduce syscalls by not flushing after each per-follower AppendEntries.
+
+**Changes**:
+- `broadcastAppendEntries()`: Use `SendMsgNoFlush` for each follower, then explicit `FlushPeers()`
+- OR: Add a simple write-coalescing approach — buffer all AppendEntries, flush once
+- Check if `replica.Replica` has `SendMsgNoFlush` — if not, add it
+
+**Tasks**:
+- [ ] **40.5a** Check if `SendMsgNoFlush` exists or add a no-flush variant
+- [ ] **40.5b** Modify `broadcastAppendEntries()` to batch wire writes
+- [ ] **40.5c** Add explicit flush after broadcast loop
+
+##### Phase 40.6: Build, Test, Benchmark
+
+**Goal**: Verify optimizations work and measure throughput.
+
+**Tasks**:
+- [ ] **40.6a** `go build -o swiftpaxos .` — clean build
+- [ ] **40.6b** `go test ./raft/` — all tests pass
+- [ ] **40.6c** `go vet ./raft/` — no warnings
+- [ ] **40.6d** Benchmark sweep: clientThreads 2/4/8/16/32/64, record results
+- [ ] **40.6e** Verify peak throughput > 20K ops/sec
+- [ ] **40.6f** Record results table, commit and push
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task

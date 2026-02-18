@@ -308,10 +308,10 @@ func TestSupportsHybrid(t *testing.T) {
 		t.Error("SupportsHybrid should return false when hybrid is nil")
 	}
 
-	// With hybrid client that doesn't support weak
+	// With hybrid client that doesn't support weak (e.g., Raft) — still returns true
 	hbc.SetHybridClient(&mockHybridClient{supportsWeak: false})
-	if hbc.SupportsHybrid() {
-		t.Error("SupportsHybrid should return false when SupportsWeak is false")
+	if !hbc.SupportsHybrid() {
+		t.Error("SupportsHybrid should return true when hybrid client is set (even without weak support)")
 	}
 
 	// With hybrid client that supports weak
