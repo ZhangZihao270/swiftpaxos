@@ -2080,9 +2080,9 @@ heartbeatTimer  → sendHeartbeats (empty AppendEntries to all followers)
 - Weak methods delegate to strong (SendWeakWrite → SendStrongWrite, SendWeakRead → SendStrongRead)
 
 **Tasks**:
-- [ ] **39.3a** Define Client struct, NewClient() constructor
-- [ ] **39.3b** Implement handleMsgs() and handleRaftReply()
-- [ ] **39.3c** Implement HybridClient interface (SendStrongWrite/Read, SendWeakWrite/Read, SupportsWeak, MarkAllSent)
+- [x] **39.3a** Define Client struct, NewClient() constructor
+- [x] **39.3b** Implement handleMsgs() and handleRaftReply() — Not needed: Raft uses ReplyProposeTS via base WaitReplies, no fastrpc table needed
+- [x] **39.3c** Implement HybridClient interface (SendStrongWrite/Read, SendWeakWrite/Read, SupportsWeak, MarkAllSent)
 
 ### Phase 39.4: Framework Wiring — Modify `run.go` and `main.go` (~40 LOC)
 
@@ -2102,10 +2102,10 @@ case "raft":
 3. Add `raft` import, add to aggregated metrics printing
 
 **Tasks**:
-- [ ] **39.4a** Add `case "raft"` in run.go replica switch
-- [ ] **39.4b** Add `case "raft"` in main.go client config switch
-- [ ] **39.4c** Add Raft client creation + HybridBufferClient wiring in main.go
-- [ ] **39.4d** Build verification: `go build -o swiftpaxos .` + `go vet ./...`
+- [x] **39.4a** Add `case "raft"` in run.go replica switch
+- [x] **39.4b** Add `case "raft"` in main.go client config switch
+- [x] **39.4c** Add Raft client creation + HybridBufferClient wiring in main.go — Not needed: Raft uses standard WaitReplies+Loop path (same as Paxos)
+- [x] **39.4d** Build verification: `go build -o swiftpaxos .` + `go vet ./...`
 
 ### Phase 39.5: Tests — `raft/raft_test.go` (~100 LOC)
 

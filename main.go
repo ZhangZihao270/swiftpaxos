@@ -153,6 +153,9 @@ func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads i
 	case "paxos":
 		c.WaitClosest = false
 		c.Fast = false
+	case "raft":
+		c.WaitClosest = false
+		c.Fast = false
 	}
 
 	server := c.Proxy.ProxyOf(c.ClientAddrs[c.Alias])
