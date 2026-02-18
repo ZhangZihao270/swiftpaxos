@@ -2241,8 +2241,8 @@ The current Raft implementation has **5 major bottlenecks** that explain the 3-1
 - Simplest: use a lock-free approach — `pendingProposals` is written by event loop, read+deleted by executeCommands. Since Go map is not concurrent-safe, use a slice indexed by log index instead (pre-allocated).
 
 **Tasks**:
-- [ ] **40.4a** Replace `pendingProposals map` with pre-allocated `pendingSlice []*defs.GPropose` indexed by log index
-- [ ] **40.4b** Remove `pendingMu` mutex entirely — event loop writes, executeCommands reads+nils (non-overlapping indices since lastApplied < commitIndex ≤ log append index)
+- [x] **40.4a** Replace `pendingProposals map` with `[]*defs.GPropose` slice that grows via `append` in lockstep with the log. Initial capacity 1024.
+- [x] **40.4b** Remove `pendingMu` mutex and `sync` import entirely. Event loop appends proposals, executeCommands reads+nils at committed indices (non-overlapping, with happens-before via commitNotify channel). Removed unused `startIndex` variable.
 
 ##### Phase 40.5: Batch wire writes for AppendEntries broadcast (~30 LOC)
 

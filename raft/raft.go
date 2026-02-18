@@ -2,7 +2,6 @@ package raft
 
 import (
 	"math/rand"
-	"sync"
 	"time"
 
 	"github.com/imdea-software/swiftpaxos/config"
@@ -46,9 +45,11 @@ type Replica struct {
 	nextIndex  []int32 // for each server, index of the next log entry to send
 	matchIndex []int32 // for each server, highest log entry known to be replicated
 
-	// Pending client proposals awaiting commit (log index → proposal)
-	pendingMu        sync.Mutex
-	pendingProposals map[int32]*defs.GPropose
+	// Pending client proposals awaiting commit (log index → proposal).
+	// Lock-free: event loop writes at append-time indices, executeCommands
+	// reads+nils at committed indices. Non-overlapping due to happens-before
+	// via commitNotify channel.
+	pendingProposals []*defs.GPropose
 
 	// Election state
 	votesReceived int
@@ -103,7 +104,7 @@ func New(alias string, id int, addrs []string, isLeader bool, f int,
 		nextIndex:  make([]int32, n),
 		matchIndex: make([]int32, n),
 
-		pendingProposals: make(map[int32]*defs.GPropose),
+		pendingProposals: make([]*defs.GPropose, 0, 1024),
 
 		commitNotify: make(chan struct{}, 1),
 
@@ -320,7 +321,6 @@ func (r *Replica) handlePropose(propose *defs.GPropose) {
 	// Append entries to log
 	entries := make([]state.Command, batchSize)
 	entryIds := make([]CommandId, batchSize)
-	startIndex := int32(len(r.log))
 
 	for i, p := range proposals {
 		cmdId := CommandId{ClientId: p.ClientId, SeqNum: p.CommandId}
@@ -333,11 +333,9 @@ func (r *Replica) handlePropose(propose *defs.GPropose) {
 		entries[i] = p.Command
 		entryIds[i] = cmdId
 
-		// Store pending proposal for reply on commit
-		idx := startIndex + int32(i)
-		r.pendingMu.Lock()
-		r.pendingProposals[idx] = p
-		r.pendingMu.Unlock()
+		// Store pending proposal for reply on commit.
+		// Grow slice to match log length (both grow in lockstep).
+		r.pendingProposals = append(r.pendingProposals, p)
 	}
 
 	// Update leader's own matchIndex
@@ -678,14 +676,13 @@ func (r *Replica) executeCommands() {
 			val := entry.Command.Execute(r.State)
 
 			// If we're leader and have a pending proposal for this index, reply to client
-			r.pendingMu.Lock()
-			propose, ok := r.pendingProposals[idx]
-			if ok {
-				delete(r.pendingProposals, idx)
+			var propose *defs.GPropose
+			if idx < int32(len(r.pendingProposals)) {
+				propose = r.pendingProposals[idx]
+				r.pendingProposals[idx] = nil // release for GC
 			}
-			r.pendingMu.Unlock()
 
-			if ok && propose != nil {
+			if propose != nil {
 				propreply := &defs.ProposeReplyTS{
 					OK:        defs.TRUE,
 					CommandId: propose.CommandId,

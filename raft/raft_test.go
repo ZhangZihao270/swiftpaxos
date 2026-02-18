@@ -976,7 +976,7 @@ func TestInitialFollowerState(t *testing.T) {
 		role:             FOLLOWER,
 		nextIndex:        make([]int32, 3),
 		matchIndex:       make([]int32, 3),
-		pendingProposals: make(map[int32]*defs.GPropose),
+		pendingProposals: make([]*defs.GPropose, 0),
 		votesReceived:    0,
 		votesNeeded:      2, // (3/2)+1
 	}
@@ -1023,27 +1023,35 @@ func TestVotesNeededCalculation(t *testing.T) {
 	}
 }
 
-func TestPendingProposalsMap(t *testing.T) {
-	pending := make(map[int32]*defs.GPropose)
+func TestPendingProposalsSlice(t *testing.T) {
+	pending := make([]*defs.GPropose, 0)
 
 	// Should start empty
 	if len(pending) != 0 {
 		t.Error("pendingProposals should start empty")
 	}
 
-	// Add and retrieve
-	pending[5] = &defs.GPropose{}
-	if _, ok := pending[5]; !ok {
-		t.Error("Should find proposal at index 5")
+	// Append proposals (growing with log)
+	p1 := &defs.GPropose{}
+	p2 := &defs.GPropose{}
+	pending = append(pending, p1) // index 0
+	pending = append(pending, nil) // index 1: follower-received entry, no proposal
+	pending = append(pending, p2) // index 2
+
+	if pending[0] != p1 {
+		t.Error("Should find proposal at index 0")
 	}
-	if _, ok := pending[10]; ok {
-		t.Error("Should not find proposal at index 10")
+	if pending[1] != nil {
+		t.Error("Index 1 should be nil (no proposal)")
+	}
+	if pending[2] != p2 {
+		t.Error("Should find proposal at index 2")
 	}
 
-	// Delete
-	delete(pending, 5)
-	if len(pending) != 0 {
-		t.Error("Should be empty after delete")
+	// Nil out after execution (release for GC)
+	pending[0] = nil
+	if pending[0] != nil {
+		t.Error("Should be nil after clearing")
 	}
 }
 
@@ -1065,7 +1073,7 @@ func newTestReplica(id int32, n int) *Replica {
 		n:                    n,
 		nextIndex:            make([]int32, n),
 		matchIndex:           make([]int32, n),
-		pendingProposals:     make(map[int32]*defs.GPropose),
+		pendingProposals:     make([]*defs.GPropose, 0),
 		commitNotify:         make(chan struct{}, 1),
 		votesReceived:        0,
 		votesNeeded:          (n / 2) + 1,
