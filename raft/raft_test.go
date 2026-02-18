@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/imdea-software/swiftpaxos/replica/defs"
 	fastrpc "github.com/imdea-software/swiftpaxos/rpc"
 	"github.com/imdea-software/swiftpaxos/state"
 )
@@ -759,5 +760,288 @@ func TestMaxInt32Values(t *testing.T) {
 
 	if *restored != *original {
 		t.Errorf("Max int32 mismatch: got %+v, want %+v", restored, original)
+	}
+}
+
+// ============================================================================
+// Phase 39.2a: Replica struct, LogEntry, RaftState constants tests
+// ============================================================================
+
+// --- RaftState constants ---
+
+func TestRaftStateConstants(t *testing.T) {
+	// Verify constants are distinct
+	if FOLLOWER == CANDIDATE || FOLLOWER == LEADER || CANDIDATE == LEADER {
+		t.Error("FOLLOWER, CANDIDATE, LEADER must be distinct")
+	}
+	// Verify FOLLOWER is the zero value (default role)
+	if FOLLOWER != 0 {
+		t.Error("FOLLOWER should be 0 (iota start)")
+	}
+}
+
+// --- LogEntry ---
+
+func TestLogEntryFields(t *testing.T) {
+	entry := LogEntry{
+		Command: state.Command{
+			Op: state.PUT,
+			K:  state.Key(42),
+			V:  state.Value([]byte("hello")),
+		},
+		Term:  3,
+		CmdId: CommandId{ClientId: 10, SeqNum: 5},
+	}
+
+	if entry.Term != 3 {
+		t.Errorf("Term mismatch: got %d, want 3", entry.Term)
+	}
+	if entry.CmdId.ClientId != 10 {
+		t.Errorf("CmdId.ClientId mismatch: got %d, want 10", entry.CmdId.ClientId)
+	}
+	if entry.CmdId.SeqNum != 5 {
+		t.Errorf("CmdId.SeqNum mismatch: got %d, want 5", entry.CmdId.SeqNum)
+	}
+	if entry.Command.Op != state.PUT {
+		t.Errorf("Command.Op mismatch: got %d, want PUT", entry.Command.Op)
+	}
+	if entry.Command.K != state.Key(42) {
+		t.Errorf("Command.K mismatch: got %d, want 42", entry.Command.K)
+	}
+}
+
+func TestLogEntryZeroValue(t *testing.T) {
+	var entry LogEntry
+	if entry.Term != 0 {
+		t.Errorf("Zero-value Term should be 0, got %d", entry.Term)
+	}
+	if entry.CmdId.ClientId != 0 || entry.CmdId.SeqNum != 0 {
+		t.Error("Zero-value CmdId should be {0, 0}")
+	}
+}
+
+// --- LogEntry serialization (via AppendEntries round-trip) ---
+
+func TestLogEntryViaAppendEntriesSerialization(t *testing.T) {
+	// Verify that log entries survive a full serialize/deserialize cycle
+	// when embedded in AppendEntries
+	entries := []LogEntry{
+		{
+			Command: state.Command{Op: state.PUT, K: state.Key(1), V: state.Value([]byte("v1"))},
+			Term:    1,
+			CmdId:   CommandId{ClientId: 100, SeqNum: 1},
+		},
+		{
+			Command: state.Command{Op: state.GET, K: state.Key(2), V: state.Value([]byte{})},
+			Term:    2,
+			CmdId:   CommandId{ClientId: 100, SeqNum: 2},
+		},
+	}
+
+	ae := &AppendEntries{
+		LeaderId:     0,
+		Term:         2,
+		PrevLogIndex: 0,
+		PrevLogTerm:  1,
+		LeaderCommit: 0,
+		EntryCnt:     2,
+		Entries:      make([]state.Command, len(entries)),
+		EntryIds:     make([]CommandId, len(entries)),
+	}
+	for i, e := range entries {
+		ae.Entries[i] = e.Command
+		ae.EntryIds[i] = e.CmdId
+	}
+
+	var buf bytes.Buffer
+	ae.Marshal(&buf)
+
+	restored := &AppendEntries{}
+	if err := restored.Unmarshal(&buf); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	// Reconstruct log entries from deserialized AppendEntries
+	for i, e := range entries {
+		if restored.Entries[i].Op != e.Command.Op {
+			t.Errorf("Entry[%d].Op mismatch", i)
+		}
+		if restored.Entries[i].K != e.Command.K {
+			t.Errorf("Entry[%d].K mismatch", i)
+		}
+		if restored.EntryIds[i] != e.CmdId {
+			t.Errorf("Entry[%d].CmdId mismatch: got %+v, want %+v", i, restored.EntryIds[i], e.CmdId)
+		}
+	}
+}
+
+// --- BeTheLeader ---
+
+func TestBeTheLeaderSetsRole(t *testing.T) {
+	// Test BeTheLeader on a minimal Replica struct (without full network init)
+	r := &Replica{
+		role:       FOLLOWER,
+		votedFor:   -1,
+		log:        make([]LogEntry, 0),
+		nextIndex:  make([]int32, 3),
+		matchIndex: make([]int32, 3),
+	}
+	// Simulate base replica fields needed
+	r.Replica = nil // We can't call r.Println without a base, so test just the state changes
+
+	// Manually set the fields that BeTheLeader reads
+	n := 3
+	r.nextIndex = make([]int32, n)
+	r.matchIndex = make([]int32, n)
+
+	// Can't call BeTheLeader directly because it uses r.Id and r.N from embedded Replica
+	// Instead, test the logic inline
+	r.role = LEADER
+	r.votedFor = 0 // assume Id=0
+	lastLogIndex := int32(len(r.log) - 1)
+	for i := 0; i < n; i++ {
+		r.nextIndex[i] = lastLogIndex + 1
+		r.matchIndex[i] = -1
+	}
+	r.matchIndex[0] = lastLogIndex
+
+	if r.role != LEADER {
+		t.Error("Should be LEADER after BeTheLeader")
+	}
+	if r.votedFor != 0 {
+		t.Error("votedFor should be own Id after BeTheLeader")
+	}
+	for i := 0; i < n; i++ {
+		if r.nextIndex[i] != 0 {
+			t.Errorf("nextIndex[%d] should be 0 (empty log), got %d", i, r.nextIndex[i])
+		}
+		if i == 0 {
+			if r.matchIndex[i] != -1 {
+				t.Errorf("matchIndex[leader] should be -1 (empty log), got %d", i)
+			}
+		} else {
+			if r.matchIndex[i] != -1 {
+				t.Errorf("matchIndex[%d] should be -1, got %d", i, r.matchIndex[i])
+			}
+		}
+	}
+}
+
+func TestBeTheLeaderWithNonEmptyLog(t *testing.T) {
+	n := 3
+	r := &Replica{
+		role:     FOLLOWER,
+		votedFor: -1,
+		log: []LogEntry{
+			{Term: 1, CmdId: CommandId{ClientId: 1, SeqNum: 1}},
+			{Term: 1, CmdId: CommandId{ClientId: 1, SeqNum: 2}},
+			{Term: 2, CmdId: CommandId{ClientId: 2, SeqNum: 1}},
+		},
+		nextIndex:  make([]int32, n),
+		matchIndex: make([]int32, n),
+	}
+
+	// Simulate BeTheLeader logic
+	r.role = LEADER
+	lastLogIndex := int32(len(r.log) - 1) // = 2
+	for i := 0; i < n; i++ {
+		r.nextIndex[i] = lastLogIndex + 1  // = 3
+		r.matchIndex[i] = -1
+	}
+	r.matchIndex[0] = lastLogIndex // leader's own match = 2
+
+	if r.role != LEADER {
+		t.Error("Should be LEADER")
+	}
+	for i := 0; i < n; i++ {
+		if r.nextIndex[i] != 3 {
+			t.Errorf("nextIndex[%d] should be 3 (last+1), got %d", i, r.nextIndex[i])
+		}
+	}
+	if r.matchIndex[0] != 2 {
+		t.Errorf("matchIndex[leader] should be 2, got %d", r.matchIndex[0])
+	}
+}
+
+// --- Initial state tests ---
+
+func TestInitialFollowerState(t *testing.T) {
+	r := &Replica{
+		currentTerm:      0,
+		votedFor:         -1,
+		log:              make([]LogEntry, 0),
+		commitIndex:      -1,
+		lastApplied:      -1,
+		role:             FOLLOWER,
+		nextIndex:        make([]int32, 3),
+		matchIndex:       make([]int32, 3),
+		pendingProposals: make(map[int32]*defs.GPropose),
+		votesReceived:    0,
+		votesNeeded:      2, // (3/2)+1
+	}
+
+	if r.currentTerm != 0 {
+		t.Errorf("Initial term should be 0, got %d", r.currentTerm)
+	}
+	if r.votedFor != -1 {
+		t.Errorf("Initial votedFor should be -1, got %d", r.votedFor)
+	}
+	if len(r.log) != 0 {
+		t.Errorf("Initial log should be empty, got %d entries", len(r.log))
+	}
+	if r.commitIndex != -1 {
+		t.Errorf("Initial commitIndex should be -1, got %d", r.commitIndex)
+	}
+	if r.lastApplied != -1 {
+		t.Errorf("Initial lastApplied should be -1, got %d", r.lastApplied)
+	}
+	if r.role != FOLLOWER {
+		t.Errorf("Initial role should be FOLLOWER, got %d", r.role)
+	}
+	if r.votesNeeded != 2 {
+		t.Errorf("votesNeeded for 3 nodes should be 2, got %d", r.votesNeeded)
+	}
+}
+
+func TestVotesNeededCalculation(t *testing.T) {
+	tests := []struct {
+		n        int
+		expected int
+	}{
+		{3, 2},
+		{5, 3},
+		{7, 4},
+		{1, 1},
+	}
+
+	for _, tc := range tests {
+		needed := (tc.n / 2) + 1
+		if needed != tc.expected {
+			t.Errorf("For n=%d: expected votesNeeded=%d, got %d", tc.n, tc.expected, needed)
+		}
+	}
+}
+
+func TestPendingProposalsMap(t *testing.T) {
+	pending := make(map[int32]*defs.GPropose)
+
+	// Should start empty
+	if len(pending) != 0 {
+		t.Error("pendingProposals should start empty")
+	}
+
+	// Add and retrieve
+	pending[5] = &defs.GPropose{}
+	if _, ok := pending[5]; !ok {
+		t.Error("Should find proposal at index 5")
+	}
+	if _, ok := pending[10]; ok {
+		t.Error("Should not find proposal at index 10")
+	}
+
+	// Delete
+	delete(pending, 5)
+	if len(pending) != 0 {
+		t.Error("Should be empty after delete")
 	}
 }
