@@ -2020,11 +2020,11 @@ Key observations:
 - Per-type Cache pool (New/Get/Put pattern) for allocation reuse
 
 **Tasks**:
-- [ ] **39.1a** Define CommandId, all 5 message structs
-- [ ] **39.1b** Implement Marshal/Unmarshal for fixed-size messages (RequestVote, RequestVoteReply, AppendEntriesReply, RaftReply)
-- [ ] **39.1c** Implement Marshal/Unmarshal for AppendEntries (variable-length Entries + EntryIds arrays, varint-prefixed)
-- [ ] **39.1d** Implement Cache pools (New/Get/Put) for all 5 types
-- [ ] **39.1e** Implement CommunicationSupply + initCs()
+- [x] **39.1a** Define CommandId, all 5 message structs
+- [x] **39.1b** Implement Marshal/Unmarshal for fixed-size messages (RequestVote, RequestVoteReply, AppendEntriesReply, RaftReply)
+- [x] **39.1c** Implement Marshal/Unmarshal for AppendEntries (variable-length Entries + EntryIds arrays, varint-prefixed)
+- [x] **39.1d** Implement Cache pools (New/Get/Put) for all 5 types
+- [x] **39.1e** Implement CommunicationSupply + initCs()
 
 ### Phase 39.2: Replica Logic — `raft/raft.go` (~500 LOC)
 
@@ -2118,9 +2118,9 @@ case "raft":
 - Cache pool Get/Put cycle
 
 **Tasks**:
-- [ ] **39.5a** Write serialization round-trip tests for all message types
-- [ ] **39.5b** Run `go test -v ./raft/` — all pass
-- [ ] **39.5c** Run `go vet ./raft/` — no warnings
+- [x] **39.5a** Write serialization round-trip tests for all message types (30 tests in raft/raft_test.go)
+- [x] **39.5b** Run `go test -v ./raft/` — all 30 tests pass
+- [x] **39.5c** Run `go vet ./raft/` — no warnings
 
 ### Phase 39.6: Integration Test + Peak Throughput (~30 min runtime)
 
