@@ -3,6 +3,7 @@ package raft
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"github.com/imdea-software/swiftpaxos/replica/defs"
 	fastrpc "github.com/imdea-software/swiftpaxos/rpc"
@@ -1065,6 +1066,7 @@ func newTestReplica(id int32, n int) *Replica {
 		nextIndex:            make([]int32, n),
 		matchIndex:           make([]int32, n),
 		pendingProposals:     make(map[int32]*defs.GPropose),
+		commitNotify:         make(chan struct{}, 1),
 		votesReceived:        0,
 		votesNeeded:          (n / 2) + 1,
 		appendEntriesCache:   NewAppendEntriesCache(),
@@ -1776,5 +1778,124 @@ func TestRaftScenario_LeaderAppendsEntries(t *testing.T) {
 	// Still commitIndex = 1 (no change, already committed)
 	if r.commitIndex != 1 {
 		t.Errorf("commitIndex should still be 1, got %d", r.commitIndex)
+	}
+}
+
+// --- commitNotify tests ---
+
+func TestNotifyCommit_NonBlocking(t *testing.T) {
+	r := newTestReplica(0, 3)
+
+	// First notify should succeed (buffer size 1)
+	r.notifyCommit()
+
+	// Second notify should not block (non-blocking send, drops if full)
+	r.notifyCommit()
+
+	// Drain the single notification
+	select {
+	case <-r.commitNotify:
+	default:
+		t.Error("expected notification in channel")
+	}
+
+	// Channel should now be empty
+	select {
+	case <-r.commitNotify:
+		t.Error("channel should be empty after drain")
+	default:
+	}
+}
+
+func TestAdvanceCommitIndex_NotifiesOnAdvance(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.role = LEADER
+	r.currentTerm = 1
+	r.log = []LogEntry{
+		{Term: 1, Command: state.Command{Op: state.PUT, K: state.Key(1), V: state.Value([]byte("a"))}},
+	}
+	r.matchIndex = []int32{0, 0, -1}
+
+	// Drain any existing notifications
+	select {
+	case <-r.commitNotify:
+	default:
+	}
+
+	r.advanceCommitIndex()
+
+	if r.commitIndex != 0 {
+		t.Errorf("commitIndex should be 0, got %d", r.commitIndex)
+	}
+
+	// Should have received a commit notification
+	select {
+	case <-r.commitNotify:
+		// ok
+	default:
+		t.Error("expected commit notification after advanceCommitIndex")
+	}
+}
+
+func TestAdvanceCommitIndex_NoNotifyWhenNoAdvance(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.role = LEADER
+	r.currentTerm = 1
+	r.commitIndex = 0
+	r.log = []LogEntry{
+		{Term: 1, Command: state.Command{Op: state.PUT, K: state.Key(1), V: state.Value([]byte("a"))}},
+	}
+	r.matchIndex = []int32{0, 0, -1} // majority at 0, but commitIndex already 0
+
+	// Drain any existing notifications
+	select {
+	case <-r.commitNotify:
+	default:
+	}
+
+	r.advanceCommitIndex()
+
+	// commitIndex didn't advance (still 0), so no notification
+	select {
+	case <-r.commitNotify:
+		t.Error("should not notify when commitIndex doesn't advance")
+	default:
+		// ok
+	}
+}
+
+func TestExecuteCommands_WakesOnNotify(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.log = []LogEntry{
+		{Term: 1, Command: state.Command{Op: state.PUT, K: state.Key(1), V: state.Value([]byte("a"))}},
+		{Term: 1, Command: state.Command{Op: state.PUT, K: state.Key(2), V: state.Value([]byte("b"))}},
+	}
+	r.commitIndex = 0
+	r.lastApplied = -1
+
+	// Apply committed entries synchronously (simulating first half of executeCommands loop)
+	for r.lastApplied < r.commitIndex {
+		r.lastApplied++
+	}
+	if r.lastApplied != 0 {
+		t.Errorf("lastApplied should be 0 after applying, got %d", r.lastApplied)
+	}
+
+	// Now test the blocking/wakeup: goroutine blocks on commitNotify, we send notify
+	done := make(chan struct{})
+	go func() {
+		<-r.commitNotify
+		close(done)
+	}()
+
+	// Send notification (simulating advanceCommitIndex)
+	r.notifyCommit()
+
+	// The goroutine should unblock
+	select {
+	case <-done:
+		// ok
+	case <-time.After(time.Second):
+		t.Fatal("executeCommands goroutine did not wake up within 1 second")
 	}
 }

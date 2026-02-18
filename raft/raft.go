@@ -67,6 +67,9 @@ type Replica struct {
 	id int32
 	n  int
 
+	// Commit notification (replaces polling in executeCommands)
+	commitNotify chan struct{}
+
 	// Batching
 	batchWait int // batch delay in microseconds (0 = disabled)
 
@@ -102,6 +105,8 @@ func New(alias string, id int, addrs []string, isLeader bool, f int,
 		matchIndex: make([]int32, n),
 
 		pendingProposals: make(map[int32]*defs.GPropose),
+
+		commitNotify: make(chan struct{}, 1),
 
 		votesReceived: 0,
 		votesNeeded:   (n / 2) + 1,
@@ -464,12 +469,16 @@ func (r *Replica) handleAppendEntries(msg *AppendEntries) {
 	}
 
 	// Advance commitIndex if leader's commit is ahead
+	oldCommitIndex := r.commitIndex
 	if msg.LeaderCommit > r.commitIndex {
 		lastNewIndex := int32(len(r.log) - 1)
 		if msg.LeaderCommit < lastNewIndex {
 			r.commitIndex = msg.LeaderCommit
 		} else {
 			r.commitIndex = lastNewIndex
+		}
+		if r.commitIndex > oldCommitIndex {
+			r.notifyCommit()
 		}
 	}
 
@@ -530,6 +539,7 @@ func (r *Replica) advanceCommitIndex() {
 	if majorityMatch > r.commitIndex && majorityMatch < int32(len(r.log)) &&
 		r.log[majorityMatch].Term == r.currentTerm {
 		r.commitIndex = majorityMatch
+		r.notifyCommit()
 	}
 }
 
@@ -643,12 +653,8 @@ func (r *Replica) sendHeartbeats() {
 
 // --- executeCommands: Apply committed entries, send RaftReply ---
 
-const EXEC_SLEEP = 1 * time.Millisecond
-
 func (r *Replica) executeCommands() {
 	for !r.Shutdown {
-		executed := false
-
 		for r.lastApplied < r.commitIndex {
 			r.lastApplied++
 			idx := r.lastApplied
@@ -659,7 +665,6 @@ func (r *Replica) executeCommands() {
 
 			entry := r.log[idx]
 			val := entry.Command.Execute(r.State)
-			executed = true
 
 			// If we're leader and have a pending proposal for this index, reply to client
 			r.pendingMu.Lock()
@@ -680,8 +685,16 @@ func (r *Replica) executeCommands() {
 			}
 		}
 
-		if !executed {
-			time.Sleep(EXEC_SLEEP)
-		}
+		// Block until commitIndex advances instead of polling
+		<-r.commitNotify
+	}
+}
+
+// notifyCommit wakes executeCommands after commitIndex advances.
+// Non-blocking send: if a notification is already pending, skip.
+func (r *Replica) notifyCommit() {
+	select {
+	case r.commitNotify <- struct{}{}:
+	default:
 	}
 }

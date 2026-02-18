@@ -2213,10 +2213,10 @@ The current Raft implementation has **5 major bottlenecks** that explain the 3-1
 - Also notify from `handleAppendEntries()` when follower advances commitIndex
 
 **Tasks**:
-- [ ] **40.2a** Add `commitNotify` channel to Replica struct, initialize in New()
-- [ ] **40.2b** Modify `advanceCommitIndex()` to notify on commit advance
-- [ ] **40.2c** Modify `handleAppendEntries()` to notify on follower commit advance
-- [ ] **40.2d** Rewrite `executeCommands()` to block on channel instead of polling
+- [x] **40.2a** Add `commitNotify` channel (buffered 1) to Replica struct, initialize in New()
+- [x] **40.2b** Modify `advanceCommitIndex()` to call `notifyCommit()` on commit advance
+- [x] **40.2c** Modify `handleAppendEntries()` to call `notifyCommit()` on follower commit advance
+- [x] **40.2d** Rewrite `executeCommands()` — replace `time.Sleep(EXEC_SLEEP)` with `<-r.commitNotify`. Added `notifyCommit()` helper (non-blocking send). Removed EXEC_SLEEP const.
 
 ##### Phase 40.3: Eliminate advanceCommitIndex allocations (~20 LOC)
 
