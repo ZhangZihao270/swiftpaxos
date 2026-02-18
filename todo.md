@@ -2254,9 +2254,9 @@ The current Raft implementation has **5 major bottlenecks** that explain the 3-1
 - Check if `replica.Replica` has `SendMsgNoFlush` — if not, add it
 
 **Tasks**:
-- [ ] **40.5a** Check if `SendMsgNoFlush` exists or add a no-flush variant
-- [ ] **40.5b** Modify `broadcastAppendEntries()` to batch wire writes
-- [ ] **40.5c** Add explicit flush after broadcast loop
+- [x] **40.5a** `SendMsgNoFlush` already exists. Added `FlushPeers()` method to `replica/replica.go` that flushes all connected peer writers.
+- [x] **40.5b** Refactored `broadcastAppendEntries()`: extracted `buildAppendEntries()` for message construction, uses `SendMsgNoFlush` per follower instead of async Sender. `sendHeartbeats()` now delegates to `broadcastAppendEntries()`.
+- [x] **40.5c** `broadcastAppendEntries()` calls `FlushPeers()` once after all per-follower writes. Individual retries (`sendAppendEntries`) still use `sender.SendTo` with per-message flush.
 
 ##### Phase 40.6: Build, Test, Benchmark
 

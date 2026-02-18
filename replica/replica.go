@@ -303,6 +303,18 @@ func (r *Replica) SendMsgNoFlush(peerId int32, code uint8, msg fastrpc.Serializa
 	msg.Marshal(w)
 }
 
+// FlushPeers flushes buffered writes to all connected peer writers.
+func (r *Replica) FlushPeers() {
+	r.M.Lock()
+	defer r.M.Unlock()
+
+	for _, w := range r.PeerWriters {
+		if w != nil {
+			w.Flush()
+		}
+	}
+}
+
 func (r *Replica) ReplyProposeTS(reply *defs.ProposeReplyTS, w *bufio.Writer, lock *sync.Mutex) {
 	r.M.Lock()
 	defer r.M.Unlock()

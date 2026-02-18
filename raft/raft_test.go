@@ -1743,6 +1743,66 @@ func TestSendAppendEntries_EntryConstruction(t *testing.T) {
 	}
 }
 
+func TestBuildAppendEntries_PerFollowerMessages(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.currentTerm = 2
+	r.commitIndex = 0
+	r.log = []LogEntry{
+		{Term: 1, Command: state.Command{Op: state.PUT, K: 1, V: []byte("a")}, CmdId: CommandId{ClientId: 1, SeqNum: 1}},
+		{Term: 2, Command: state.Command{Op: state.PUT, K: 2, V: []byte("b")}, CmdId: CommandId{ClientId: 1, SeqNum: 2}},
+	}
+	r.nextIndex = []int32{2, 1, 0}
+
+	// Peer 2: nextIndex=0, needs both entries
+	ae2 := r.buildAppendEntries(2)
+	if ae2.PrevLogIndex != -1 {
+		t.Errorf("peer 2: prevLogIndex should be -1, got %d", ae2.PrevLogIndex)
+	}
+	if ae2.EntryCnt != 2 {
+		t.Errorf("peer 2: should send 2 entries, got %d", ae2.EntryCnt)
+	}
+	if ae2.LeaderCommit != 0 {
+		t.Errorf("peer 2: leaderCommit should be 0, got %d", ae2.LeaderCommit)
+	}
+	if ae2.Term != 2 {
+		t.Errorf("peer 2: term should be 2, got %d", ae2.Term)
+	}
+
+	// Peer 1: nextIndex=1, needs only entry at index 1
+	ae1 := r.buildAppendEntries(1)
+	if ae1.PrevLogIndex != 0 {
+		t.Errorf("peer 1: prevLogIndex should be 0, got %d", ae1.PrevLogIndex)
+	}
+	if ae1.PrevLogTerm != 1 {
+		t.Errorf("peer 1: prevLogTerm should be 1, got %d", ae1.PrevLogTerm)
+	}
+	if ae1.EntryCnt != 1 {
+		t.Errorf("peer 1: should send 1 entry, got %d", ae1.EntryCnt)
+	}
+}
+
+func TestBuildAppendEntries_EmptyHeartbeat(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.currentTerm = 1
+	r.commitIndex = 1
+	r.log = []LogEntry{
+		{Term: 1, Command: state.Command{Op: state.PUT, K: 1, V: []byte("a")}},
+		{Term: 1, Command: state.Command{Op: state.PUT, K: 2, V: []byte("b")}},
+	}
+	r.nextIndex = []int32{2, 2, 2} // all up to date
+
+	ae := r.buildAppendEntries(1)
+	if ae.EntryCnt != 0 {
+		t.Errorf("heartbeat should have 0 entries, got %d", ae.EntryCnt)
+	}
+	if ae.PrevLogIndex != 1 {
+		t.Errorf("prevLogIndex should be 1, got %d", ae.PrevLogIndex)
+	}
+	if ae.LeaderCommit != 1 {
+		t.Errorf("leaderCommit should be 1, got %d", ae.LeaderCommit)
+	}
+}
+
 // --- Execute commands tests ---
 
 func TestExecuteCommands_AppliesCommitted(t *testing.T) {

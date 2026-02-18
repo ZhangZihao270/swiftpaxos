@@ -346,17 +346,28 @@ func (r *Replica) handlePropose(propose *defs.GPropose) {
 }
 
 // broadcastAppendEntries sends AppendEntries RPCs to all followers.
+// Uses SendMsgNoFlush for each follower, then flushes all peers once
+// to reduce per-follower flush syscalls.
 func (r *Replica) broadcastAppendEntries() {
 	for i := int32(0); i < int32(r.n); i++ {
 		if i == r.id {
 			continue
 		}
-		r.sendAppendEntries(i)
+		ae := r.buildAppendEntries(i)
+		r.SendMsgNoFlush(i, r.cs.appendEntriesRPC, ae)
 	}
+	r.FlushPeers()
 }
 
-// sendAppendEntries sends an AppendEntries RPC to a specific follower.
+// sendAppendEntries sends an AppendEntries RPC to a specific follower
+// via the async Sender (with flush). Used for individual retries.
 func (r *Replica) sendAppendEntries(peerId int32) {
+	ae := r.buildAppendEntries(peerId)
+	r.sender.SendTo(peerId, ae, r.cs.appendEntriesRPC)
+}
+
+// buildAppendEntries constructs an AppendEntries message for the given follower.
+func (r *Replica) buildAppendEntries(peerId int32) *AppendEntries {
 	nextIdx := r.nextIndex[peerId]
 	if nextIdx < 0 {
 		nextIdx = 0
@@ -391,7 +402,7 @@ func (r *Replica) sendAppendEntries(peerId int32) {
 	ae.Entries = entries
 	ae.EntryIds = entryIds
 
-	r.sender.SendTo(peerId, ae, r.cs.appendEntriesRPC)
+	return ae
 }
 
 // --- handleAppendEntries: Term check, log matching, entry append, commitIndex advance ---
@@ -652,12 +663,7 @@ func (r *Replica) startElection() {
 // --- sendHeartbeats: Empty AppendEntries to all followers ---
 
 func (r *Replica) sendHeartbeats() {
-	for i := int32(0); i < int32(r.n); i++ {
-		if i == r.id {
-			continue
-		}
-		r.sendAppendEntries(i)
-	}
+	r.broadcastAppendEntries()
 }
 
 // --- executeCommands: Apply committed entries, send RaftReply ---
