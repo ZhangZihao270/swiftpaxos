@@ -334,8 +334,14 @@ func (r *Replica) handlePropose(propose *defs.GPropose) {
 		entryIds[i] = cmdId
 
 		// Store pending proposal for reply on commit.
-		// Grow slice to match log length (both grow in lockstep).
-		r.pendingProposals = append(r.pendingProposals, p)
+		// Ensure pendingProposals is indexed by log position.
+		// After leader election, pendingProposals may be shorter than log
+		// (pre-election entries have no pending proposals on the new leader).
+		logIdx := int32(len(r.log) - 1)
+		for int32(len(r.pendingProposals)) <= logIdx {
+			r.pendingProposals = append(r.pendingProposals, nil)
+		}
+		r.pendingProposals[logIdx] = p
 	}
 
 	// Update leader's own matchIndex

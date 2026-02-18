@@ -2282,6 +2282,100 @@ The current Raft implementation has **5 major bottlenecks** that explain the 3-1
 
 ---
 
+### Phase 41: Raft Leader Election Integration Test
+
+**Priority: HIGH** — Leader election and recovery have unit tests but no end-to-end integration test.
+
+#### Goal
+
+Run 3 Raft replicas + master + client in a single Go test process, verify:
+1. Initial leader serves client commands
+2. After killing the leader, a new leader is elected within ~1s
+3. Client reconnects and resumes sending commands to the new leader
+
+#### Approach: In-Process Multi-Replica Test
+
+All components run as goroutines in a single test process using localhost TCP:
+
+```
+Master (HTTP RPC :17087)
+Replica 0 (peer TCP :17070, RPC HTTP :18070)  ← initial leader
+Replica 1 (peer TCP :17071, RPC HTTP :18071)
+Replica 2 (peer TCP :17072, RPC HTTP :18072)
+Client → connects via Master → sends to leader
+```
+
+Port range 17xxx to avoid conflicts with other tests or running instances.
+
+#### Architecture Notes
+
+- `replica.New()` creates the struct; `raft.New()` calls `go r.run()` which calls `ConnectToPeers()` → `waitForPeerConnections()` → creates the `Listener` on `PeerAddrList[id]`
+- `ConnectToPeers()`: lower-ID replicas dial higher-ID replicas; higher-ID replicas accept
+- `waitForPeerConnections()` sets `r.Listener` which is also used by `WaitForClientConnections()`
+- Master: `master.New(N, port, logger)` + `go m.Run()` — HTTP RPC server
+- Replicas register with master (HTTP RPC), master returns replicaId + nodeList + isLeader
+- Client: `client.NewClientLog()` connects to master, gets replica list, dials replicas
+- Kill leader: set `r.Shutdown = true` + close `r.Listener` to unblock Accept
+- Election timeout: 300-500ms, so new leader elected within ~600ms after old leader stops heartbeats
+
+#### Challenge: Registration Flow
+
+In production, `registerWithMaster()` in `run.go` handles the master→replica registration. For in-process test, we need to either:
+- **Option A**: Call `registerWithMaster()` from goroutines (but it blocks until all N replicas register)
+- **Option B**: Skip master registration, directly create replicas with known `id`, `nodeList`, `isLeader`
+- **Option C**: Use master but spawn registration in parallel goroutines
+
+**Chosen: Option B** — create replicas directly (simpler, no master needed for peer networking). Use master only for client→leader discovery. OR even simpler: skip master entirely, manually set client's `LeaderId`.
+
+#### Simplified Test Design (No Master)
+
+Since we control everything in-process:
+1. Create 3 replicas directly via `raft.New()` with `nodeList = ["127.0.0.1:17070", "127.0.0.1:17071", "127.0.0.1:17072"]` and `isLeader = (id == 0)`
+2. Wait for peer connections to establish (~1s)
+3. Connect a raw TCP client to replica 0 (leader), send `Propose` messages, read `ProposeReplyTS` replies
+4. Kill leader: `replica[0].Shutdown = true`, close `replica[0].Listener`
+5. Wait ~1s for election
+6. Check `replica[1].role == LEADER || replica[2].role == LEADER`
+7. Connect client to new leader, send more commands, verify replies
+
+For step 3, we can use the low-level binary protocol directly (write `defs.PROPOSE` byte + marshaled `Propose` + flush, read `ProposeReplyTS`), avoiding the full `client.Client` → master dependency.
+
+#### Tasks
+
+##### Phase 41.1: Test Infrastructure (~50 LOC)
+
+Helper functions for `raft/raft_integration_test.go`:
+
+- [x] **41.1a** `startReplicas(t, n, basePort)` — creates `n` Raft replicas on `127.0.0.1:basePort+i`, starts them, waits for peer connections [26:02:18]
+- [x] **41.1b** `stopReplica(r)` — sets `Shutdown=true`, closes `Listener` to unblock Accept [26:02:18]
+- [x] **41.1c** `findLeader(replicas)` — returns the replica with `role == LEADER` [26:02:18]
+- [x] **41.1d** `sendCommand(t, leaderAddr, cmd)` — connects via TCP, sends a Propose, reads ProposeReplyTS [26:02:18]
+
+##### Phase 41.2: Basic Replication Test (~30 LOC)
+
+- [x] **41.2a** `TestRaftBasicReplication` — start 3 replicas, send 5 commands to leader, verify all get replies with `OK=TRUE` [26:02:18]
+
+##### Phase 41.3: Leader Election After Failure Test (~40 LOC)
+
+- [x] **41.3a** `TestRaftLeaderElection` — start 3 replicas, verify leader is replica 0, kill replica 0, wait ~1s, verify a new leader exists among replicas 1-2 [26:02:18]
+- [x] **41.3b** Verify new leader's `currentTerm > 0` (election happened) [26:02:18]
+- [x] **41.3c** Verify new leader's log contains all previously committed entries [26:02:18]
+
+##### Phase 41.4: Client Resumption After Failover Test (~40 LOC)
+
+- [x] **41.4a** `TestRaftClientResumesAfterFailover` — send commands to leader (replica 0), kill leader, wait for new leader, send more commands to new leader, verify all complete [26:02:18]
+- [x] **41.4b** Verify commands sent after failover return `OK=TRUE` [26:02:18]
+- [x] **41.4c** Verify state machine on surviving replicas has all values from both before and after failover [26:02:18]
+
+##### Phase 41.5: Build and Verify
+
+- [x] **41.5a** `go build -o swiftpaxos .` — clean build [26:02:18]
+- [x] **41.5b** `go test -v -run TestRaft ./raft/` — all 11 tests pass (42s) [26:02:18]
+- [x] **41.5c** Race detector: pre-existing races in base replica layer (event loop vs executeCommands shared state), same pattern as other protocols [26:02:18]
+- [x] **41.5d** Commit and push [26:02:18]
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
