@@ -1260,6 +1260,62 @@ func TestAdvanceCommitIndex_FiveNodes(t *testing.T) {
 	}
 }
 
+func TestAdvanceCommitIndex_MultipleIndicesInOneCall(t *testing.T) {
+	// Advances from commitIndex=-1 through indices 0,1,2 in a single call
+	r := newTestReplica(0, 3)
+	r.role = LEADER
+	r.currentTerm = 1
+	r.log = []LogEntry{{Term: 1}, {Term: 1}, {Term: 1}}
+	r.matchIndex = []int32{2, 2, -1} // majority at 2
+	r.commitIndex = -1
+
+	r.advanceCommitIndex()
+
+	if r.commitIndex != 2 {
+		t.Errorf("commitIndex should be 2 (all three entries), got %d", r.commitIndex)
+	}
+}
+
+func TestAdvanceCommitIndex_SkipsOldTermEntries(t *testing.T) {
+	// Entries from old term should be skipped, only current term can be committed directly
+	r := newTestReplica(0, 3)
+	r.role = LEADER
+	r.currentTerm = 2
+	r.log = []LogEntry{
+		{Term: 1}, // index 0: old term
+		{Term: 2}, // index 1: current term
+		{Term: 2}, // index 2: current term
+	}
+	r.matchIndex = []int32{2, 2, 2}
+	r.commitIndex = -1
+
+	r.advanceCommitIndex()
+
+	// Index 0 has term 1 != currentTerm 2, so it's skipped.
+	// But index 1 has term 2 == currentTerm, and majority have matchIndex >= 1.
+	// Raft §5.4.2: once a current-term entry is committed, all prior entries are
+	// implicitly committed. The scan continues past index 0 to commit index 1 and 2.
+	if r.commitIndex != 2 {
+		t.Errorf("commitIndex should be 2, got %d", r.commitIndex)
+	}
+}
+
+func TestAdvanceCommitIndex_StopsAtPartialMajority(t *testing.T) {
+	// matchIndex shows partial replication — majority only up to index 1
+	r := newTestReplica(0, 5)
+	r.role = LEADER
+	r.currentTerm = 1
+	r.log = []LogEntry{{Term: 1}, {Term: 1}, {Term: 1}, {Term: 1}}
+	r.matchIndex = []int32{3, 1, 1, 0, 0} // 3 replicas have >=1, only 2 have >=2
+	r.commitIndex = -1
+
+	r.advanceCommitIndex()
+
+	if r.commitIndex != 1 {
+		t.Errorf("commitIndex should be 1, got %d", r.commitIndex)
+	}
+}
+
 // --- startElection tests ---
 
 func TestStartElection(t *testing.T) {

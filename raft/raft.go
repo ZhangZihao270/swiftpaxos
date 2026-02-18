@@ -2,7 +2,6 @@ package raft
 
 import (
 	"math/rand"
-	"sort"
 	"sync"
 	"time"
 
@@ -527,18 +526,30 @@ func (r *Replica) handleAppendEntriesReply(msg *AppendEntriesReply) {
 // advanceCommitIndex checks if any new entries can be committed.
 // A log entry is committed when it has been replicated on a majority
 // of servers AND its term equals the current term (§5.4.2).
+// Zero-allocation: counts replicas instead of sorting matchIndex.
 func (r *Replica) advanceCommitIndex() {
-	// Collect all matchIndex values and sort
-	matches := make([]int32, r.n)
-	copy(matches, r.matchIndex)
-	sort.Slice(matches, func(i, j int) bool { return matches[i] > matches[j] })
+	logLen := int32(len(r.log))
+	advanced := false
 
-	// The median (majority) matchIndex is the highest index replicated on majority
-	majorityMatch := matches[r.n/2]
+	for candidate := r.commitIndex + 1; candidate < logLen; candidate++ {
+		if r.log[candidate].Term != r.currentTerm {
+			continue
+		}
+		count := 0
+		for i := 0; i < r.n; i++ {
+			if r.matchIndex[i] >= candidate {
+				count++
+			}
+		}
+		if count >= r.votesNeeded {
+			r.commitIndex = candidate
+			advanced = true
+		} else {
+			break
+		}
+	}
 
-	if majorityMatch > r.commitIndex && majorityMatch < int32(len(r.log)) &&
-		r.log[majorityMatch].Term == r.currentTerm {
-		r.commitIndex = majorityMatch
+	if advanced {
 		r.notifyCommit()
 	}
 }

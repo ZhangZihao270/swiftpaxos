@@ -2227,7 +2227,7 @@ The current Raft implementation has **5 major bottlenecks** that explain the 3-1
 - Start candidate at `commitIndex+1` and scan upward until no majority
 
 **Tasks**:
-- [ ] **40.3a** Rewrite `advanceCommitIndex()` with zero-allocation majority counting
+- [x] **40.3a** Rewrite `advanceCommitIndex()` with zero-allocation majority counting. Replaced sort.Slice+copy with simple loop that scans from commitIndex+1 upward, counting replicas with matchIndex >= candidate. Removed `sort` import.
 
 ##### Phase 40.4: Remove pendingProposals mutex (~30 LOC)
 
