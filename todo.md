@@ -2376,6 +2376,143 @@ Helper functions for `raft/raft_integration_test.go`:
 
 ---
 
+### Phase 42: Re-evaluate CURP-HO and CURP-HT Benchmarks [HIGH PRIORITY]
+
+**Goal**: Diagnose and fix client hang + performance scaling issues, then reproduce the Phase 38 reference sweep results.
+
+**Background**: After Raft (Phases 39-41) was added, re-running CURP-HT/HO benchmarks shows:
+1. **Client hang**: One or more client threads hang indefinitely, blocking the whole client process. In a 3-client × 2-thread run, client2's thread 1 hung while thread 0 completed.
+2. **Performance doesn't scale**: At higher thread counts, more threads = more chance of hang = fewer clients completing = lower aggregate throughput.
+
+**Reference results** (Phase 38, commit 57ae4b1):
+- curpho peak: 68,333 ops/sec at 128 threads/client (384 total)
+- curpht peak: 69,246 ops/sec at 64 threads/client (192 total)
+- Both scale linearly from 2→32 threads without hangs
+
+**Analysis of code changes since Phase 38**:
+- `replica/replica.go`: Added `FlushPeers()` — additive, doesn't affect existing paths
+- `client/hybrid.go`: `SupportsHybrid()` removed `SupportsWeak()` check — benign for CURP-HT/HO (both return true)
+- `main.go` / `run.go`: Added Raft case in switch — additive, isolated path
+- **Conclusion**: Code changes are minimal and additive. The hang is likely a pre-existing intermittent bug that was masked in Phase 38 sweep (or environmental).
+
+**Observed symptoms** (latest run, benchmark-20260219-215014, curpht, 2 threads):
+- client0 (102): 963 ops/sec — OK
+- client1 (104): 962 ops/sec — OK
+- client2 (101): HUNG — thread 0 sent all 10000 cmds but thread 1 never finished
+- replica0 log: client2 connection 43890 didn't disconnect until 17:07 (16 min after other clients)
+- No summary.txt generated (merge script requires all clients to finish)
+
+**Root cause hypothesis**: `HybridLoopWithOptions` reply goroutine reads from `c.Reply` exactly `reqNum+1` times. If even ONE reply is lost (network, protocol race, dropped message), the goroutine blocks forever. No timeout mechanism exists.
+
+---
+
+#### Phase 42.1: Diagnose Client Hang — Add Reply Timeout + Diagnostic Logging (~100 LOC)
+
+**Goal**: Add a safety timeout to the reply loop so hangs are detected and diagnosed rather than blocking forever. Also add diagnostic counters to identify which command types get stuck.
+
+**Tasks**:
+- [ ] **42.1a** Add a reply-wait timeout to `HybridLoopWithOptions` in `client/hybrid.go`
+  - Replace bare `r := <-c.Reply` with select + timeout (e.g., 60s)
+  - On timeout: log how many replies received vs expected, the last received seqnum, and dump pending command types
+  - This is diagnostic — the client should exit with an error message instead of hanging forever
+- [ ] **42.1b** Add a reply-wait timeout to `HybridLoop` (same pattern)
+  - Keep both methods consistent
+- [ ] **42.1c** Test the timeout mechanism locally
+  - Run `go test ./client/` to ensure no regression
+  - Run `go test ./...` for full suite
+
+---
+
+#### Phase 42.2: Identify Specific Lost Replies — Reproduce and Log (~50 LOC)
+
+**Goal**: Run a controlled benchmark to capture which specific commands don't receive replies.
+
+**Tasks**:
+- [ ] **42.2a** Build fresh binary with diagnostic logging from 42.1
+- [ ] **42.2b** Run curpht benchmark at low thread count (2 threads) multiple times (test-hang.sh) to reproduce the hang
+  - If hang occurs: analyze the diagnostic output to identify which command type (strong write, strong read, weak write, weak read) is stuck
+  - If no hang at 2 threads: increase to 8, 16, 32 threads to trigger it
+- [ ] **42.2c** Analyze replica logs to see if the command was received and processed
+  - Check if the command was proposed, accepted, committed but reply was lost
+  - Check if the Sender goroutine queue (sender.go) dropped a message
+- [ ] **42.2d** Document findings in docs/phase-42-diagnosis.md
+
+---
+
+#### Phase 42.3: Fix the Root Cause (~100-300 LOC depending on cause)
+
+**Goal**: Fix the underlying bug causing reply loss.
+
+**Possible root causes** (to be narrowed down by 42.2):
+1. **Protocol reply race**: A command gets committed but reply path has a race (e.g., concurrent writes to client writer without proper locking)
+2. **Sender queue saturation**: `Sender` channel full → message dropped silently
+3. **Client connection registration**: Multi-threaded clients share one connection per replica. If thread 1's warmup PROPOSE hasn't registered ClientWriters before thread 0's weak command arrives, weak replies go to wrong client or nowhere
+4. **Network batching interaction**: `batchDelayUs` timer fires and flushes for one goroutine but another goroutine's message is partially written
+
+**Tasks**:
+- [ ] **42.3a** Fix the identified root cause based on 42.2 findings
+- [ ] **42.3b** Add targeted test for the fix (unit test or integration test)
+- [ ] **42.3c** Run full test suite: `go test ./...`
+- [ ] **42.3d** Run 10 consecutive benchmarks at clientThreads=2 to verify no hangs: `test-hang.sh`
+
+---
+
+#### Phase 42.4: Reproduce CURP-HT Reference Sweep (~50 LOC script changes)
+
+**Goal**: Run full throughput sweep for CURP-HT and verify results match Phase 38 reference.
+
+**Reference (Phase 38)**:
+| threads | total_clients | throughput |
+|---------|--------------|------------|
+| 2       | 6            | 2,982      |
+| 4       | 12           | 5,961      |
+| 8       | 24           | 11,873     |
+| 16      | 48           | 23,599     |
+| 32      | 96           | 44,472     |
+| 64      | 192          | 69,246     |
+| 128     | 384          | 68,686     |
+
+**Tasks**:
+- [ ] **42.4a** Run `./sweep-throughput.sh curpht 2 4 8 16 32 64 128` with fixed binary
+- [ ] **42.4b** Compare results with reference — target: within 10% of Phase 38 numbers
+- [ ] **42.4c** If any thread count hangs or underperforms, investigate and fix
+- [ ] **42.4d** Save results to `results/sweep-summary/curpht-phase42.csv`
+
+---
+
+#### Phase 42.5: Reproduce CURP-HO Reference Sweep
+
+**Goal**: Run full throughput sweep for CURP-HO and verify results match Phase 38 reference.
+
+**Reference (Phase 38)**:
+| threads | total_clients | throughput |
+|---------|--------------|------------|
+| 2       | 6            | 3,557      |
+| 4       | 12           | 7,140      |
+| 8       | 24           | 11,108     |
+| 16      | 48           | 20,372     |
+| 32      | 96           | 42,929     |
+| 64      | 192          | 37,119     |
+| 96      | 288          | 52,996     |
+| 128     | 384          | 68,333     |
+
+**Tasks**:
+- [ ] **42.5a** Run `./sweep-throughput.sh curpho 2 4 8 16 32 64 96 128` with fixed binary
+- [ ] **42.5b** Compare results with reference — target: within 10% of Phase 38 numbers
+- [ ] **42.5c** Save results to `results/sweep-summary/curpho-phase42.csv`
+- [ ] **42.5d** Document final comparison in docs/phase-42-results.md
+
+---
+
+#### Phase 42.6: Commit and Push
+
+**Tasks**:
+- [ ] **42.6a** Clean up temporary files, remove debug prints
+- [ ] **42.6b** `go test ./...` passes
+- [ ] **42.6c** Commit and push
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task

@@ -2,12 +2,18 @@ package client
 
 import (
 	"fmt"
+	"log"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/imdea-software/swiftpaxos/state"
 )
+
+// replyTimeout is the maximum time to wait for a single reply before
+// declaring a hang. This prevents clients from blocking forever when
+// a reply is lost due to protocol bugs or network issues.
+const replyTimeout = 120 * time.Second
 
 // ConsistencyLevel represents the consistency guarantee for a command
 type ConsistencyLevel int
@@ -226,9 +232,20 @@ func (c *HybridBufferClient) HybridLoop() {
 	wait := make(chan struct{}, 0)
 
 	// Reply processing goroutine
+	timedOut := make(chan struct{})
 	go func() {
 		for i := 0; i <= c.reqNum; i++ {
-			r := <-c.Reply
+			var r *ReqReply
+			select {
+			case r = <-c.Reply:
+			case <-time.After(replyTimeout):
+				sw, sr, ww, wr := c.Metrics.StrongWriteCount, c.Metrics.StrongReadCount,
+					c.Metrics.WeakWriteCount, c.Metrics.WeakReadCount
+				log.Printf("REPLY TIMEOUT: waited %v for reply %d/%d (received: StrongW=%d StrongR=%d WeakW=%d WeakR=%d total=%d)",
+					replyTimeout, i, c.reqNum+1, sw, sr, ww, wr, sw+sr+ww+wr)
+				close(timedOut)
+				return
+			}
 			// Ignore first request (warmup)
 			if i != 0 {
 				d := r.Time.Sub(c.reqTime[r.Seqnum])
@@ -300,14 +317,24 @@ func (c *HybridBufferClient) HybridLoop() {
 			if cmdNum == c.window-1 {
 				cmdNum++
 				cmdM.Unlock()
-				<-wait
+				select {
+				case <-wait:
+				case <-timedOut:
+					c.hybrid.MarkAllSent()
+					return
+				}
 			} else {
 				cmdNum++
 				cmdM.Unlock()
 			}
 		}
 		if c.seq || (c.syncFreq > 0 && i%c.syncFreq == 0) {
-			<-wait
+			select {
+			case <-wait:
+			case <-timedOut:
+				c.hybrid.MarkAllSent()
+				return
+			}
 		}
 	}
 
@@ -315,7 +342,10 @@ func (c *HybridBufferClient) HybridLoop() {
 	c.hybrid.MarkAllSent()
 
 	if !c.seq {
-		<-wait
+		select {
+		case <-wait:
+		case <-timedOut:
+		}
 	}
 
 	duration := time.Now().Sub(c.launchTime)
@@ -454,9 +484,21 @@ func (c *HybridBufferClient) HybridLoopWithOptions(printResults bool) {
 	wait := make(chan struct{}, 0)
 
 	// Reply processing goroutine
+	timedOut := make(chan struct{})
 	go func() {
 		for i := 0; i <= c.reqNum; i++ {
-			r := <-c.Reply
+			var r *ReqReply
+			select {
+			case r = <-c.Reply:
+			case <-time.After(replyTimeout):
+				// Count received replies by type for diagnostics
+				sw, sr, ww, wr := c.Metrics.StrongWriteCount, c.Metrics.StrongReadCount,
+					c.Metrics.WeakWriteCount, c.Metrics.WeakReadCount
+				log.Printf("REPLY TIMEOUT: waited %v for reply %d/%d (received: StrongW=%d StrongR=%d WeakW=%d WeakR=%d total=%d)",
+					replyTimeout, i, c.reqNum+1, sw, sr, ww, wr, sw+sr+ww+wr)
+				close(timedOut)
+				return
+			}
 			// Ignore first request (warmup)
 			if i != 0 {
 				d := r.Time.Sub(c.reqTime[r.Seqnum])
@@ -524,14 +566,24 @@ func (c *HybridBufferClient) HybridLoopWithOptions(printResults bool) {
 			if cmdNum == c.window-1 {
 				cmdNum++
 				cmdM.Unlock()
-				<-wait
+				select {
+				case <-wait:
+				case <-timedOut:
+					c.hybrid.MarkAllSent()
+					return
+				}
 			} else {
 				cmdNum++
 				cmdM.Unlock()
 			}
 		}
 		if c.seq || (c.syncFreq > 0 && i%c.syncFreq == 0) {
-			<-wait
+			select {
+			case <-wait:
+			case <-timedOut:
+				c.hybrid.MarkAllSent()
+				return
+			}
 		}
 	}
 
@@ -539,7 +591,10 @@ func (c *HybridBufferClient) HybridLoopWithOptions(printResults bool) {
 	c.hybrid.MarkAllSent()
 
 	if !c.seq {
-		<-wait
+		select {
+		case <-wait:
+		case <-timedOut:
+		}
 	}
 
 	c.duration = time.Now().Sub(c.launchTime)
