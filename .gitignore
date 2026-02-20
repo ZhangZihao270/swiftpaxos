@@ -2,6 +2,7 @@
 swiftpaxos
 *.exe
 *.out
+bin/
 
 # System files
 .apas

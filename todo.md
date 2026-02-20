@@ -2690,7 +2690,248 @@ At high thread counts, this doubles the message load on `handleMsgs`.
 - [x] **43.5a** Remove instrumentation logging (keep only production-worthy changes)
 - [x] **43.5b** `go test ./...` passes
 - [x] **43.5c** Commit and push
-- [ ] **43.5d** Commit Phase 43.4 validation results + async sendMsgToAll fix
+- [x] **43.5d** Commit Phase 43.4 validation results + async sendMsgToAll fix
+
+---
+
+### Phase 44: Fix CURP-HO Throughput Scaling and Weak P99 Latency [HIGH PRIORITY]
+
+**Goal**: Two targets:
+1. **Throughput** should scale with thread count, approximating Phase 42 reference (evaluation/2026-02-19.md)
+2. **W-P99** should be < 5ms for all thread counts < 64
+
+**Phase 42 reference** (evaluation/2026-02-19.md — target to match):
+
+| Threads | Throughput | W-P99 (ms) | S-Median (ms) |
+|---------|-----------|------------|----------------|
+| 2       | 3,551     | 0.86       | 51.26          |
+| 4       | 4,109     | 100.96     | 51.17          |
+| 8       | 14,050    | 2.62       | 50.97          |
+| 16      | 8,771     | 100.95     | 50.89          |
+| 32      | 30,339    | 100.38     | 59.16          |
+| 64      | 34,797    | 102.51     | 67.26          |
+| 96      | 71,595    | 119.61     | 94.85          |
+
+**Phase 43 post-optimization** (evaluation/2026-02-20-phase43.md):
+
+| Threads | Throughput | W-P99 (ms) | S-Median (ms) | Notes |
+|---------|-----------|------------|----------------|-------|
+| 2       | 3,558     | 0.82       | 51.24          | Matches reference |
+| 4       | ~2,210    | ~100.80    | 51.65          | W-P99 still bad, throughput LOW |
+| 8       | 3,513     | 0.81       | 51.28          | W-P99 fixed! Throughput LOW |
+| 16      | 3,558     | 1.08       | 51.20          | W-P99 fixed! Throughput LOW |
+| 32      | 883       | 101.02     | 52.29          | Everything bad |
+
+Note: Phase 43 tests ran with .102 at load=5.75 (8 users). S-Median is normal (~51ms), which confirms the protocol is working correctly — throughput regression is likely environmental.
+
+---
+
+#### Root Cause Analysis
+
+**Throughput flat at ~3,500 (doesn't scale with threads)**:
+
+**Primary suspect: Environmental noise on .102.** Server .102 had load 5.75 with 8 users during Phase 43 testing. Client0 and replica1 (+ MASTER) run on .102. Under heavy CPU contention, client0 threads are throttled, stretching the max duration used for throughput calculation (`throughput = total_ops / max_duration`). Since one slow client drags down all thread counts equally, this explains the flat ~3,500 curve. Evidence: S-Median is normal (~51ms) at all thread counts — the protocol itself is not regressing.
+
+**Secondary suspect: Priority fast-path starvation (Phase 43.2b).** The non-blocking receive on `causalProposeChan` + `continue` at the top of the leader's run loop can theoretically starve other channels. When causal proposes arrive faster than the loop can drain them, it never reaches the main `select`, preventing processing of `acceptAckChan` (quorum formation), `ProposeChan` (strong commands), `commitChan` (non-leader commits), etc. This creates cascading failure: `asyncReplicateCausal` goroutines pile up waiting for commits → timeout after 1s → goroutine explosion. However, at 2-16 threads, the causal propose rate (~1,500 ops/sec) shouldn't saturate the run loop (~100K iterations/sec). This is more likely a factor at 64+ threads.
+
+**Action**: Re-run on idle machines first (Phase 44.1). If throughput still doesn't scale, investigate the priority fast-path (Phase 44.4).
+
+**W-P99 ~100ms at 4 threads** (pre-existing, present in Phase 42):
+
+Key observation: W-Avg at 4 threads is 10-15ms while W-Median is 0.21ms. This bimodal distribution suggests ~10% of weak ops take ~100ms. Since weak writes are exactly 10% of weak ops (weakWrites=10%), the hypothesis is that **ALL weak writes take ~100ms while ALL weak reads are fast**.
+
+100ms ≈ 2 × 50ms (simulated RTT). Possible causes:
+- `sendMsgToAll` blocks for ~50ms on `Flush()` to remote replicas (TCP backpressure under specific load), which doesn't affect measured latency directly but may create pipeline backpressure effects
+- Bound replica's run loop delays processing the MCausalPropose by ~100ms due to specific strong/weak interleaving at 4 threads
+- S-P99 is also ~100ms at 4 threads (vs 53ms at 2 threads), confirming system-wide periodic delays
+
+**Action**: Separate weak write vs weak read P99 in metrics (Phase 44.2) to confirm the hypothesis, then instrument the slow path (Phase 44.5).
+
+**W-P99 ~100ms at 32 threads** (also pre-existing in Phase 42):
+
+At 32 threads, genuine run loop contention on the bound replica becomes a factor. With 96 total threads, the replica processes hundreds of messages/sec across all channels. Causal proposes compete with accept/commit/deliver messages in the `select`. The random selection in Go's `select` can delay causal proposes behind batches of strong-path messages.
+
+**Action**: First verify on clean machines (Phase 44.1). If still bad, consider dedicated causal processing (Phase 44.5).
+
+---
+
+#### Phase 44.1: Clean Benchmark Run [REQUIRED FIRST]
+
+**Goal**: Isolate environmental noise from code-level issues.
+
+**Tasks**:
+- [ ] **44.1a** Check server loads (`uptime`) on all 3 machines (.101, .102, .104). Abort if any > 2.0 — wait for idle or use alternative machines.
+- [ ] **44.1b** Run CURP-HO benchmark sweep: 2, 4, 8, 16, 32, 64, 96 threads. Same parameters as Phase 42 (10K reqs, pendings=15, pipeline=true, weakRatio=50, weakWrites=10, batchDelay=150us).
+- [ ] **44.1c** Compare throughput with Phase 42 reference at each thread count. Record results.
+- [ ] **44.1d** Run 4-thread benchmark 3× to confirm W-P99 reproducibility.
+
+**Decision point**:
+- If throughput matches Phase 42 within 20%: **skip** Phase 44.4 (priority fast-path is not a problem)
+- If throughput is still flat: **execute** Phase 44.4 (priority fast-path is causing starvation)
+- Regardless: proceed to Phase 44.2 and 44.3
+
+---
+
+#### Phase 44.2: Separate Weak Write/Read P99 Metrics (~30 LOC)
+
+**Goal**: Determine whether the ~100ms W-P99 at 4 threads is concentrated in weak writes, weak reads, or both.
+
+**Problem**: Currently, `PrintMetrics` combines weak write and weak read latencies into "W-P99". We need them separate to diagnose the 4-thread issue.
+
+**Approach**: `PrintMetrics` already outputs separate "Weak Write" and "Weak Read" lines (with avg/median/p99/p999). But the aggregated summary line "Avg/Median/P99/P99.9" combines them. The separated metrics are already computed — just need to check the aggregated output's 4-thread results.
+
+Actually, looking at `PrintMetrics` again — it already prints separate Weak Write and Weak Read percentiles! The issue is that `evaluation/2026-02-19.md` only reports the combined W-P99. So this phase is about **collecting the separated metrics in the next benchmark run**.
+
+**Tasks**:
+- [ ] **44.2a** Verify that `PrintMetrics` output includes separate Weak Write P99 and Weak Read P99 (it should already — check `client/hybrid.go` lines 418-425)
+- [ ] **44.2b** When running Phase 44.1 benchmarks, record Weak Write P99 and Weak Read P99 separately
+- [ ] **44.2c** Analyze: if W-Write-P99 ≈ 100ms and W-Read-P99 < 1ms at 4 threads, confirm that the issue is sendMsgToAll broadcast, not the read path
+
+---
+
+#### Phase 44.3: Fix sendMsgToAll / sendMsgSafe Writer Race (~5 LOC)
+
+**Goal**: Fix data race between HybridLoop and handleStrongMsgs goroutines on `bufio.Writer`.
+
+**Problem**: `sendMsgToAll` (called from HybridLoop goroutine via `SendCausalWrite`) uses bare `c.SendMsg` without mutex protection. `sendMsgSafe` (called from `handleStrongMsgs` goroutine for timer retries and from `SendCausalRead`) uses `writerMu[rid]` mutex. These can race on the same replica's `bufio.Writer` when the timer fires during a weak write broadcast.
+
+**Fix**: Use `sendMsgSafe` in `sendMsgToAll`:
+```go
+func (c *Client) sendMsgToAll(code uint8, msg fastrpc.Serializable) {
+    c.sendMsgSafe(c.boundReplica, code, msg)
+    for i := 0; i < c.N; i++ {
+        if int32(i) != c.boundReplica {
+            c.sendMsgSafe(int32(i), code, msg)
+        }
+    }
+}
+```
+
+**Tasks**:
+- [ ] **44.3a** Update `sendMsgToAll` to use `sendMsgSafe` for all sends
+- [ ] **44.3b** `go test ./...` — no regressions
+- [ ] **44.3c** Verify with `go test -race ./curp-ho/` — no data race reports
+
+---
+
+#### Phase 44.4: Evaluate and Conditionally Remove Priority Fast-Path (~10 LOC)
+
+**Goal**: Remove the priority fast-path if it causes throughput regression. Skip if Phase 44.1 shows throughput is fine.
+
+**Background**: Phase 43.2b added a non-blocking receive on `causalProposeChan` before the main `select` in the run loop (curp-ho.go lines 260-270). This gives causal proposes priority over all other message types. At high thread counts, if causal proposes arrive continuously, the loop never reaches the main `select`, starving strong-path processing.
+
+Phase 43.2c (split handleMsgs) is likely the actual fix for the 16-thread W-P99 improvement (100.95ms → 1.08ms), not the priority fast-path. The split ensures causal replies are processed in their own goroutine without contention from strong-path ack processing.
+
+**Approach**: Remove the priority fast-path block entirely. The `causalProposeChan` is already in the main `select` (line 413), so causal proposes are still processed — just without artificial priority.
+
+```go
+// REMOVE: lines 260-270 in curp-ho.go
+// select {
+// case m := <-r.cs.causalProposeChan:
+//     causalPropose := m.(*MCausalPropose)
+//     r.handleCausalPropose(causalPropose)
+//     continue
+// default:
+// }
+```
+
+**Tasks**:
+- [ ] **44.4a** (Conditional: only if Phase 44.1 shows throughput regression) Remove the priority fast-path block from the run loop
+- [ ] **44.4b** `go test ./...` — no regressions
+- [ ] **44.4c** Run benchmark at 2, 8, 16 threads — verify W-P99 at 8 and 16 threads doesn't regress from Phase 43 results (should still be < 2ms)
+- [ ] **44.4d** Run full sweep — compare throughput with Phase 42 reference
+
+**Fallback**: If removing the priority fast-path regresses W-P99 at 16+ threads, replace with a batch-limited version that processes at most N causal proposes before falling through:
+```go
+for batch := 0; batch < 8; batch++ {
+    select {
+    case m := <-r.cs.causalProposeChan:
+        r.handleCausalPropose(m.(*MCausalPropose))
+    default:
+        goto mainSelect
+    }
+}
+mainSelect:
+```
+
+---
+
+#### Phase 44.5: Investigate and Fix W-P99 at 4 Threads (~80 LOC)
+
+**Goal**: Determine root cause of ~100ms W-P99 at 4 threads and fix it. Also applies to 32 threads if still bad after Phase 44.1/44.4.
+
+**Pre-requisite**: Phase 44.2 results confirming whether the issue is in weak writes, weak reads, or both.
+
+**Approach A**: If the issue is concentrated in weak WRITES (sendMsgToAll broadcast path):
+
+The `sendMsgToAll` sends synchronously to bound replica (fast), then to 2 remote replicas (each requiring `Flush()` which may block). While this doesn't affect measured latency directly (reply arrives via handleWeakMsgs), it delays the HybridLoop goroutine, affecting pipeline window utilization.
+
+To test: add timestamp tracking per weak write:
+- T1: `reqTime[i]` (set before SendWeakWrite)
+- T2: after `sendMsgToAll` returns (in `SendCausalWrite`)
+- T3: `handleCausalReply` entry (in handleWeakMsgs goroutine)
+- T4: `RegisterReply` called
+
+Measure: T2-T1 (sendMsgToAll duration), T3-T1 (end-to-end to reply arrival), T4-T3 (reply processing overhead).
+
+If T2-T1 is large (>10ms): remote `Flush()` is blocking. Fix by making remote sends async with proper ordering guarantees:
+```go
+func (c *Client) sendMsgToAll(code uint8, msg fastrpc.Serializable) {
+    c.sendMsgSafe(c.boundReplica, code, msg) // synchronous: bound first
+    // Remote sends: buffer in per-replica ordered queue (not goroutine-per-send)
+    // to preserve ordering while unblocking the caller
+    for i := 0; i < c.N; i++ {
+        if int32(i) != c.boundReplica {
+            c.remoteSendQueue[i] <- sendRequest{code, msg}
+        }
+    }
+}
+```
+This differs from Phase 43.2a (which was reverted): instead of raw goroutines per send, use per-replica send queues that process messages in order, preserving causal ordering.
+
+If T3-T1 is large but T2-T1 is small: the replica's run loop is delaying MCausalPropose processing. This points to run loop contention.
+
+**Approach B**: If run loop contention is the issue:
+
+Consider processing causal proposes on non-leader replicas in a dedicated goroutine. For non-leader replicas, `handleCausalPropose` only calls:
+1. `unsyncCausal()` — concurrent map (thread-safe)
+2. `addPendingWrite()` — concurrent map (thread-safe)
+3. `computeSpeculativeResult()` — reads state (need to verify thread safety)
+4. `SendClientMsgFast()` — per-client channel (thread-safe)
+
+If `computeSpeculativeResult` can be made thread-safe (or state reads are already safe), non-leader causal propose processing can run in a separate goroutine, eliminating run loop contention for the bound replica.
+
+For the LEADER, causal propose processing requires `lastCmdSlot`, `leaderSlots`, etc., which are not thread-safe. Processing must stay in the run loop.
+
+**Tasks**:
+- [ ] **44.5a** Add instrumentation timestamps to `SendCausalWrite` and `handleCausalReply` to measure per-weak-write time breakdown
+- [ ] **44.5b** Run 4-thread benchmark (3 times) and analyze instrumentation output
+- [ ] **44.5c** Based on results, implement the appropriate fix (Approach A or B)
+- [ ] **44.5d** Run 4-thread benchmark — verify W-P99 < 5ms
+- [ ] **44.5e** Run 32-thread benchmark — check if W-P99 also improved
+- [ ] **44.5f** `go test ./...` — no regressions
+- [ ] **44.5g** Remove instrumentation, keep only production code
+
+---
+
+#### Phase 44.6: Validation Sweep
+
+**Goal**: Confirm all fixes achieve target performance.
+
+**Success criteria**:
+1. **Throughput scaling**: Within 20% of Phase 42 reference at each thread count (2→96)
+2. **W-P99 at 2, 8, 16 threads**: < 2ms (matching Phase 43 improvements)
+3. **W-P99 at 4 threads**: < 5ms (improvement from ~100ms)
+4. **W-P99 at 32 threads**: < 5ms (improvement from ~100ms)
+5. **S-Median**: ~51ms at all thread counts ≤ 32 (no regression)
+
+**Tasks**:
+- [ ] **44.6a** Verify server loads < 2.0 on all machines
+- [ ] **44.6b** Run full CURP-HO sweep (2, 4, 8, 16, 32, 64, 96 threads)
+- [ ] **44.6c** Create evaluation file: evaluation/phase44-results.md
+- [ ] **44.6d** Compare with Phase 42 reference — document any remaining gaps
+- [ ] **44.6e** `go test ./...` — no regressions
+- [ ] **44.6f** Commit and push
 
 ---
 
