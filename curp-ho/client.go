@@ -1,8 +1,6 @@
 package curpho
 
 import (
-	"fmt"
-	"sort"
 	"sync"
 	"time"
 
@@ -91,17 +89,6 @@ type Client struct {
 	// Each queue is drained by a dedicated remoteSender goroutine that calls
 	// sendMsgSafe (preserving per-replica FIFO ordering).
 	remoteSendQueues []chan sendRequest
-
-	// Phase 44.5: Weak write instrumentation for diagnosing W-P99 latency.
-	// Tracks per-weak-write timestamps to identify which segment causes ~100ms tail:
-	//   T1 (before sendMsgToAll) → T2 (after sendMsgToAll) → T3 (handleCausalReply entry) → T4 (RegisterReply)
-	// Protected by mu (same as other weak tracking maps).
-	weakWriteT1 map[int32]time.Time // seqnum → time before sendMsgToAll
-	weakWriteT2 map[int32]time.Time // seqnum → time after sendMsgToAll returns
-	// Collected latency breakdowns (appended under mu, read at MarkAllSent).
-	weakWriteSendDurations  []float64 // T2-T1: sendMsgToAll duration (ms)
-	weakWriteReplyLatencies []float64 // T3-T1: end-to-end to reply arrival (ms)
-	weakWriteProcessOverhead []float64 // T4-T3: reply processing overhead (ms)
 }
 
 var (
@@ -152,10 +139,6 @@ func NewClient(b *client.BufferClient, repNum, reqNum, pclients int) *Client {
 
 		writerMu:         make([]sync.Mutex, repNum),
 		remoteSendQueues: make([]chan sendRequest, repNum),
-
-		// Phase 44.5: Weak write instrumentation
-		weakWriteT1: make(map[int32]time.Time),
-		weakWriteT2: make(map[int32]time.Time),
 	}
 
 	c.lastCmdId = CommandId{
@@ -663,18 +646,7 @@ func (c *Client) SendCausalWrite(key int64, value []byte) int32 {
 		BoundReplica: c.boundReplica,
 	}
 
-	// Phase 44.5: T1 — before sendMsgToAll
-	t1 := time.Now()
 	c.sendMsgToAll(c.cs.causalProposeRPC, p)
-	// Phase 44.5: T2 — after sendMsgToAll returns
-	t2 := time.Now()
-
-	c.mu.Lock()
-	c.weakWriteT1[seqnum] = t1
-	c.weakWriteT2[seqnum] = t2
-	sendMs := float64(t2.Sub(t1).Nanoseconds()) / float64(time.Millisecond)
-	c.weakWriteSendDurations = append(c.weakWriteSendDurations, sendMs)
-	c.mu.Unlock()
 
 	return seqnum
 }
@@ -707,9 +679,6 @@ func (c *Client) SendCausalRead(key int64) int32 {
 // Only the bound replica's reply completes the operation (1-RTT).
 // Replies from non-bound replicas are silently ignored.
 func (c *Client) handleCausalReply(rep *MCausalReply) {
-	// Phase 44.5: T3 — reply arrival at handleCausalReply entry
-	t3 := time.Now()
-
 	// Only accept replies from bound replica
 	if rep.Replica != c.boundReplica {
 		return
@@ -735,23 +704,7 @@ func (c *Client) handleCausalReply(rep *MCausalReply) {
 		delete(c.weakPendingKeys, rep.CmdId.SeqNum)
 	}
 
-	// Phase 44.5: Record latency breakdown for this weak write
-	if t1, hasT1 := c.weakWriteT1[rep.CmdId.SeqNum]; hasT1 {
-		replyMs := float64(t3.Sub(t1).Nanoseconds()) / float64(time.Millisecond)
-		c.weakWriteReplyLatencies = append(c.weakWriteReplyLatencies, replyMs)
-		delete(c.weakWriteT1, rep.CmdId.SeqNum)
-		delete(c.weakWriteT2, rep.CmdId.SeqNum)
-	}
-
 	c.mu.Unlock()
-
-	// Phase 44.5: T4 — just before RegisterReply
-	t4 := time.Now()
-	processMs := float64(t4.Sub(t3).Nanoseconds()) / float64(time.Millisecond)
-	c.mu.Lock()
-	c.weakWriteProcessOverhead = append(c.weakWriteProcessOverhead, processMs)
-	c.mu.Unlock()
-
 	c.RegisterReply(val, rep.CmdId.SeqNum)
 }
 
@@ -835,54 +788,8 @@ func (c *Client) BoundReplica() int32 {
 	return c.boundReplica
 }
 
-func (c *Client) MarkAllSent() {
-	c.mu.Lock()
-	sends := make([]float64, len(c.weakWriteSendDurations))
-	copy(sends, c.weakWriteSendDurations)
-	replies := make([]float64, len(c.weakWriteReplyLatencies))
-	copy(replies, c.weakWriteReplyLatencies)
-	overhead := make([]float64, len(c.weakWriteProcessOverhead))
-	copy(overhead, c.weakWriteProcessOverhead)
-	c.mu.Unlock()
-
-	if len(sends) == 0 {
-		return
-	}
-
-	fmt.Printf("\n=== Weak Write Instrumentation (Phase 44.5) ===\n")
-	fmt.Printf("Samples: send=%d, reply=%d, overhead=%d\n", len(sends), len(replies), len(overhead))
-	printLatencyBreakdown("T2-T1 sendMsgToAll", sends)
-	printLatencyBreakdown("T3-T1 reply arrival", replies)
-	printLatencyBreakdown("T4-T3 process overhead", overhead)
-	fmt.Printf("================================================\n\n")
-}
-
-// printLatencyBreakdown prints P50/P99/P99.9/Max for a latency slice.
-func printLatencyBreakdown(label string, latencies []float64) {
-	if len(latencies) == 0 {
-		fmt.Printf("  %s: no data\n", label)
-		return
-	}
-	sorted := make([]float64, len(latencies))
-	copy(sorted, latencies)
-	sort.Float64s(sorted)
-	n := len(sorted)
-	sum := 0.0
-	for _, v := range sorted {
-		sum += v
-	}
-	avg := sum / float64(n)
-	p50 := sorted[n/2]
-	p99 := sorted[int(float64(n)*0.99)]
-	p999Idx := int(float64(n) * 0.999)
-	if p999Idx >= n {
-		p999Idx = n - 1
-	}
-	p999 := sorted[p999Idx]
-	max := sorted[n-1]
-	fmt.Printf("  %s: Avg=%.2fms P50=%.2fms P99=%.2fms P99.9=%.2fms Max=%.2fms\n",
-		label, avg, p50, p99, p999, max)
-}
+// MarkAllSent is a no-op for CURP-HO (satisfies HybridClient interface).
+func (c *Client) MarkAllSent() {}
 
 // readDepEqual checks if two optional ReadDep pointers are equal.
 // Both nil = equal. One nil, one non-nil = not equal. Both non-nil = compare fields.

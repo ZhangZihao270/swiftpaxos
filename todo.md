@@ -2934,8 +2934,15 @@ For the LEADER, causal propose processing requires `lastCmdSlot`, `leaderSlots`,
   - `go test ./...` — all pass, `go vet ./...` — clean, `go build` — clean
 - [ ] **44.5d** Run 4-thread benchmark — verify W-P99 < 5ms — CONDITIONAL
 - [ ] **44.5e** Run 32-thread benchmark — check if W-P99 also improved — CONDITIONAL
-- [ ] **44.5f** `go test ./...` — no regressions — CONDITIONAL
-- [ ] **44.5g** Remove instrumentation, keep only production code
+- [x] **44.5f** `go test ./...` — no regressions [26:02:20]
+- [x] **44.5g** Remove instrumentation, keep only production code [26:02:20]
+  - Removed all Phase 44.5a instrumentation: weakWriteT1/T2 maps, latency breakdown slices,
+    T1-T4 timestamp recording in SendCausalWrite/handleCausalReply, MarkAllSent diagnostic output,
+    printLatencyBreakdown helper
+  - MarkAllSent reduced to no-op (satisfies HybridClient interface, like CURP-HT/Raft)
+  - Removed 7 instrumentation tests, added 1 MarkAllSent no-op test
+  - Removed unused imports: `"fmt"`, `"sort"`
+  - `go test ./...` — all pass, `go vet ./...` — clean, `go build` — clean
 
 ---
 
@@ -2954,7 +2961,7 @@ For the LEADER, causal propose processing requires `lastCmdSlot`, `leaderSlots`,
 - [ ] **44.6a** Evaluate Phase 44.1 results against success criteria
 - [ ] **44.6b** If Phase 44.5 fixes were applied, run one final confirmation sweep
 - [ ] **44.6c** Create/update evaluation file: `evaluation/phase44-results.md`
-- [ ] **44.6d** Remove instrumentation code (44.5g), keep only production changes
+- [x] **44.6d** Remove instrumentation code (44.5g), keep only production changes [26:02:20]
 - [ ] **44.6e** `go test ./...` — no regressions
 - [ ] **44.6f** Commit and push
 
