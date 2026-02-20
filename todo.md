@@ -2960,7 +2960,8 @@ For the LEADER, causal propose processing requires `lastCmdSlot`, `leaderSlots`,
 **Tasks**:
 - [ ] **44.6a** Evaluate Phase 44.1 results against success criteria
 - [ ] **44.6b** If Phase 44.5 fixes were applied, run one final confirmation sweep
-- [ ] **44.6c** Create/update evaluation file: `evaluation/phase44-results.md`
+- [x] **44.6c** Create/update evaluation file: `evaluation/phase44-results.md` [26:02:20]
+  - Documents all Phase 44 code changes (44.3, 44.4, 44.5c, 44.5f/g), design rationale, expected impact, and benchmark placeholder
 - [x] **44.6d** Remove instrumentation code (44.5g), keep only production changes [26:02:20]
 - [x] **44.6e** `go test ./...` — no regressions [26:02:20]
 - [ ] **44.6f** Commit and push
