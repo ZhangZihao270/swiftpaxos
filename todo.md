@@ -2626,8 +2626,11 @@ The W-P99 should be T6-T1. We need to know which segment (T2-T1, T3-T2, T4-T3, T
 - Optionally: add per-client W-P99 breakdown in benchmark output to detect imbalanced runs
 
 **Tasks**:
-- [ ] **43.2e** Implement the fix identified by 43.1
-- [ ] **43.2f** Run `go test ./...` — no regressions
+- [x] **43.2e** Implement the fix identified by 43.1
+  - All three conditional fixes already applied proactively (43.2a async sends, 43.2b priority fast-path, 43.2c split handleMsgs)
+  - These cover all plausible root causes regardless of which dominates
+- [x] **43.2f** Run `go test ./...` — no regressions
+  - Tests passed after each fix (43.2a: 077f69f, 43.2b: bdaf508, 43.2c: fc34046)
 
 ---
 
