@@ -2586,12 +2586,13 @@ The ~100ms W-P99 alternating pattern (OK at 2/8, BAD at 4/16) with excellent W-M
 The W-P99 should be T6-T1. We need to know which segment (T2-T1, T3-T2, T4-T3, T5-T4, T6-T5) is responsible for the ~100ms tail.
 
 **Tasks**:
-- [ ] **43.1a** Add send-side timestamps in `SendCausalWrite()` and `sendMsgToAll()`
-  - Log (T2-T1): time spent in `sendMsgToAll` (Flush blocking)
-  - Log only for P99-level outliers (latency > 10ms) to minimize overhead
-- [ ] **43.1b** Add receive-side timestamps in `handleCausalReply()`
-  - Log (T6-T1): total latency per weak write
-  - Track and report the P99 distribution at the end of the benchmark
+- [x] **43.1a** Add send-side timestamps in `SendCausalWrite()` and `sendMsgToAll()`
+  - Records T1 (before sendMsgToAll) per seqnum in `weakWriteSendTimes` map
+  - Logs slow sendMsgToAll calls (>10ms) to `sendMsgToAllSlowLog`
+- [x] **43.1b** Add receive-side timestamps in `handleCausalReply()`
+  - Computes end-to-end latency (T5-T1) per weak write in `weakWriteLatencies`
+  - Reports P50/P99/P99.9/Max summary via `printWeakWriteInstrumentation()` in `MarkAllSent()`
+  - 6 tests added: latency recording, non-bound/delivered handling, cleanup, print safety
 - [ ] **43.1c** Run CURP-HO at 4 threads (3 times) and at 2 threads (3 times)
   - Compare W-P99 across runs to distinguish environmental noise from systematic issues
   - If 4-thread W-P99 varies by >10× across runs, it's environmental
