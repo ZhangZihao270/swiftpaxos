@@ -159,7 +159,8 @@ func NewClient(b *client.BufferClient, repNum, reqNum, pclients int) *Client {
 		}
 	}
 
-	go c.handleMsgs()
+	go c.handleStrongMsgs()
+	go c.handleWeakMsgs()
 
 	// Start MSync retry timer: periodically retransmit MSync for pending
 	// strong commands whose replies may have been dropped by the non-blocking
@@ -187,7 +188,9 @@ func (c *Client) initMsgSets(cmdId CommandId) {
 	}
 }
 
-func (c *Client) handleMsgs() {
+// handleStrongMsgs processes strong-path replies and the retry timer.
+// Runs in its own goroutine to avoid contending with latency-critical weak replies.
+func (c *Client) handleStrongMsgs() {
 	for {
 		select {
 		case m := <-c.cs.replyChan:
@@ -201,18 +204,6 @@ func (c *Client) handleMsgs() {
 		case m := <-c.cs.syncReplyChan:
 			rep := m.(*MSyncReply)
 			c.handleSyncReply(rep)
-
-		case m := <-c.cs.weakReplyChan:
-			rep := m.(*MWeakReply)
-			c.handleWeakReply(rep)
-
-		case m := <-c.cs.causalReplyChan:
-			rep := m.(*MCausalReply)
-			c.handleCausalReply(rep)
-
-		case m := <-c.cs.weakReadReplyChan:
-			rep := m.(*MWeakReadReply)
-			c.handleWeakReadReply(rep)
 
 		case <-c.t.c:
 			// Retry pending commands whose replies may have been dropped
@@ -328,6 +319,27 @@ func (c *Client) handleMsgs() {
 					c.sendMsgSafe(r, c.cs.weakReadRPC, msg)
 				}
 			}
+		}
+	}
+}
+
+// handleWeakMsgs processes weak/causal-path replies.
+// Runs in its own goroutine separate from strong-path processing to minimize
+// latency for the 1-RTT causal reply path.
+func (c *Client) handleWeakMsgs() {
+	for {
+		select {
+		case m := <-c.cs.weakReplyChan:
+			rep := m.(*MWeakReply)
+			c.handleWeakReply(rep)
+
+		case m := <-c.cs.causalReplyChan:
+			rep := m.(*MCausalReply)
+			c.handleCausalReply(rep)
+
+		case m := <-c.cs.weakReadReplyChan:
+			rep := m.(*MWeakReadReply)
+			c.handleWeakReadReply(rep)
 		}
 	}
 }
@@ -518,22 +530,22 @@ func (c *Client) handleWeakReply(rep *MWeakReply) {
 	c.leader = rep.Replica
 
 	// Weak command completes immediately upon receiving leader's reply
-	c.val = state.Value(rep.Rep)
+	val := state.Value(rep.Rep)
 	c.delivered[rep.CmdId.SeqNum] = struct{}{}
 	delete(c.weakPending, rep.CmdId.SeqNum)
 
 	// Update local cache with committed write value + slot (version)
 	if key, hasKey := c.weakPendingKeys[rep.CmdId.SeqNum]; hasKey {
-		if val, hasVal := c.weakPendingValues[rep.CmdId.SeqNum]; hasVal {
+		if v, hasVal := c.weakPendingValues[rep.CmdId.SeqNum]; hasVal {
 			c.maxVersion++
-			c.localCache[key] = cacheEntry{value: val, version: c.maxVersion}
+			c.localCache[key] = cacheEntry{value: v, version: c.maxVersion}
 			delete(c.weakPendingValues, rep.CmdId.SeqNum)
 		}
 		delete(c.weakPendingKeys, rep.CmdId.SeqNum)
 	}
 
 	c.mu.Unlock()
-	c.RegisterReply(c.val, rep.CmdId.SeqNum)
+	c.RegisterReply(val, rep.CmdId.SeqNum)
 }
 
 // getNextSeqnum returns the next sequence number from the base client.
@@ -680,22 +692,22 @@ func (c *Client) handleCausalReply(rep *MCausalReply) {
 		delete(c.weakWriteSendTimes, rep.CmdId.SeqNum)
 	}
 
-	c.val = state.Value(rep.Rep)
+	val := state.Value(rep.Rep)
 	c.delivered[rep.CmdId.SeqNum] = struct{}{}
 	delete(c.weakPending, rep.CmdId.SeqNum)
 
 	// Update local cache for causal writes (speculative value from bound replica)
 	if key, hasKey := c.weakPendingKeys[rep.CmdId.SeqNum]; hasKey {
-		if val, hasVal := c.weakPendingValues[rep.CmdId.SeqNum]; hasVal {
+		if v, hasVal := c.weakPendingValues[rep.CmdId.SeqNum]; hasVal {
 			c.maxVersion++
-			c.localCache[key] = cacheEntry{value: val, version: c.maxVersion}
+			c.localCache[key] = cacheEntry{value: v, version: c.maxVersion}
 			delete(c.weakPendingValues, rep.CmdId.SeqNum)
 		}
 		delete(c.weakPendingKeys, rep.CmdId.SeqNum)
 	}
 
 	c.mu.Unlock()
-	c.RegisterReply(c.val, rep.CmdId.SeqNum)
+	c.RegisterReply(val, rep.CmdId.SeqNum)
 }
 
 // handleWeakReadReply merges the replica's response with the local cache
@@ -729,12 +741,11 @@ func (c *Client) handleWeakReadReply(rep *MWeakReadReply) {
 		c.maxVersion = finalVer
 	}
 
-	c.val = finalVal
 	c.delivered[rep.CmdId.SeqNum] = struct{}{}
 	delete(c.weakPending, rep.CmdId.SeqNum)
 	delete(c.weakPendingKeys, rep.CmdId.SeqNum)
 	c.mu.Unlock()
-	c.RegisterReply(c.val, rep.CmdId.SeqNum)
+	c.RegisterReply(finalVal, rep.CmdId.SeqNum)
 }
 
 // sendMsgToAll broadcasts a message to all replicas.

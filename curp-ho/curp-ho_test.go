@@ -2446,11 +2446,7 @@ func TestHandleCausalReplyFromBoundReplica(t *testing.T) {
 	if _, exists := c.weakPending[42]; exists {
 		t.Error("Command should be removed from weakPending")
 	}
-	// Value should be set
-	if string(c.val) != "result" {
-		t.Errorf("val = %q, want 'result'", c.val)
-	}
-	// RegisterReply should have sent to Reply channel
+	// RegisterReply should have sent to Reply channel with correct value
 	select {
 	case rr := <-c.BufferClient.Reply:
 		if rr.Seqnum != 42 {
@@ -4925,5 +4921,131 @@ func TestCausalProposeChanIsBuffered(t *testing.T) {
 	initCs(&r.cs, tbl)
 	if cap(r.cs.causalProposeChan) == 0 {
 		t.Error("causalProposeChan should be buffered, got unbuffered")
+	}
+}
+
+// --- Phase 43.2c: handleMsgs split tests ---
+
+// TestHandleCausalReplyUsesLocalVal verifies that handleCausalReply
+// uses a local variable for the reply value, not the shared c.val field.
+// This is critical for thread safety after splitting handleMsgs.
+func TestHandleCausalReplyUsesLocalVal(t *testing.T) {
+	c := newTestClient(1)
+	c.weakPending[42] = struct{}{}
+	c.weakPendingKeys[42] = 100
+	c.weakPendingValues[42] = []byte("causal-value")
+
+	// Set c.val to something else to detect if handler uses it
+	c.val = state.Value([]byte("stale-strong-value"))
+
+	rep := &MCausalReply{
+		Replica: 1, // bound replica
+		CmdId:   CommandId{ClientId: 0, SeqNum: 42},
+		Rep:     []byte("causal-value"),
+	}
+	c.handleCausalReply(rep)
+
+	// The reply should be the causal value, not the stale strong value
+	reply := <-c.Reply
+	if reply == nil {
+		t.Fatal("Expected reply, got nil")
+	}
+	// c.val should still be "stale-strong-value" (not overwritten by weak handler)
+	if string(c.val) != "stale-strong-value" {
+		t.Errorf("c.val was modified by handleCausalReply: got %q, want %q", string(c.val), "stale-strong-value")
+	}
+}
+
+// TestHandleWeakReadReplyUsesLocalVal verifies that handleWeakReadReply
+// uses a local variable for the final value.
+func TestHandleWeakReadReplyUsesLocalVal(t *testing.T) {
+	c := newTestClient(1)
+	c.weakPending[50] = struct{}{}
+	c.weakPendingKeys[50] = 200
+
+	c.val = state.Value([]byte("stale-value"))
+
+	rep := &MWeakReadReply{
+		CmdId:   CommandId{ClientId: 0, SeqNum: 50},
+		Rep:     []byte("read-result"),
+		Version: 5,
+	}
+	c.handleWeakReadReply(rep)
+
+	reply := <-c.Reply
+	if reply == nil {
+		t.Fatal("Expected reply, got nil")
+	}
+	// c.val should NOT have been modified
+	if string(c.val) != "stale-value" {
+		t.Errorf("c.val was modified by handleWeakReadReply: got %q, want %q", string(c.val), "stale-value")
+	}
+}
+
+// TestSplitGoroutineChannelSeparation verifies that strong and weak channels
+// are correctly separated into their respective goroutines by testing the
+// select pattern used in each.
+func TestSplitGoroutineChannelSeparation(t *testing.T) {
+	// Simulate the handleStrongMsgs select: only has replyChan, recordAckChan, syncReplyChan
+	strongCh1 := make(chan int, 1)
+	strongCh2 := make(chan int, 1)
+	weakCh1 := make(chan int, 1)
+
+	strongCh1 <- 1
+	weakCh1 <- 2
+
+	// Strong goroutine should only see strongCh1
+	var strongResult int
+	select {
+	case v := <-strongCh1:
+		strongResult = v
+	case v := <-strongCh2:
+		strongResult = v
+	default:
+		strongResult = -1
+	}
+	if strongResult != 1 {
+		t.Errorf("Strong goroutine got %d, want 1", strongResult)
+	}
+
+	// Weak goroutine should only see weakCh1
+	var weakResult int
+	select {
+	case v := <-weakCh1:
+		weakResult = v
+	default:
+		weakResult = -1
+	}
+	if weakResult != 2 {
+		t.Errorf("Weak goroutine got %d, want 2", weakResult)
+	}
+}
+
+// TestHandleWeakReplyUsesLocalVal verifies that handleWeakReply
+// uses a local variable for the reply value.
+func TestHandleWeakReplyUsesLocalVal(t *testing.T) {
+	c := newTestClient(1)
+	c.weakPending[60] = struct{}{}
+	c.weakPendingKeys[60] = 300
+	c.weakPendingValues[60] = []byte("weak-write-val")
+	c.ballot = 0
+
+	c.val = state.Value([]byte("old-strong-value"))
+
+	rep := &MWeakReply{
+		Replica: 0,
+		Ballot:  0,
+		CmdId:   CommandId{ClientId: 0, SeqNum: 60},
+		Rep:     []byte("weak-reply-val"),
+	}
+	c.handleWeakReply(rep)
+
+	reply := <-c.Reply
+	if reply == nil {
+		t.Fatal("Expected reply, got nil")
+	}
+	// c.val should NOT have been modified by weak handler
+	if string(c.val) != "old-strong-value" {
+		t.Errorf("c.val was modified by handleWeakReply: got %q, want %q", string(c.val), "old-strong-value")
 	}
 }

@@ -2616,8 +2616,9 @@ The W-P99 should be T6-T1. We need to know which segment (T2-T1, T3-T2, T4-T3, T
 - This ensures causal proposes from co-located clients are processed immediately
 
 **If dominant cause is handleMsgs contention (T5-T4 > 10ms)**:
-- [ ] **43.2c** Split `handleMsgs` into two goroutines: one for strong replies (replyChan, recordAckChan, syncReplyChan) and one for weak replies (causalReplyChan, weakReadReplyChan)
+- [x] **43.2c** Split `handleMsgs` into two goroutines: one for strong replies (replyChan, recordAckChan, syncReplyChan) and one for weak replies (causalReplyChan, weakReadReplyChan)
 - This prevents strong-path ack processing from delaying causal reply handling
+- Fixed c.val race: weak handlers now use local variables instead of shared c.val field
 
 **If dominant cause is environmental noise**:
 - [ ] **43.2d** Run each thread count 3-5 times, report median W-P99
