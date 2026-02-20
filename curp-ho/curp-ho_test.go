@@ -2015,15 +2015,16 @@ func TestStrongOpSeesWitnessFromBoundClient(t *testing.T) {
 
 func TestMCausalProposeSerialization(t *testing.T) {
 	original := &MCausalPropose{
-		CommandId: 42,
-		ClientId:  100,
+		CommandId:    42,
+		ClientId:     100,
 		Command: state.Command{
 			Op: state.PUT,
 			K:  state.Key(123),
 			V:  []byte("test-value"),
 		},
-		Timestamp: 1234567890,
-		CausalDep: 41,
+		Timestamp:    1234567890,
+		CausalDep:    41,
+		BoundReplica: 2,
 	}
 
 	var buf bytes.Buffer
@@ -2045,6 +2046,9 @@ func TestMCausalProposeSerialization(t *testing.T) {
 	}
 	if restored.CausalDep != original.CausalDep {
 		t.Errorf("CausalDep mismatch: got %d, want %d", restored.CausalDep, original.CausalDep)
+	}
+	if restored.BoundReplica != original.BoundReplica {
+		t.Errorf("BoundReplica mismatch: got %d, want %d", restored.BoundReplica, original.BoundReplica)
 	}
 	if restored.Command.Op != original.Command.Op {
 		t.Errorf("Command.Op mismatch: got %d, want %d", restored.Command.Op, original.Command.Op)
@@ -2300,19 +2304,20 @@ func TestMCausalProposeCacheMultiple(t *testing.T) {
 
 // --- Comparison: MCausalPropose vs MWeakPropose field compatibility ---
 
-func TestCausalProposeMatchesWeakProposeFields(t *testing.T) {
-	// MCausalPropose should have the same fields as MWeakPropose
-	// This ensures protocol compatibility during transition
+func TestCausalProposeExtendsWeakProposeFields(t *testing.T) {
+	// MCausalPropose extends MWeakPropose with an extra BoundReplica field.
+	// The wire format should be MWeakPropose bytes + 4 bytes for BoundReplica.
 	causal := &MCausalPropose{
-		CommandId: 42,
-		ClientId:  100,
+		CommandId:    42,
+		ClientId:     100,
 		Command: state.Command{
 			Op: state.PUT,
 			K:  state.Key(1),
 			V:  []byte("val"),
 		},
-		Timestamp: 12345,
-		CausalDep: 41,
+		Timestamp:    12345,
+		CausalDep:    41,
+		BoundReplica: 2,
 	}
 
 	weak := &MWeakPropose{
@@ -2323,13 +2328,20 @@ func TestCausalProposeMatchesWeakProposeFields(t *testing.T) {
 		CausalDep: causal.CausalDep,
 	}
 
-	// Serialize both and compare
 	var causalBuf, weakBuf bytes.Buffer
 	causal.Marshal(&causalBuf)
 	weak.Marshal(&weakBuf)
 
-	if !bytes.Equal(causalBuf.Bytes(), weakBuf.Bytes()) {
-		t.Error("MCausalPropose and MWeakPropose should have identical wire format")
+	// MCausalPropose should be MWeakPropose + 4 bytes (BoundReplica)
+	if causalBuf.Len() != weakBuf.Len()+4 {
+		t.Errorf("MCausalPropose size = %d, want MWeakPropose size (%d) + 4", causalBuf.Len(), weakBuf.Len())
+	}
+
+	// The prefix should match MWeakPropose wire format
+	causalBytes := causalBuf.Bytes()
+	weakBytes := weakBuf.Bytes()
+	if !bytes.Equal(causalBytes[:len(weakBytes)], weakBytes) {
+		t.Error("MCausalPropose wire prefix should match MWeakPropose wire format")
 	}
 }
 
@@ -2357,7 +2369,8 @@ func TestMCausalProposeZeroValues(t *testing.T) {
 	}
 
 	if restored.CommandId != 0 || restored.ClientId != 0 ||
-		restored.Timestamp != 0 || restored.CausalDep != 0 {
+		restored.Timestamp != 0 || restored.CausalDep != 0 ||
+		restored.BoundReplica != 0 {
 		t.Error("Zero values not preserved in round-trip")
 	}
 }
@@ -4684,5 +4697,38 @@ func TestRetryClassifiesWeakReadsVsCausalWrites(t *testing.T) {
 	// Weak read (20) should NOT be in sync
 	if syncSet[20] {
 		t.Error("Weak read seqnum 20 should NOT be in syncSeqnums")
+	}
+}
+
+// --- Phase 43.3: BoundReplica field tests ---
+
+func TestMCausalProposeBoundReplicaSerialization(t *testing.T) {
+	// Test that BoundReplica survives a Marshal/Unmarshal round-trip
+	// with various replica ID values
+	for _, boundID := range []int32{0, 1, 2, 4, 127} {
+		original := &MCausalPropose{
+			CommandId:    10,
+			ClientId:     200,
+			Command: state.Command{
+				Op: state.PUT,
+				K:  state.Key(5),
+				V:  []byte("v"),
+			},
+			Timestamp:    999,
+			CausalDep:    9,
+			BoundReplica: boundID,
+		}
+
+		var buf bytes.Buffer
+		original.Marshal(&buf)
+
+		restored := &MCausalPropose{}
+		if err := restored.Unmarshal(&buf); err != nil {
+			t.Fatalf("Unmarshal failed for BoundReplica=%d: %v", boundID, err)
+		}
+
+		if restored.BoundReplica != boundID {
+			t.Errorf("BoundReplica mismatch: got %d, want %d", restored.BoundReplica, boundID)
+		}
 	}
 }

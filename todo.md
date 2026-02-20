@@ -2647,10 +2647,10 @@ At high thread counts, this doubles the message load on `handleMsgs`.
 - Non-bound replicas still process the proposal (witness pool, pending writes) but skip the reply
 
 **Tasks**:
-- [ ] **43.3a** Add `BoundReplica int32` to MCausalPropose (update defs.go Marshal/Unmarshal)
-- [ ] **43.3b** Set `BoundReplica` in `SendCausalWrite()` client code
-- [ ] **43.3c** In `handleCausalPropose()`, skip reply if `r.Id != propose.BoundReplica`
-- [ ] **43.3d** Run `go test ./...` — no regressions
+- [x] **43.3a** Add `BoundReplica int32` to MCausalPropose (update defs.go Marshal/Unmarshal)
+- [x] **43.3b** Set `BoundReplica` in `SendCausalWrite()` client code
+- [x] **43.3c** In `handleCausalPropose()`, skip reply if `r.Id != propose.BoundReplica`
+- [x] **43.3d** Run `go test ./...` — no regressions
 - [ ] **43.3e** Benchmark: verify no throughput regression, reduced handleMsgs load
 
 ---

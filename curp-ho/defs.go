@@ -140,11 +140,12 @@ type MWeakReply struct {
 // Unlike MWeakPropose (leader-only), MCausalPropose goes to all replicas so
 // they can add to their witness pool for conflict detection.
 type MCausalPropose struct {
-	CommandId int32
-	ClientId  int32
-	Command   state.Command
-	Timestamp int64
-	CausalDep int32 // Sequence number of the previous causal command from this client (0 if none)
+	CommandId    int32
+	ClientId     int32
+	Command      state.Command
+	Timestamp    int64
+	CausalDep    int32 // Sequence number of the previous causal command from this client (0 if none)
+	BoundReplica int32 // Replica ID that this client is bound to; only the bound replica sends MCausalReply
 }
 
 func (m *MCausalPropose) GetClientId() int32 { return m.ClientId }
@@ -1400,7 +1401,7 @@ func (t *MCausalPropose) Marshal(wire io.Writer) {
 	bs[7] = byte(tmp32 >> 24)
 	wire.Write(bs)
 	t.Command.Marshal(wire)
-	bs = b[:12]
+	bs = b[:16]
 	tmp64 := t.Timestamp
 	bs[0] = byte(tmp64)
 	bs[1] = byte(tmp64 >> 8)
@@ -1415,6 +1416,11 @@ func (t *MCausalPropose) Marshal(wire io.Writer) {
 	bs[9] = byte(tmp32 >> 8)
 	bs[10] = byte(tmp32 >> 16)
 	bs[11] = byte(tmp32 >> 24)
+	tmp32 = t.BoundReplica
+	bs[12] = byte(tmp32)
+	bs[13] = byte(tmp32 >> 8)
+	bs[14] = byte(tmp32 >> 16)
+	bs[15] = byte(tmp32 >> 24)
 	wire.Write(bs)
 }
 
@@ -1428,12 +1434,13 @@ func (t *MCausalPropose) Unmarshal(wire io.Reader) error {
 	t.CommandId = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
 	t.ClientId = int32((uint32(bs[4]) | (uint32(bs[5]) << 8) | (uint32(bs[6]) << 16) | (uint32(bs[7]) << 24)))
 	t.Command.Unmarshal(wire)
-	bs = b[:12]
-	if _, err := io.ReadAtLeast(wire, bs, 12); err != nil {
+	bs = b[:16]
+	if _, err := io.ReadAtLeast(wire, bs, 16); err != nil {
 		return err
 	}
 	t.Timestamp = int64((uint64(bs[0]) | (uint64(bs[1]) << 8) | (uint64(bs[2]) << 16) | (uint64(bs[3]) << 24) | (uint64(bs[4]) << 32) | (uint64(bs[5]) << 40) | (uint64(bs[6]) << 48) | (uint64(bs[7]) << 56)))
 	t.CausalDep = int32((uint32(bs[8]) | (uint32(bs[9]) << 8) | (uint32(bs[10]) << 16) | (uint32(bs[11]) << 24)))
+	t.BoundReplica = int32((uint32(bs[12]) | (uint32(bs[13]) << 8) | (uint32(bs[14]) << 16) | (uint32(bs[15]) << 24)))
 	return nil
 }
 

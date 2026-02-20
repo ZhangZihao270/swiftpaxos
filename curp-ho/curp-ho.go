@@ -1385,16 +1385,17 @@ func (r *Replica) handleCausalPropose(propose *MCausalPropose) {
 		r.addPendingWrite(propose.ClientId, propose.Command.K, propose.CommandId, propose.Command.V)
 	}
 
-	// 3. ALL replicas: compute speculative result and reply
-	// Send MCausalReply directly (bypass Sender queue) to avoid head-of-line
-	// blocking behind remote TCP flushes, which is critical for bound replica latency.
-	val := r.computeSpeculativeResult(propose.ClientId, propose.CausalDep, propose.Command)
-	rep := &MCausalReply{
-		Replica: r.Id,
-		CmdId:   cmdId,
-		Rep:     val,
+	// 3. Only bound replica: compute speculative result and reply (1-RTT).
+	// Non-bound replicas skip the reply entirely to reduce wasted work.
+	if r.Id == propose.BoundReplica {
+		val := r.computeSpeculativeResult(propose.ClientId, propose.CausalDep, propose.Command)
+		rep := &MCausalReply{
+			Replica: r.Id,
+			CmdId:   cmdId,
+			Rep:     val,
+		}
+		r.SendClientMsgFast(propose.ClientId, r.cs.causalReplyRPC, rep)
 	}
-	r.SendClientMsgFast(propose.ClientId, r.cs.causalReplyRPC, rep)
 
 	// 4. If leader: assign slot and coordinate replication
 	if r.isLeader {

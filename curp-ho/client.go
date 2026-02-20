@@ -594,15 +594,16 @@ func (c *Client) SendCausalWrite(key int64, value []byte) int32 {
 	c.mu.Unlock()
 
 	p := &MCausalPropose{
-		CommandId: seqnum,
-		ClientId:  c.ClientId,
+		CommandId:    seqnum,
+		ClientId:     c.ClientId,
 		Command: state.Command{
 			Op: state.PUT,
 			K:  state.Key(key),
 			V:  value,
 		},
-		Timestamp: 0,
-		CausalDep: causalDep,
+		Timestamp:    0,
+		CausalDep:    causalDep,
+		BoundReplica: c.boundReplica,
 	}
 
 	// Phase 43.1 instrumentation: record T1 and measure sendMsgToAll duration
