@@ -727,11 +727,13 @@ func (c *Client) sendMsgSafe(rid int32, code uint8, msg fastrpc.Serializable) {
 // All sends are synchronous to guarantee that remote replicas receive causal
 // writes BEFORE any subsequent strong commands from the same client — otherwise
 // CausalDeps checks on witnesses would fail, forcing all strong ops to slow path.
+// Uses sendMsgSafe (per-replica writerMu) to prevent data races with concurrent
+// sends from the handleStrongMsgs goroutine (timer retries).
 func (c *Client) sendMsgToAll(code uint8, msg fastrpc.Serializable) {
-	c.SendMsg(c.boundReplica, code, msg)
+	c.sendMsgSafe(c.boundReplica, code, msg)
 	for i := 0; i < c.N; i++ {
 		if int32(i) != c.boundReplica {
-			c.SendMsg(int32(i), code, msg)
+			c.sendMsgSafe(int32(i), code, msg)
 		}
 	}
 }

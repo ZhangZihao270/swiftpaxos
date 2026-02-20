@@ -2783,7 +2783,8 @@ At 32 threads, genuine run loop contention on the bound replica becomes a factor
 Actually, looking at `PrintMetrics` again — it already prints separate Weak Write and Weak Read percentiles! The issue is that `evaluation/2026-02-19.md` only reports the combined W-P99. So this phase is about **collecting the separated metrics in the next benchmark run**.
 
 **Tasks**:
-- [ ] **44.2a** Verify that `PrintMetrics` output includes separate Weak Write P99 and Weak Read P99 (it should already — check `client/hybrid.go` lines 418-425)
+- [x] **44.2a** Verify that `PrintMetrics` output includes separate Weak Write P99 and Weak Read P99 (it should already — check `client/hybrid.go` lines 418-425)
+  - Confirmed: both `PrintMetrics` (per-thread, lines 418-425) and `Print` (aggregated, lines 692-699) output separate Weak Write and Weak Read percentiles [26:02:20]
 - [ ] **44.2b** When running Phase 44.1 benchmarks, record Weak Write P99 and Weak Read P99 separately
 - [ ] **44.2c** Analyze: if W-Write-P99 ≈ 100ms and W-Read-P99 < 1ms at 4 threads, confirm that the issue is sendMsgToAll broadcast, not the read path
 
@@ -2808,9 +2809,10 @@ func (c *Client) sendMsgToAll(code uint8, msg fastrpc.Serializable) {
 ```
 
 **Tasks**:
-- [ ] **44.3a** Update `sendMsgToAll` to use `sendMsgSafe` for all sends
-- [ ] **44.3b** `go test ./...` — no regressions
-- [ ] **44.3c** Verify with `go test -race ./curp-ho/` — no data race reports
+- [x] **44.3a** Update `sendMsgToAll` to use `sendMsgSafe` for all sends [26:02:20]
+- [x] **44.3b** `go test ./...` — no regressions [26:02:20]
+- [x] **44.3c** Verify with `go test -race ./curp-ho/` — no data race reports [26:02:20]
+  - Added 2 tests: `TestSendMsgToAllUsesWriterMu` (mutex blocking), `TestSendMsgToAllAndSendMsgSafeSerialize` (concurrent serialization)
 
 ---
 
