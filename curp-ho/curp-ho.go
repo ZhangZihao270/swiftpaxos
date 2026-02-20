@@ -257,6 +257,18 @@ func (r *Replica) run() {
 
 	var cmdId CommandId
 	for !r.Shutdown {
+		// Priority fast-path: process causal proposes before the main select.
+		// When multiple channels have messages, Go's select picks randomly,
+		// which can delay latency-critical causal proposes behind strong-path
+		// processing. This non-blocking receive gives causal proposes priority.
+		select {
+		case m := <-r.cs.causalProposeChan:
+			causalPropose := m.(*MCausalPropose)
+			r.handleCausalPropose(causalPropose)
+			continue
+		default:
+		}
+
 		select {
 		case int := <-r.deliverChan:
 			r.getCmdDesc(int, "deliver", -1)

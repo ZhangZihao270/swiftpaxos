@@ -2612,7 +2612,7 @@ The W-P99 should be T6-T1. We need to know which segment (T2-T1, T3-T2, T4-T3, T
 - Added `sendMsgSafe()` with per-replica `writerMu` mutexes; also protects timer retry sends from races
 
 **If dominant cause is run loop contention (T3-T2 > 10ms, i.e., time waiting in causalProposeChan)**:
-- [ ] **43.2b** Add a priority fast-path in the run loop: check `causalProposeChan` with a non-blocking receive at the top of each loop iteration, before the main `select`
+- [x] **43.2b** Add a priority fast-path in the run loop: check `causalProposeChan` with a non-blocking receive at the top of each loop iteration, before the main `select`
 - This ensures causal proposes from co-located clients are processed immediately
 
 **If dominant cause is handleMsgs contention (T5-T4 > 10ms)**:
