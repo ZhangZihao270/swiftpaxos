@@ -2838,8 +2838,10 @@ Phase 43.2c (split handleMsgs) is likely the actual fix for the 16-thread W-P99 
 ```
 
 **Tasks**:
-- [ ] **44.4a** (Conditional: only if Phase 44.1 shows throughput regression) Remove the priority fast-path block from the run loop
-- [ ] **44.4b** `go test ./...` — no regressions
+- [x] **44.4a** Remove the priority fast-path block from the run loop [26:02:20]
+  - Removed the non-blocking `select` on `causalProposeChan` + `continue` before the main `select` (curp-ho.go lines 260-270). The `causalProposeChan` is still handled in the main `select` (line 401) — causal proposes are processed normally, just without artificial priority that could starve other channels.
+  - Removed 3 obsolete priority fast-path tests; kept `TestCausalProposeChanIsBuffered` (channel still needs buffering for throughput).
+- [x] **44.4b** `go test ./...` — no regressions; `go test -race ./curp-ho/` clean [26:02:20]
 - [ ] **44.4c** Run benchmark at 2, 8, 16 threads — verify W-P99 at 8 and 16 threads doesn't regress from Phase 43 results (should still be < 2ms)
 - [ ] **44.4d** Run full sweep — compare throughput with Phase 42 reference
 
