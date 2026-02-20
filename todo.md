@@ -2504,6 +2504,181 @@ Helper functions for `raft/raft_integration_test.go`:
 
 ---
 
+### Phase 43: CURP-HO Performance Stability and Weak P99 Latency [HIGH PRIORITY]
+
+**Goal**: Fix two CURP-HO issues observed in evaluation:
+1. **Non-monotonic throughput scaling** — dips at 4 and 16 threads (4,109 and 8,771 ops/sec vs expected ~7K and ~20K)
+2. **Weak P99 latency spikes** — jumps from 0.86ms (2 threads) to 100ms (4 threads) at low load
+
+**Evaluation data** (2026-02-19):
+| Threads | Throughput | W-P99 (ms) | Status |
+|---------|-----------|------------|--------|
+| 2       | 3,551     | 0.86       | OK     |
+| 4       | 4,109     | 100.96     | BAD (dip + spike) |
+| 8       | 14,050    | 2.62       | OK     |
+| 16      | 8,771     | 100.95     | BAD (dip + spike) |
+| 32      | 30,339    | 100.38     | OK throughput, high W-P99 |
+| 64      | 34,797    | 102.51     | OK     |
+| 96      | 71,595    | 119.61     | Peak   |
+| 128     | 52,364    | 208.13     | Saturation |
+
+**CURP-HO Weak Write Flow (complete trace)**:
+
+CURP-HO weak ops have **NO slow path**. The reply is always immediate (1-RTT) from the bound replica:
+
+1. Client `SendCausalWrite()` → `sendMsgToAll()` → sends MCausalPropose to bound replica first (co-located, instant), then remote replicas
+2. Bound replica `clientListener` receives message → goroutine with `time.Sleep(WaitDuration(addr))` → co-located = 0 delay → pushes to `causalProposeChan` (2M buffer)
+3. Bound replica run loop `select` picks up → `handleCausalPropose()`:
+   - Non-leader: `unsyncCausal()` (witness pool)
+   - All replicas: `addPendingWrite()`, `computeSpeculativeResult()` (for PUT: returns NIL instantly)
+   - All replicas: `SendClientMsgFast()` → pushes MCausalReply to per-client channel (8192 buffer)
+   - **Reply is sent BEFORE any replication work** (leader does slot assignment + `go asyncReplicateCausal()` AFTER reply)
+4. Per-client goroutine calls `SendClientMsg()` → `WaitDuration(clientAddr)` = 0 (co-located) → writes to TCP
+5. Client `handleMsgs` goroutine picks up MCausalReply → `handleCausalReply()`:
+   - Checks `rep.Replica == boundReplica` (discards non-bound replies)
+   - Bound reply: marks delivered, calls `RegisterReply(time.Now())`
+
+**Key facts**:
+- `SendClientMsgFast` buffer is **8192** (not 16) — drops are very unlikely
+- `WaitDuration` returns **0** for co-located connections (both directions)
+- `asyncReplicateCausal` (3-phase wait: commit/slot-order/causal-dep) runs in a **separate goroutine** — does NOT block client reply
+- `weakDepMu` contention is on async replication goroutines — affects **throughput** indirectly, not W-P99 directly
+- Non-bound replicas' MCausalReplies arrive ~50ms later and are silently discarded at `handleCausalReply` line 626-628
+
+**Revised root cause analysis**:
+
+The ~100ms W-P99 alternating pattern (OK at 2/8, BAD at 4/16) with excellent W-Median (0.19-0.25ms) indicates:
+- **MOST** weak ops (~99%) complete in <1ms as expected
+- A **small tail** (~1%) takes ~100ms, pushing P99 up
+- The alternating pattern (4=bad, 8=good) strongly suggests **environmental noise** on shared test machines (per Phase 42 results: "per-client imbalance — one client 3-7x slower than others")
+
+**However**, to confirm this and identify any real code-level bottlenecks, we need instrumentation:
+
+1. **Candidate: Run loop contention** — The bound replica's run loop is single-threaded, processing ALL message types via `select`. Under load, MCausalPropose competes with strong commands (ProposeChan, acceptChan, acceptAckChan, commitChan, etc.). On the leader (replica0, bound to client2), the run loop does more work per strong command.
+
+2. **Candidate: handleMsgs single-goroutine bottleneck** — Client's `handleMsgs` processes ALL reply types in one goroutine. With 3×N MCausalReplies per N weak writes (only 1 useful, 2 discarded) plus strong replies (MReply + 2×MRecordAck per strong op), the goroutine may be backed up under load.
+
+3. **Candidate: sendMsgToAll blocking** — `sendMsgToAll` calls `w.Flush()` sequentially for each replica. If flushing to a remote replica blocks (TCP backpressure), it delays the function return. This doesn't affect current command latency (reply arrives independently) but can delay the pipeline window for next commands.
+
+4. **Candidate: Environmental noise** — Shared test machines cause sporadic slowdowns. The bimodal pattern (4=bad, 8=good, 16=bad) is characteristic of environmental interference, not a systematic code issue.
+
+**Comparison with CURP-HT** (which scales monotonically):
+- CURP-HT sends weak commands to **leader only** (not broadcast to all 3)
+- CURP-HT has no causal dependency tracking
+- CURP-HT has no wasted non-bound replies (no 2 extra MCausalReplies per weak write)
+- CURP-HT's W-P99 ~104ms is **expected** (weak writes commit via 2-RTT Accept-Commit path)
+- Result: fewer messages per weak op, less run loop + handleMsgs contention
+
+---
+
+#### Phase 43.1: Instrumentation and Root Cause Validation (~100 LOC)
+
+**Goal**: Add latency breakdown instrumentation to determine WHERE the ~100ms W-P99 comes from.
+
+**Approach**: Add timestamps at key points in the weak write path to measure:
+- **T1**: Client calls `sendMsgToAll()` (before any network I/O)
+- **T2**: `sendMsgToAll()` returns (after all 3 Flush() calls)
+- **T3**: Bound replica receives MCausalPropose (when run loop picks it up)
+- **T4**: Bound replica sends MCausalReply (after `SendClientMsgFast`)
+- **T5**: Client `handleCausalReply()` called (when handleMsgs picks it up)
+- **T6**: `RegisterReply()` called (end-to-end)
+
+The W-P99 should be T6-T1. We need to know which segment (T2-T1, T3-T2, T4-T3, T5-T4, T6-T5) is responsible for the ~100ms tail.
+
+**Tasks**:
+- [ ] **43.1a** Add send-side timestamps in `SendCausalWrite()` and `sendMsgToAll()`
+  - Log (T2-T1): time spent in `sendMsgToAll` (Flush blocking)
+  - Log only for P99-level outliers (latency > 10ms) to minimize overhead
+- [ ] **43.1b** Add receive-side timestamps in `handleCausalReply()`
+  - Log (T6-T1): total latency per weak write
+  - Track and report the P99 distribution at the end of the benchmark
+- [ ] **43.1c** Run CURP-HO at 4 threads (3 times) and at 2 threads (3 times)
+  - Compare W-P99 across runs to distinguish environmental noise from systematic issues
+  - If 4-thread W-P99 varies by >10× across runs, it's environmental
+- [ ] **43.1d** Analyze results to determine dominant latency segment
+
+---
+
+#### Phase 43.2: Fix Based on Instrumentation Findings
+
+**Goal**: Apply targeted fix based on Phase 43.1 findings.
+
+**Conditional plans** (execute the one matching the dominant root cause):
+
+**If dominant cause is `sendMsgToAll` blocking (T2-T1 > 10ms)**:
+- [ ] **43.2a** Make `sendMsgToAll` non-blocking: send to bound replica synchronously, spawn goroutine for remote replicas
+- This prevents remote TCP backpressure from delaying the pipeline window
+
+**If dominant cause is run loop contention (T3-T2 > 10ms, i.e., time waiting in causalProposeChan)**:
+- [ ] **43.2b** Add a priority fast-path in the run loop: check `causalProposeChan` with a non-blocking receive at the top of each loop iteration, before the main `select`
+- This ensures causal proposes from co-located clients are processed immediately
+
+**If dominant cause is handleMsgs contention (T5-T4 > 10ms)**:
+- [ ] **43.2c** Split `handleMsgs` into two goroutines: one for strong replies (replyChan, recordAckChan, syncReplyChan) and one for weak replies (causalReplyChan, weakReadReplyChan)
+- This prevents strong-path ack processing from delaying causal reply handling
+
+**If dominant cause is environmental noise**:
+- [ ] **43.2d** Run each thread count 3-5 times, report median W-P99
+- Document that CURP-HO W-P99 variance is inherent to shared test environments
+- Optionally: add per-client W-P99 breakdown in benchmark output to detect imbalanced runs
+
+**Tasks**:
+- [ ] **43.2e** Implement the fix identified by 43.1
+- [ ] **43.2f** Run `go test ./...` — no regressions
+
+---
+
+#### Phase 43.3: Reduce Wasted Work from Non-Bound Replies (~30 LOC)
+
+**Goal**: Eliminate unnecessary MCausalReply processing on the client.
+
+**Problem**: Each weak write broadcasts MCausalPropose to ALL 3 replicas. All 3 replicas reply with MCausalReply. Client only uses the bound replica's reply and discards the other 2. These 2 wasted replies still flow through:
+- TCP deserialization on client
+- `causalReplyChan` channel
+- `handleMsgs` goroutine select
+- `handleCausalReply` function (discarded at first check)
+
+At high thread counts, this doubles the message load on `handleMsgs`.
+
+**Approach**: Have non-bound replicas skip the reply for MCausalPropose:
+- Include `BoundReplica int32` field in MCausalPropose
+- In `handleCausalPropose()`, only call `SendClientMsgFast()` if `r.Id == propose.BoundReplica`
+- Non-bound replicas still process the proposal (witness pool, pending writes) but skip the reply
+
+**Tasks**:
+- [ ] **43.3a** Add `BoundReplica int32` to MCausalPropose (update defs.go Marshal/Unmarshal)
+- [ ] **43.3b** Set `BoundReplica` in `SendCausalWrite()` client code
+- [ ] **43.3c** In `handleCausalPropose()`, skip reply if `r.Id != propose.BoundReplica`
+- [ ] **43.3d** Run `go test ./...` — no regressions
+- [ ] **43.3e** Benchmark: verify no throughput regression, reduced handleMsgs load
+
+---
+
+#### Phase 43.4: Validation Sweep
+
+**Goal**: Run full throughput sweep (3 runs each) and verify stability.
+
+**Success criteria**:
+1. **Monotonic scaling** (median of 3 runs): Throughput increases with thread count
+2. **Weak P99 stability**: Median W-P99 < 5ms at 2-8 threads, < 150ms at 32-128 threads
+3. **Per-client balance**: No client more than 2x slower than others in the same run
+
+**Tasks**:
+- [ ] **43.4a** Run `./run-multi-client.sh` 3 times each at 2,4,8,16,32 threads
+- [ ] **43.4b** Report median throughput and W-P99 across runs
+- [ ] **43.4c** Create new evaluation file with Phase 43 results
+
+---
+
+#### Phase 43.5: Commit and Push
+
+**Tasks**:
+- [ ] **43.5a** Remove instrumentation logging (keep only production-worthy changes)
+- [ ] **43.5b** `go test ./...` passes
+- [ ] **43.5c** Commit and push
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
