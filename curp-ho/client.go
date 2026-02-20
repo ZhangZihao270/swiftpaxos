@@ -82,6 +82,12 @@ type Client struct {
 	weakWriteSendTimes  map[int32]time.Time     // seqNum → T1 (time before sendMsgToAll)
 	weakWriteLatencies  []time.Duration         // end-to-end latencies for all weak writes
 	sendMsgToAllSlowLog []sendMsgToAllDuration  // only entries where duration > 10ms
+
+	// Per-replica writer mutexes for async remote sends (Phase 43.2a).
+	// sendMsgToAll sends to bound replica synchronously and to remote replicas
+	// asynchronously. These mutexes protect concurrent access to the per-replica
+	// bufio.Writer when the next pipelined command fires before remote flushes complete.
+	writerMu []sync.Mutex
 }
 
 var (
@@ -131,6 +137,7 @@ func NewClient(b *client.BufferClient, repNum, reqNum, pclients int) *Client {
 		strongPendingKeys: make(map[int32]int64),
 
 		weakWriteSendTimes: make(map[int32]time.Time),
+		writerMu:           make([]sync.Mutex, repNum),
 	}
 
 	c.lastCmdId = CommandId{
@@ -300,7 +307,7 @@ func (c *Client) handleMsgs() {
 					CmdId: CommandId{ClientId: clientId, SeqNum: seqnum},
 				}
 				for r := int32(0); r < int32(n); r++ {
-					c.SendMsg(r, c.cs.syncRPC, sync)
+					c.sendMsgSafe(r, c.cs.syncRPC, sync)
 				}
 			}
 			// Re-send MWeakRead for weak reads to ALL replicas (stateless — any can answer).
@@ -318,7 +325,7 @@ func (c *Client) handleMsgs() {
 					Key:       state.Key(key),
 				}
 				for r := int32(0); r < int32(n); r++ {
-					c.SendMsg(r, c.cs.weakReadRPC, msg)
+					c.sendMsgSafe(r, c.cs.weakReadRPC, msg)
 				}
 			}
 		}
@@ -646,7 +653,7 @@ func (c *Client) SendCausalRead(key int64) int32 {
 	}
 
 	if closest != -1 {
-		c.SendMsg(int32(closest), c.cs.weakReadRPC, msg)
+		c.sendMsgSafe(int32(closest), c.cs.weakReadRPC, msg)
 	}
 	return seqnum
 }
@@ -734,11 +741,23 @@ func (c *Client) handleWeakReadReply(rep *MWeakReadReply) {
 // Used by CURP-HO for causal op broadcast (all replicas act as witnesses).
 // Sends to bound replica first so it receives the message without waiting
 // for remote TCP flushes to other replicas.
+// sendMsgSafe sends a message to a single replica under the per-replica writer mutex.
+// This prevents concurrent writes to the same bufio.Writer from different goroutines
+// (e.g., async remote sends racing with timer retries).
+func (c *Client) sendMsgSafe(rid int32, code uint8, msg fastrpc.Serializable) {
+	c.writerMu[rid].Lock()
+	c.SendMsg(rid, code, msg)
+	c.writerMu[rid].Unlock()
+}
+
 func (c *Client) sendMsgToAll(code uint8, msg fastrpc.Serializable) {
-	c.SendMsg(c.boundReplica, code, msg)
+	// Send to bound replica synchronously — this is the latency-critical path.
+	c.sendMsgSafe(c.boundReplica, code, msg)
+
+	// Send to remote replicas asynchronously to avoid blocking on slow TCP flushes.
 	for i := 0; i < c.N; i++ {
 		if int32(i) != c.boundReplica {
-			c.SendMsg(int32(i), code, msg)
+			go c.sendMsgSafe(int32(i), code, msg)
 		}
 	}
 }

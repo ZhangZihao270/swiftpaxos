@@ -2410,6 +2410,7 @@ func newTestClient(boundReplica int32) *Client {
 	}
 	return &Client{
 		BufferClient:       bc,
+		N:                  3,
 		boundReplica:       boundReplica,
 		delivered:          make(map[int32]struct{}),
 		weakPending:        make(map[int32]struct{}),
@@ -2418,6 +2419,7 @@ func newTestClient(boundReplica int32) *Client {
 		weakPendingValues:  make(map[int32]state.Value),
 		strongPendingKeys:  make(map[int32]int64),
 		weakWriteSendTimes: make(map[int32]time.Time),
+		writerMu:           make([]sync.Mutex, 3),
 	}
 }
 
@@ -4730,5 +4732,72 @@ func TestMCausalProposeBoundReplicaSerialization(t *testing.T) {
 		if restored.BoundReplica != boundID {
 			t.Errorf("BoundReplica mismatch: got %d, want %d", restored.BoundReplica, boundID)
 		}
+	}
+}
+
+// --- Phase 43.2a: Async sendMsgToAll tests ---
+
+func TestWriterMuInitialization(t *testing.T) {
+	c := newTestClient(1)
+	if len(c.writerMu) != 3 {
+		t.Errorf("writerMu length = %d, want 3", len(c.writerMu))
+	}
+}
+
+func TestWriterMuLockUnlock(t *testing.T) {
+	// Verify that writerMu can be locked and unlocked without deadlock
+	c := newTestClient(0)
+	for i := 0; i < c.N; i++ {
+		c.writerMu[i].Lock()
+		c.writerMu[i].Unlock()
+	}
+}
+
+func TestWriterMuConcurrentAccess(t *testing.T) {
+	// Verify that per-replica mutexes allow concurrent access to different replicas
+	c := newTestClient(0)
+	var wg sync.WaitGroup
+	for i := 0; i < c.N; i++ {
+		wg.Add(1)
+		go func(rid int) {
+			c.writerMu[rid].Lock()
+			time.Sleep(1 * time.Millisecond) // hold lock briefly
+			c.writerMu[rid].Unlock()
+			wg.Done()
+		}(i)
+	}
+	// If mutexes were shared (single mutex), this would serialize.
+	// With per-replica mutexes, all three goroutines run concurrently.
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		// success
+	case <-time.After(1 * time.Second):
+		t.Fatal("Timed out: per-replica mutexes should allow concurrent access to different replicas")
+	}
+}
+
+func TestWriterMuSerializesAccess(t *testing.T) {
+	// Verify that the same replica's mutex serializes access
+	c := newTestClient(0)
+	counter := 0
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			c.writerMu[0].Lock()
+			val := counter
+			counter = val + 1
+			c.writerMu[0].Unlock()
+			wg.Done()
+		}()
+	}
+	wg.Wait()
+	if counter != 100 {
+		t.Errorf("counter = %d, want 100 (mutex should serialize increments)", counter)
 	}
 }

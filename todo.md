@@ -2607,8 +2607,9 @@ The W-P99 should be T6-T1. We need to know which segment (T2-T1, T3-T2, T4-T3, T
 **Conditional plans** (execute the one matching the dominant root cause):
 
 **If dominant cause is `sendMsgToAll` blocking (T2-T1 > 10ms)**:
-- [ ] **43.2a** Make `sendMsgToAll` non-blocking: send to bound replica synchronously, spawn goroutine for remote replicas
+- [x] **43.2a** Make `sendMsgToAll` non-blocking: send to bound replica synchronously, spawn goroutine for remote replicas
 - This prevents remote TCP backpressure from delaying the pipeline window
+- Added `sendMsgSafe()` with per-replica `writerMu` mutexes; also protects timer retry sends from races
 
 **If dominant cause is run loop contention (T3-T2 > 10ms, i.e., time waiting in causalProposeChan)**:
 - [ ] **43.2b** Add a priority fast-path in the run loop: check `causalProposeChan` with a non-blocking receive at the top of each loop iteration, before the main `select`
