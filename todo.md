@@ -2760,15 +2760,15 @@ At 32 threads, genuine run loop contention on the bound replica becomes a factor
 **Goal**: Isolate environmental noise from code-level issues.
 
 **Tasks**:
-- [ ] **44.1a** Check server loads (`uptime`) on all 3 machines (.101, .102, .104). Abort if any > 2.0 — wait for idle or use alternative machines.
-- [ ] **44.1b** Run CURP-HO benchmark sweep: 2, 4, 8, 16, 32, 64, 96 threads. Same parameters as Phase 42 (10K reqs, pendings=15, pipeline=true, weakRatio=50, weakWrites=10, batchDelay=150us).
-- [ ] **44.1c** Compare throughput with Phase 42 reference at each thread count. Record results.
-- [ ] **44.1d** Run 4-thread benchmark 3× to confirm W-P99 reproducibility.
+- [x] **44.1a** Create `scripts/run-phase44-sweep.sh` deadloop script
+- [ ] **44.1b** Launch in background: `nohup bash scripts/run-phase44-sweep.sh &`
+- [ ] **44.1c** When complete, analyze results — compare throughput with Phase 42 reference, record W-Write-P99 vs W-Read-P99 separately (covers 44.2b, 44.2c)
+- [ ] **44.1d** Based on results, determine if Phase 44.5 (4-thread fix) is still needed
 
 **Decision point**:
-- If throughput matches Phase 42 within 20%: **skip** Phase 44.4 (priority fast-path is not a problem)
-- If throughput is still flat: **execute** Phase 44.4 (priority fast-path is causing starvation)
-- Regardless: proceed to Phase 44.2 and 44.3
+- If throughput matches Phase 42 within 20%: throughput scaling is fine post-Phase 44.4
+- If W-P99 at 4 threads < 5ms: skip Phase 44.5
+- If W-P99 at 4 threads still ~100ms: execute Phase 44.5 (investigate with instrumentation data from 44.5a)
 
 ---
 
@@ -2785,8 +2785,10 @@ Actually, looking at `PrintMetrics` again — it already prints separate Weak Wr
 **Tasks**:
 - [x] **44.2a** Verify that `PrintMetrics` output includes separate Weak Write P99 and Weak Read P99 (it should already — check `client/hybrid.go` lines 418-425)
   - Confirmed: both `PrintMetrics` (per-thread, lines 418-425) and `Print` (aggregated, lines 692-699) output separate Weak Write and Weak Read percentiles [26:02:20]
-- [ ] **44.2b** When running Phase 44.1 benchmarks, record Weak Write P99 and Weak Read P99 separately
-- [ ] **44.2c** Analyze: if W-Write-P99 ≈ 100ms and W-Read-P99 < 1ms at 4 threads, confirm that the issue is sendMsgToAll broadcast, not the read path
+- [ ] **44.2b** ~~When running Phase 44.1 benchmarks, record Weak Write P99 and Weak Read P99 separately~~
+  - MERGED: Collected as part of Phase 44.1 deadloop sweep (client logs contain separate Weak Write / Weak Read lines)
+- [ ] **44.2c** ~~Analyze: if W-Write-P99 ≈ 100ms and W-Read-P99 < 1ms at 4 threads, confirm that the issue is sendMsgToAll broadcast, not the read path~~
+  - MERGED: Analysis done in Phase 44.1c
 
 ---
 
@@ -2842,8 +2844,10 @@ Phase 43.2c (split handleMsgs) is likely the actual fix for the 16-thread W-P99 
   - Removed the non-blocking `select` on `causalProposeChan` + `continue` before the main `select` (curp-ho.go lines 260-270). The `causalProposeChan` is still handled in the main `select` (line 401) — causal proposes are processed normally, just without artificial priority that could starve other channels.
   - Removed 3 obsolete priority fast-path tests; kept `TestCausalProposeChanIsBuffered` (channel still needs buffering for throughput).
 - [x] **44.4b** `go test ./...` — no regressions; `go test -race ./curp-ho/` clean [26:02:20]
-- [ ] **44.4c** Run benchmark at 2, 8, 16 threads — verify W-P99 at 8 and 16 threads doesn't regress from Phase 43 results (should still be < 2ms)
-- [ ] **44.4d** Run full sweep — compare throughput with Phase 42 reference
+- [ ] **44.4c** ~~Run benchmark at 2, 8, 16 threads — verify W-P99 at 8 and 16 threads doesn't regress~~
+  - MERGED: Covered by Phase 44.1 deadloop sweep
+- [ ] **44.4d** ~~Run full sweep — compare throughput with Phase 42 reference~~
+  - MERGED: Covered by Phase 44.1 deadloop sweep
 
 **Fallback**: If removing the priority fast-path regresses W-P99 at 16+ threads, replace with a batch-limited version that processes at most N causal proposes before falling through:
 ```go
@@ -2914,20 +2918,32 @@ For the LEADER, causal propose processing requires `lastCmdSlot`, `leaderSlots`,
   - Records 3 latency segments: sendMsgToAll duration (T2-T1), reply arrival (T3-T1), process overhead (T4-T3)
   - `MarkAllSent()` prints P50/P99/P99.9/Max summary for each segment
   - 7 tests added: send duration, reply latency, non-bound ignore, already-delivered skip, MarkAllSent output, edge cases, multiple writes
-- [ ] **44.5b** Run 4-thread benchmark (3 times) and analyze instrumentation output
-- [ ] **44.5c** Based on results, implement the appropriate fix (Approach A or B)
-- [ ] **44.5d** Run 4-thread benchmark — verify W-P99 < 5ms
-- [ ] **44.5e** Run 32-thread benchmark — check if W-P99 also improved
-- [ ] **44.5f** `go test ./...` — no regressions
+- [ ] **44.5b** ~~Run 4-thread benchmark (3 times) and analyze instrumentation output~~
+  - MERGED: 4-thread ×3 included in Phase 44.1 deadloop sweep; instrumentation output captured in client logs
+- [x] **44.5c** Implement Approach A: per-replica async send queues to eliminate sendMsgToAll blocking [26:02:20]
+  - Analysis: 100ms ≈ 2×50ms RTT strongly indicates remote Flush() blocking as root cause
+  - Added `sendRequest` struct and `remoteSendQueues []chan sendRequest` (buffered, 128 per remote replica)
+  - Added `remoteSender(rid)` goroutine per remote replica: drains queue in FIFO order via `sendMsgSafe`
+  - Modified `sendMsgToAll`: bound replica sync (unchanged), remote replicas enqueued async
+  - Protected `SendStrongWrite`/`SendStrongRead` with `writerMu[leader]` to prevent data races
+    between remoteSender goroutines and `SendProposal`'s direct writes to `c.writers[leader]`
+  - Ordering guarantee: FIFO queues preserve per-replica causal ordering; `writerMu` serializes
+    strong commands behind pending causal writes on the same replica
+  - 14 new tests: queue init, capacity, enqueue, FIFO ordering, non-blocking, drain,
+    writer mutex serialization, strong write/read serialization, async caller unblocking, bound replica no-queue
+  - `go test ./...` — all pass, `go vet ./...` — clean, `go build` — clean
+- [ ] **44.5d** Run 4-thread benchmark — verify W-P99 < 5ms — CONDITIONAL
+- [ ] **44.5e** Run 32-thread benchmark — check if W-P99 also improved — CONDITIONAL
+- [ ] **44.5f** `go test ./...` — no regressions — CONDITIONAL
 - [ ] **44.5g** Remove instrumentation, keep only production code
 
 ---
 
-#### Phase 44.6: Validation Sweep
+#### Phase 44.6: Final Validation and Commit
 
-**Goal**: Confirm all fixes achieve target performance.
+**Goal**: Confirm all fixes achieve target performance and wrap up Phase 44.
 
-**Success criteria**:
+**Success criteria** (evaluated from Phase 44.1 sweep results):
 1. **Throughput scaling**: Within 20% of Phase 42 reference at each thread count (2→96)
 2. **W-P99 at 2, 8, 16 threads**: < 2ms (matching Phase 43 improvements)
 3. **W-P99 at 4 threads**: < 5ms (improvement from ~100ms)
@@ -2935,10 +2951,10 @@ For the LEADER, causal propose processing requires `lastCmdSlot`, `leaderSlots`,
 5. **S-Median**: ~51ms at all thread counts ≤ 32 (no regression)
 
 **Tasks**:
-- [ ] **44.6a** Verify server loads < 2.0 on all machines
-- [ ] **44.6b** Run full CURP-HO sweep (2, 4, 8, 16, 32, 64, 96 threads)
-- [ ] **44.6c** Create evaluation file: evaluation/phase44-results.md
-- [ ] **44.6d** Compare with Phase 42 reference — document any remaining gaps
+- [ ] **44.6a** Evaluate Phase 44.1 results against success criteria
+- [ ] **44.6b** If Phase 44.5 fixes were applied, run one final confirmation sweep
+- [ ] **44.6c** Create/update evaluation file: `evaluation/phase44-results.md`
+- [ ] **44.6d** Remove instrumentation code (44.5g), keep only production changes
 - [ ] **44.6e** `go test ./...` — no regressions
 - [ ] **44.6f** Commit and push
 

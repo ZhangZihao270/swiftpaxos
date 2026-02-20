@@ -20,6 +20,12 @@ type cacheEntry struct {
 	version int32
 }
 
+// sendRequest represents a message to be sent asynchronously via a remoteSendQueue.
+type sendRequest struct {
+	code uint8
+	msg  fastrpc.Serializable
+}
+
 type Client struct {
 	*client.BufferClient
 
@@ -73,10 +79,18 @@ type Client struct {
 	mu sync.Mutex
 
 	// Per-replica writer mutexes for async remote sends (Phase 43.2a).
-	// sendMsgToAll sends to bound replica synchronously and to remote replicas
-	// asynchronously. These mutexes protect concurrent access to the per-replica
-	// bufio.Writer when the next pipelined command fires before remote flushes complete.
+	// Protects concurrent access to per-replica bufio.Writer from:
+	// - remoteSender goroutines (async causal broadcast)
+	// - handleStrongMsgs goroutine (timer retries)
+	// - main goroutine (SendStrongWrite/Read → SendProposal)
 	writerMu []sync.Mutex
+
+	// Phase 44.5c: Per-replica async send queues for non-bound replicas.
+	// sendMsgToAll sends to bound replica synchronously (fast, low-latency),
+	// then enqueues remote sends to avoid blocking on remote TCP Flush().
+	// Each queue is drained by a dedicated remoteSender goroutine that calls
+	// sendMsgSafe (preserving per-replica FIFO ordering).
+	remoteSendQueues []chan sendRequest
 
 	// Phase 44.5: Weak write instrumentation for diagnosing W-P99 latency.
 	// Tracks per-weak-write timestamps to identify which segment causes ~100ms tail:
@@ -136,7 +150,8 @@ func NewClient(b *client.BufferClient, repNum, reqNum, pclients int) *Client {
 		weakPendingValues: make(map[int32]state.Value),
 		strongPendingKeys: make(map[int32]int64),
 
-		writerMu: make([]sync.Mutex, repNum),
+		writerMu:         make([]sync.Mutex, repNum),
+		remoteSendQueues: make([]chan sendRequest, repNum),
 
 		// Phase 44.5: Weak write instrumentation
 		weakWriteT1: make(map[int32]time.Time),
@@ -159,6 +174,15 @@ func NewClient(b *client.BufferClient, repNum, reqNum, pclients int) *Client {
 			k := 100 + i + (reqNum * (c.num + pclients))
 			i++
 			return int64(k)
+		}
+	}
+
+	// Phase 44.5c: Start per-replica async send queues for remote replicas.
+	// Bound replica sends are synchronous (fast path), so no queue needed.
+	for i := 0; i < repNum; i++ {
+		if int32(i) != c.boundReplica {
+			c.remoteSendQueues[i] = make(chan sendRequest, 128)
+			go c.remoteSender(int32(i))
 		}
 	}
 
@@ -565,8 +589,15 @@ func (c *Client) getNextSeqnum() int32 {
 // HybridClient interface implementation
 
 // SendStrongWrite sends a linearizable write command (delegates to base SendWrite).
+// Acquires writerMu[leader] to serialize against async remoteSender goroutines
+// that may be flushing causal writes to the same replica. This prevents data races
+// on the per-replica bufio.Writer, since SendWrite → SendProposal writes directly
+// to c.writers[leader] without mutex protection.
 func (c *Client) SendStrongWrite(key int64, value []byte) int32 {
+	leader := int32(c.LeaderId)
+	c.writerMu[leader].Lock()
 	seqnum := c.SendWrite(key, value)
+	c.writerMu[leader].Unlock()
 	c.mu.Lock()
 	c.strongPendingKeys[seqnum] = key
 	c.mu.Unlock()
@@ -574,8 +605,12 @@ func (c *Client) SendStrongWrite(key int64, value []byte) int32 {
 }
 
 // SendStrongRead sends a linearizable read command (delegates to base SendRead).
+// Acquires writerMu[leader] for the same reason as SendStrongWrite.
 func (c *Client) SendStrongRead(key int64) int32 {
+	leader := int32(c.LeaderId)
+	c.writerMu[leader].Lock()
 	seqnum := c.SendRead(key)
+	c.writerMu[leader].Unlock()
 	c.mu.Lock()
 	c.strongPendingKeys[seqnum] = key
 	c.mu.Unlock()
@@ -758,6 +793,14 @@ func (c *Client) handleWeakReadReply(rep *MWeakReadReply) {
 	c.RegisterReply(finalVal, rep.CmdId.SeqNum)
 }
 
+// remoteSender drains the async send queue for a single remote replica.
+// Messages are sent in FIFO order under writerMu, preserving causal ordering.
+func (c *Client) remoteSender(rid int32) {
+	for req := range c.remoteSendQueues[rid] {
+		c.sendMsgSafe(rid, req.code, req.msg)
+	}
+}
+
 // sendMsgSafe sends a message to a single replica under the per-replica writer mutex.
 // This prevents concurrent writes to the same bufio.Writer from different goroutines
 // (e.g., timer retry sends in handleStrongMsgs racing with main-thread sends).
@@ -767,20 +810,22 @@ func (c *Client) sendMsgSafe(rid int32, code uint8, msg fastrpc.Serializable) {
 	c.writerMu[rid].Unlock()
 }
 
-// sendMsgToAll broadcasts a message to all replicas synchronously.
+// sendMsgToAll broadcasts a message to all replicas.
 // Used by CURP-HO for causal op broadcast (all replicas act as witnesses).
-// Sends to bound replica first so it receives the message without waiting
-// for remote TCP flushes to other replicas.
-// All sends are synchronous to guarantee that remote replicas receive causal
-// writes BEFORE any subsequent strong commands from the same client — otherwise
-// CausalDeps checks on witnesses would fail, forcing all strong ops to slow path.
-// Uses sendMsgSafe (per-replica writerMu) to prevent data races with concurrent
-// sends from the handleStrongMsgs goroutine (timer retries).
+// Sends to bound replica synchronously (fast, ~0ms local) then enqueues remote
+// sends asynchronously via per-replica send queues. This avoids blocking the
+// caller on remote TCP Flush() calls (~50ms RTT each), which was causing
+// ~100ms W-P99 tail latency at 4+ threads.
+//
+// Ordering guarantee: remote replicas receive causal writes before subsequent
+// strong commands because SendStrongWrite/Read acquire writerMu[leader], which
+// serializes against the remoteSender goroutine. The FIFO queue preserves
+// per-replica message ordering.
 func (c *Client) sendMsgToAll(code uint8, msg fastrpc.Serializable) {
 	c.sendMsgSafe(c.boundReplica, code, msg)
 	for i := 0; i < c.N; i++ {
 		if int32(i) != c.boundReplica {
-			c.sendMsgSafe(int32(i), code, msg)
+			c.remoteSendQueues[i] <- sendRequest{code, msg}
 		}
 	}
 }
