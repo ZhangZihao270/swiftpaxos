@@ -2676,9 +2676,9 @@ At high thread counts, this doubles the message load on `handleMsgs`.
 #### Phase 43.5: Commit and Push
 
 **Tasks**:
-- [ ] **43.5a** Remove instrumentation logging (keep only production-worthy changes)
-- [ ] **43.5b** `go test ./...` passes
-- [ ] **43.5c** Commit and push
+- [x] **43.5a** Remove instrumentation logging (keep only production-worthy changes)
+- [x] **43.5b** `go test ./...` passes
+- [x] **43.5c** Commit and push
 
 ---
 

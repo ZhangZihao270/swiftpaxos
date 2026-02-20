@@ -1,8 +1,6 @@
 package curpho
 
 import (
-	"log"
-	"sort"
 	"sync"
 	"time"
 
@@ -18,12 +16,6 @@ import (
 type cacheEntry struct {
 	value   state.Value
 	version int32
-}
-
-// sendMsgToAllDuration records a slow sendMsgToAll call for diagnostics.
-type sendMsgToAllDuration struct {
-	seqNum   int32
-	duration time.Duration
 }
 
 type Client struct {
@@ -78,11 +70,6 @@ type Client struct {
 	// Mutex for concurrent map access (needed for pipelining)
 	mu sync.Mutex
 
-	// Phase 43.1 instrumentation: weak write latency breakdown
-	weakWriteSendTimes  map[int32]time.Time     // seqNum → T1 (time before sendMsgToAll)
-	weakWriteLatencies  []time.Duration         // end-to-end latencies for all weak writes
-	sendMsgToAllSlowLog []sendMsgToAllDuration  // only entries where duration > 10ms
-
 	// Per-replica writer mutexes for async remote sends (Phase 43.2a).
 	// sendMsgToAll sends to bound replica synchronously and to remote replicas
 	// asynchronously. These mutexes protect concurrent access to the per-replica
@@ -136,8 +123,7 @@ func NewClient(b *client.BufferClient, repNum, reqNum, pclients int) *Client {
 		weakPendingValues: make(map[int32]state.Value),
 		strongPendingKeys: make(map[int32]int64),
 
-		weakWriteSendTimes: make(map[int32]time.Time),
-		writerMu:           make([]sync.Mutex, repNum),
+		writerMu: make([]sync.Mutex, repNum),
 	}
 
 	c.lastCmdId = CommandId{
@@ -625,23 +611,7 @@ func (c *Client) SendCausalWrite(key int64, value []byte) int32 {
 		BoundReplica: c.boundReplica,
 	}
 
-	// Phase 43.1 instrumentation: record T1 and measure sendMsgToAll duration
-	t1 := time.Now()
-	c.mu.Lock()
-	c.weakWriteSendTimes[seqnum] = t1
-	c.mu.Unlock()
-
 	c.sendMsgToAll(c.cs.causalProposeRPC, p)
-
-	sendDur := time.Since(t1)
-	if sendDur > 10*time.Millisecond {
-		c.mu.Lock()
-		c.sendMsgToAllSlowLog = append(c.sendMsgToAllSlowLog, sendMsgToAllDuration{
-			seqNum:   seqnum,
-			duration: sendDur,
-		})
-		c.mu.Unlock()
-	}
 
 	return seqnum
 }
@@ -683,13 +653,6 @@ func (c *Client) handleCausalReply(rep *MCausalReply) {
 	if _, exists := c.delivered[rep.CmdId.SeqNum]; exists {
 		c.mu.Unlock()
 		return
-	}
-
-	// Phase 43.1 instrumentation: record end-to-end weak write latency
-	if t1, ok := c.weakWriteSendTimes[rep.CmdId.SeqNum]; ok {
-		latency := time.Since(t1)
-		c.weakWriteLatencies = append(c.weakWriteLatencies, latency)
-		delete(c.weakWriteSendTimes, rep.CmdId.SeqNum)
 	}
 
 	val := state.Value(rep.Rep)
@@ -779,47 +742,6 @@ func (c *Client) BoundReplica() int32 {
 }
 
 func (c *Client) MarkAllSent() {
-	c.printWeakWriteInstrumentation()
-}
-
-// printWeakWriteInstrumentation reports the Phase 43.1 latency breakdown summary.
-func (c *Client) printWeakWriteInstrumentation() {
-	c.mu.Lock()
-	latencies := make([]time.Duration, len(c.weakWriteLatencies))
-	copy(latencies, c.weakWriteLatencies)
-	slowSends := make([]sendMsgToAllDuration, len(c.sendMsgToAllSlowLog))
-	copy(slowSends, c.sendMsgToAllSlowLog)
-	c.mu.Unlock()
-
-	n := len(latencies)
-	if n == 0 {
-		return
-	}
-
-	// Sort for percentile computation
-	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
-
-	p50 := latencies[n/2]
-	p99 := latencies[int(float64(n)*0.99)]
-	p999Idx := int(float64(n) * 0.999)
-	if p999Idx >= n {
-		p999Idx = n - 1
-	}
-	p999 := latencies[p999Idx]
-	maxLat := latencies[n-1]
-
-	log.Printf("\n=== Phase 43.1 Weak Write Instrumentation ===")
-	log.Printf("Weak writes: %d", n)
-	log.Printf("Latency P50: %v | P99: %v | P99.9: %v | Max: %v", p50, p99, p999, maxLat)
-	log.Printf("Slow sendMsgToAll (>10ms): %d", len(slowSends))
-	for i, s := range slowSends {
-		if i >= 10 {
-			log.Printf("  ... (%d more)", len(slowSends)-10)
-			break
-		}
-		log.Printf("  seqnum=%d duration=%v", s.seqNum, s.duration)
-	}
-	log.Printf("=======================================")
 }
 
 // readDepEqual checks if two optional ReadDep pointers are equal.
