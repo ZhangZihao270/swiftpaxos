@@ -2908,7 +2908,12 @@ If `computeSpeculativeResult` can be made thread-safe (or state reads are alread
 For the LEADER, causal propose processing requires `lastCmdSlot`, `leaderSlots`, etc., which are not thread-safe. Processing must stay in the run loop.
 
 **Tasks**:
-- [ ] **44.5a** Add instrumentation timestamps to `SendCausalWrite` and `handleCausalReply` to measure per-weak-write time breakdown
+- [x] **44.5a** Add instrumentation timestamps to `SendCausalWrite` and `handleCausalReply` to measure per-weak-write time breakdown [26:02:20]
+  - Added T1/T2 timestamps in `SendCausalWrite` (before/after `sendMsgToAll`)
+  - Added T3/T4 timestamps in `handleCausalReply` (entry / before RegisterReply)
+  - Records 3 latency segments: sendMsgToAll duration (T2-T1), reply arrival (T3-T1), process overhead (T4-T3)
+  - `MarkAllSent()` prints P50/P99/P99.9/Max summary for each segment
+  - 7 tests added: send duration, reply latency, non-bound ignore, already-delivered skip, MarkAllSent output, edge cases, multiple writes
 - [ ] **44.5b** Run 4-thread benchmark (3 times) and analyze instrumentation output
 - [ ] **44.5c** Based on results, implement the appropriate fix (Approach A or B)
 - [ ] **44.5d** Run 4-thread benchmark — verify W-P99 < 5ms

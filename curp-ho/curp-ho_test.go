@@ -2420,6 +2420,8 @@ func newTestClient(boundReplica int32) *Client {
 		weakPendingValues:  make(map[int32]state.Value),
 		strongPendingKeys:  make(map[int32]int64),
 		writerMu:           make([]sync.Mutex, 3),
+		weakWriteT1:        make(map[int32]time.Time),
+		weakWriteT2:        make(map[int32]time.Time),
 	}
 }
 
@@ -4851,5 +4853,230 @@ func TestHandleWeakReplyUsesLocalVal(t *testing.T) {
 	// c.val should NOT have been modified by weak handler
 	if string(c.val) != "old-strong-value" {
 		t.Errorf("c.val was modified by handleWeakReply: got %q, want %q", string(c.val), "old-strong-value")
+	}
+}
+
+// --- Phase 44.5: Weak write instrumentation tests ---
+
+// TestInstrumentationRecordsSendDuration verifies that handleCausalReply
+// records send duration (T2-T1) when T1/T2 timestamps are present.
+func TestInstrumentationRecordsSendDuration(t *testing.T) {
+	c := newTestClient(1)
+	seqnum := int32(10)
+
+	// Simulate SendCausalWrite having recorded T1 and T2
+	t1 := time.Now()
+	t2 := t1.Add(5 * time.Millisecond)
+	c.mu.Lock()
+	c.weakWriteT1[seqnum] = t1
+	c.weakWriteT2[seqnum] = t2
+	c.weakPending[seqnum] = struct{}{}
+	sendMs := float64(t2.Sub(t1).Nanoseconds()) / float64(time.Millisecond)
+	c.weakWriteSendDurations = append(c.weakWriteSendDurations, sendMs)
+	c.mu.Unlock()
+
+	// Verify send duration was recorded
+	c.mu.Lock()
+	if len(c.weakWriteSendDurations) != 1 {
+		t.Fatalf("expected 1 send duration, got %d", len(c.weakWriteSendDurations))
+	}
+	if c.weakWriteSendDurations[0] < 4.0 || c.weakWriteSendDurations[0] > 6.0 {
+		t.Errorf("send duration = %.2fms, want ~5ms", c.weakWriteSendDurations[0])
+	}
+	c.mu.Unlock()
+}
+
+// TestInstrumentationRecordsReplyLatency verifies that handleCausalReply
+// records reply latency (T3-T1) when processing a causal reply.
+func TestInstrumentationRecordsReplyLatency(t *testing.T) {
+	c := newTestClient(1)
+	seqnum := int32(20)
+
+	// Simulate SendCausalWrite timestamps
+	t1 := time.Now().Add(-10 * time.Millisecond) // 10ms ago
+	t2 := t1.Add(2 * time.Millisecond)
+	c.mu.Lock()
+	c.weakWriteT1[seqnum] = t1
+	c.weakWriteT2[seqnum] = t2
+	c.weakPending[seqnum] = struct{}{}
+	c.mu.Unlock()
+
+	// handleCausalReply should record T3-T1
+	rep := &MCausalReply{
+		Replica: 1, // bound replica
+		CmdId:   CommandId{ClientId: 0, SeqNum: seqnum},
+		Rep:     []byte("value"),
+	}
+	c.handleCausalReply(rep)
+
+	// Drain the reply
+	<-c.Reply
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Should have recorded reply latency
+	if len(c.weakWriteReplyLatencies) != 1 {
+		t.Fatalf("expected 1 reply latency, got %d", len(c.weakWriteReplyLatencies))
+	}
+	// T3-T1 should be >= 10ms (since t1 was 10ms ago)
+	if c.weakWriteReplyLatencies[0] < 9.0 {
+		t.Errorf("reply latency = %.2fms, want >= 9ms", c.weakWriteReplyLatencies[0])
+	}
+
+	// Should have recorded process overhead
+	if len(c.weakWriteProcessOverhead) != 1 {
+		t.Fatalf("expected 1 process overhead, got %d", len(c.weakWriteProcessOverhead))
+	}
+	// T4-T3 should be very small (< 5ms in test)
+	if c.weakWriteProcessOverhead[0] > 5.0 {
+		t.Errorf("process overhead = %.2fms, want < 5ms", c.weakWriteProcessOverhead[0])
+	}
+
+	// T1/T2 maps should be cleaned up
+	if _, exists := c.weakWriteT1[seqnum]; exists {
+		t.Error("weakWriteT1 should be cleaned up after handleCausalReply")
+	}
+	if _, exists := c.weakWriteT2[seqnum]; exists {
+		t.Error("weakWriteT2 should be cleaned up after handleCausalReply")
+	}
+}
+
+// TestInstrumentationIgnoresNonBoundReplica verifies that replies from
+// non-bound replicas don't record instrumentation data.
+func TestInstrumentationIgnoresNonBoundReplica(t *testing.T) {
+	c := newTestClient(1) // bound to replica 1
+	seqnum := int32(30)
+
+	c.mu.Lock()
+	c.weakWriteT1[seqnum] = time.Now()
+	c.weakWriteT2[seqnum] = time.Now()
+	c.weakPending[seqnum] = struct{}{}
+	c.mu.Unlock()
+
+	// Reply from non-bound replica 0
+	rep := &MCausalReply{
+		Replica: 0, // NOT bound replica
+		CmdId:   CommandId{ClientId: 0, SeqNum: seqnum},
+		Rep:     []byte("value"),
+	}
+	c.handleCausalReply(rep)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Should NOT have recorded any latency
+	if len(c.weakWriteReplyLatencies) != 0 {
+		t.Errorf("expected 0 reply latencies for non-bound reply, got %d", len(c.weakWriteReplyLatencies))
+	}
+	// T1/T2 should NOT be cleaned up (reply was ignored)
+	if _, exists := c.weakWriteT1[seqnum]; !exists {
+		t.Error("weakWriteT1 should not be cleaned up for non-bound reply")
+	}
+}
+
+// TestInstrumentationSkipsAlreadyDelivered verifies that duplicate causal
+// replies don't record instrumentation data.
+func TestInstrumentationSkipsAlreadyDelivered(t *testing.T) {
+	c := newTestClient(1)
+	seqnum := int32(40)
+
+	// Mark as already delivered
+	c.delivered[seqnum] = struct{}{}
+	c.mu.Lock()
+	c.weakWriteT1[seqnum] = time.Now()
+	c.weakWriteT2[seqnum] = time.Now()
+	c.mu.Unlock()
+
+	rep := &MCausalReply{
+		Replica: 1, // bound replica
+		CmdId:   CommandId{ClientId: 0, SeqNum: seqnum},
+		Rep:     []byte("value"),
+	}
+	c.handleCausalReply(rep)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Should NOT have recorded any new latency
+	if len(c.weakWriteReplyLatencies) != 0 {
+		t.Errorf("expected 0 reply latencies for already-delivered, got %d", len(c.weakWriteReplyLatencies))
+	}
+}
+
+// TestMarkAllSentPrintsInstrumentation verifies that MarkAllSent doesn't
+// panic and handles empty/non-empty instrumentation data correctly.
+func TestMarkAllSentPrintsInstrumentation(t *testing.T) {
+	// Test with empty data (should return early, no panic)
+	c := newTestClient(0)
+	c.MarkAllSent() // should not panic
+
+	// Test with some data
+	c.mu.Lock()
+	c.weakWriteSendDurations = []float64{1.0, 2.0, 3.0, 100.0}
+	c.weakWriteReplyLatencies = []float64{5.0, 6.0, 7.0, 200.0}
+	c.weakWriteProcessOverhead = []float64{0.01, 0.02, 0.03, 0.1}
+	c.mu.Unlock()
+	c.MarkAllSent() // should not panic, should print stats
+}
+
+// TestPrintLatencyBreakdownEdgeCases tests the printLatencyBreakdown helper
+// with edge cases (empty, single element).
+func TestPrintLatencyBreakdownEdgeCases(t *testing.T) {
+	// Empty slice - should not panic
+	printLatencyBreakdown("empty", nil)
+	printLatencyBreakdown("empty", []float64{})
+
+	// Single element
+	printLatencyBreakdown("single", []float64{42.0})
+
+	// Two elements
+	printLatencyBreakdown("two", []float64{1.0, 100.0})
+}
+
+// TestInstrumentationMultipleWrites verifies that multiple weak writes
+// accumulate instrumentation data correctly.
+func TestInstrumentationMultipleWrites(t *testing.T) {
+	c := newTestClient(1)
+
+	for i := int32(0); i < 5; i++ {
+		t1 := time.Now().Add(-time.Duration(10+i) * time.Millisecond)
+		t2 := t1.Add(time.Duration(1+i) * time.Millisecond)
+
+		c.mu.Lock()
+		c.weakWriteT1[i] = t1
+		c.weakWriteT2[i] = t2
+		c.weakPending[i] = struct{}{}
+		sendMs := float64(t2.Sub(t1).Nanoseconds()) / float64(time.Millisecond)
+		c.weakWriteSendDurations = append(c.weakWriteSendDurations, sendMs)
+		c.mu.Unlock()
+
+		rep := &MCausalReply{
+			Replica: 1,
+			CmdId:   CommandId{ClientId: 0, SeqNum: i},
+			Rep:     []byte("val"),
+		}
+		c.handleCausalReply(rep)
+		<-c.Reply
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(c.weakWriteSendDurations) != 5 {
+		t.Errorf("expected 5 send durations, got %d", len(c.weakWriteSendDurations))
+	}
+	if len(c.weakWriteReplyLatencies) != 5 {
+		t.Errorf("expected 5 reply latencies, got %d", len(c.weakWriteReplyLatencies))
+	}
+	if len(c.weakWriteProcessOverhead) != 5 {
+		t.Errorf("expected 5 process overheads, got %d", len(c.weakWriteProcessOverhead))
+	}
+	// All T1/T2 entries should be cleaned up
+	if len(c.weakWriteT1) != 0 {
+		t.Errorf("expected 0 remaining T1 entries, got %d", len(c.weakWriteT1))
+	}
+	if len(c.weakWriteT2) != 0 {
+		t.Errorf("expected 0 remaining T2 entries, got %d", len(c.weakWriteT2))
 	}
 }
