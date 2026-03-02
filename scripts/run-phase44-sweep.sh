@@ -269,7 +269,7 @@ cat >> "$EVAL_FILE" << EOF
 
 | Parameter        | Value                                      |
 |------------------|--------------------------------------------|
-| Replicas         | 3 (130.245.173.101, .102, .104)            |
+| Replicas         | 3 (130.245.173.101, .103, .104)            |
 | Clients          | 3 (co-located with replicas)               |
 | Network Delay    | 25ms one-way (50ms RTT), application-level |
 | Requests/Client  | 10,000                                     |
