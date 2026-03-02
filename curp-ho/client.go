@@ -571,29 +571,55 @@ func (c *Client) getNextSeqnum() int32 {
 
 // HybridClient interface implementation
 
-// SendStrongWrite sends a linearizable write command (delegates to base SendWrite).
-// Acquires writerMu[leader] to serialize against async remoteSender goroutines
-// that may be flushing causal writes to the same replica. This prevents data races
-// on the per-replica bufio.Writer, since SendWrite → SendProposal writes directly
-// to c.writers[leader] without mutex protection.
+// sendProposeSafe sends a Propose message to a single replica under writerMu.
+// This is the mutex-protected equivalent of what SendProposal does per-replica
+// when Fast=true, preventing the data race with remoteSender goroutines.
+func (c *Client) sendProposeSafe(rid int32, p *defs.Propose) {
+	c.writerMu[rid].Lock()
+	w := c.BufferClient.GetWriter(rid)
+	if w != nil {
+		w.WriteByte(defs.PROPOSE)
+		p.Marshal(w)
+		w.Flush()
+	}
+	c.writerMu[rid].Unlock()
+}
+
+// SendStrongWrite sends a linearizable write command to all replicas for fast-path
+// (1-RTT) completion. Bypasses base SendWrite/SendProposal to use per-replica
+// mutex protection via sendProposeSafe. This prevents the data race between
+// SendProposal (no mutex) and remoteSender goroutines (with mutex) that caused
+// corrupted TCP streams in Phase 46.
 func (c *Client) SendStrongWrite(key int64, value []byte) int32 {
-	leader := int32(c.LeaderId)
-	c.writerMu[leader].Lock()
-	seqnum := c.SendWrite(key, value)
-	c.writerMu[leader].Unlock()
+	seqnum := c.getNextSeqnum()
+	p := &defs.Propose{
+		CommandId: seqnum,
+		ClientId:  c.ClientId,
+		Command:   state.Command{Op: state.PUT, K: state.Key(key), V: value},
+		Timestamp: 0,
+	}
+	for rep := 0; rep < c.N; rep++ {
+		c.sendProposeSafe(int32(rep), p)
+	}
 	c.mu.Lock()
 	c.strongPendingKeys[seqnum] = key
 	c.mu.Unlock()
 	return seqnum
 }
 
-// SendStrongRead sends a linearizable read command (delegates to base SendRead).
-// Acquires writerMu[leader] for the same reason as SendStrongWrite.
+// SendStrongRead sends a linearizable read command to all replicas for fast-path
+// (1-RTT) completion. Same per-replica mutex protection as SendStrongWrite.
 func (c *Client) SendStrongRead(key int64) int32 {
-	leader := int32(c.LeaderId)
-	c.writerMu[leader].Lock()
-	seqnum := c.SendRead(key)
-	c.writerMu[leader].Unlock()
+	seqnum := c.getNextSeqnum()
+	p := &defs.Propose{
+		CommandId: seqnum,
+		ClientId:  c.ClientId,
+		Command:   state.Command{Op: state.GET, K: state.Key(key), V: state.NIL()},
+		Timestamp: 0,
+	}
+	for rep := 0; rep < c.N; rep++ {
+		c.sendProposeSafe(int32(rep), p)
+	}
 	c.mu.Lock()
 	c.strongPendingKeys[seqnum] = key
 	c.mu.Unlock()

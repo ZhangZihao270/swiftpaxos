@@ -236,6 +236,12 @@ func (c *Client) GetNextSeqnum() int32 {
 	return c.seqnum
 }
 
+// GetWriter returns the bufio.Writer for the given replica.
+// Used by protocol clients that need direct writer access with their own mutex protection.
+func (c *Client) GetWriter(rid int32) *bufio.Writer {
+	return c.writers[rid]
+}
+
 func (c *Client) SendScan(key, count int64) int32 {
 	c.seqnum++
 	p := defs.Propose{

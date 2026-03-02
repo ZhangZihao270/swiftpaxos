@@ -3195,12 +3195,12 @@ This is equivalent to `SendProposal` with `Fast=true`, but each write is protect
 
 #### Phase 47.1: Implement Fix (~30 LOC)
 
-- [ ] **47.1a** In `main.go`: change CURP-HO case back to `c.Fast = true`
-- [ ] **47.1b** In `curp-ho/client.go`: rewrite `SendStrongWrite` to bypass base `SendWrite`. Build `defs.Propose` manually, send to all replicas via `sendMsgSafe` per-replica. Use `getNextSeqnum()` for seqnum.
-- [ ] **47.1c** In `curp-ho/client.go`: same for `SendStrongRead` — bypass base `SendRead`, use `sendMsgSafe` per-replica.
-- [ ] **47.1d** Remove the `writerMu[leader].Lock/Unlock` in old `SendStrongWrite`/`SendStrongRead` (no longer needed since sendMsgSafe handles it)
-- [ ] **47.1e** `go test ./...` — no regressions
-- [ ] **47.1f** `go test -race ./curp-ho/` — no data races
+- [x] **47.1a** In `main.go`: change CURP-HO case back to `c.Fast = true`
+- [x] **47.1b** In `curp-ho/client.go`: rewrite `SendStrongWrite` to bypass base `SendWrite`. Build `defs.Propose` manually, send to all replicas via `sendProposeSafe` per-replica. Use `getNextSeqnum()` for seqnum. Added `GetWriter` accessor to `client/client.go`.
+- [x] **47.1c** In `curp-ho/client.go`: same for `SendStrongRead` — bypass base `SendRead`, use `sendProposeSafe` per-replica.
+- [x] **47.1d** Removed old `writerMu[leader].Lock/Unlock` — replaced by per-replica locking in `sendProposeSafe`
+- [x] **47.1e** `go test ./...` — no regressions
+- [x] **47.1f** `go test -race ./curp-ho/` — no data races
 
 ---
 
