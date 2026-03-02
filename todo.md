@@ -3103,8 +3103,8 @@ CURP-HO strong ops should only go to leader; causal broadcast uses the dedicated
 
 **Bug found during investigation**: `run-multi-client.sh` accepts `-t N` to set thread count, but only uses it for display/total calculation. The config file's `clientThreads: 2` is NOT overwritten, so the actual client binary always uses 2 threads regardless of `-t`. Phase 45 sweep "t96" actually ran with 2 threads per machine.
 
-- [ ] **46.2.5a** Fix `run-multi-client.sh` to write `clientThreads: N` to the temp config when `-t N` is specified
-- [ ] **46.2.5b** Fix `run-phase44-sweep.sh` to pass threads correctly
+- [x] **46.2.5a** Fix `run-multi-client.sh` to write `clientThreads: N` to the temp config when `-t N` is specified — after copying config, sed updates clientThreads line (case-insensitive)
+- [x] **46.2.5b** `run-phase44-sweep.sh` already passes `-t $threads` to `run-multi-client.sh` — no changes needed, fix in 46.2.5a is sufficient
 
 ---
 

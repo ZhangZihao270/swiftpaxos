@@ -204,9 +204,19 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Create config copy (don't modify clones - use value from config)
+# Create config copy, updating clientThreads if -t or -k was specified
 TEMP_CONFIG="$RESULTS_DIR/benchmark.conf"
 cp "$CONFIG" "$TEMP_CONFIG"
+
+if [[ -n "$THREADS" || -n "$CLONES" ]]; then
+    # Update clientThreads in the temp config to match the requested thread count
+    if grep -qiE "^clientThreads:" "$TEMP_CONFIG"; then
+        sed -i -E "s/^(clientThreads|clientthreads):.*$/clientThreads: $THREAD_COUNT/I" "$TEMP_CONFIG"
+    else
+        # Add clientThreads if not present (append after commandSize or at end of client settings)
+        sed -i "/^commandSize:/a clientThreads: $THREAD_COUNT" "$TEMP_CONFIG"
+    fi
+fi
 
 # Sync files to remote servers (distributed mode)
 sync_to_remote() {
