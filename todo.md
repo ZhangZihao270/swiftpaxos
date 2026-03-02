@@ -3041,7 +3041,7 @@ For the LEADER, causal propose processing requires `lastCmdSlot`, `leaderSlots`,
 5. **Client2 panic** at 8 threads: `index out of range [-1588519078]` — corrupted data
 6. **MSync "not recoverable"** floods — commands stuck because quorum can't form with dropped connections
 
-**Root Cause Analysis**:
+**Root Cause Analysis** (CORRECTED during Phase 46.1b investigation):
 
 The "unknown client message" errors on non-leader replicas are the smoking gun. Replica logs show:
 ```
@@ -3050,23 +3050,28 @@ Warning: received unknown client message 72 from 130.245.173.101:45196 - closing
 ```
 Random byte values (29, 31, 46, 48, 72, 150, 178, 215, 238, 240) indicate **interleaved writes on the TCP stream** — two goroutines writing to the same `bufio.Writer` concurrently, producing garbled message bytes on the wire.
 
-**The bug: `SendProposal` races with `remoteSender` on non-leader writers.**
+**The bug: `c.Fast = true` inherited from config file causes `SendProposal` to write ALL replicas without mutex.**
 
-Phase 44.5c introduced `remoteSender` goroutines that drain per-replica async queues via `sendMsgSafe(rid, ...)` (acquires `writerMu[rid]`). But `SendStrongWrite`/`SendStrongRead` only acquire `writerMu[leader]`:
+The original hypothesis was wrong about `SendProposal` always writing to all replicas. The actual issue:
+
+1. `SendProposal` checks `c.Fast`: when `true`, it broadcasts to ALL replicas; when `false`, it sends to leader only.
+2. The config file (`multi-client.conf`) has `fast: true` (needed for Fast Paxos / N2Paxos protocols).
+3. The `curpho` case in `main.go` was **empty** — it didn't override `c.Fast`, so the config's `fast: true` leaked through.
+4. With `c.Fast = true`, `SendStrongWrite` acquires `writerMu[leader]` and calls `SendWrite` → `SendProposal`, which writes to ALL replicas. Non-leader writes have **no mutex protection**, racing with `remoteSender` goroutines that properly hold `writerMu[rid]`.
+
 ```go
-func (c *Client) SendStrongWrite(key int64, value []byte) int32 {
-    leader := int32(c.LeaderId)
-    c.writerMu[leader].Lock()        // Only locks LEADER
-    seqnum := c.SendWrite(key, value) // SendWrite → SendProposal → writes to ALL replicas!
-    c.writerMu[leader].Unlock()
-    ...
-}
+// main.go: curpho case was empty — didn't set c.Fast = false
+case "curpho":
+// config: fast: true  →  c.Fast stayed true
 ```
-`SendProposal` (in the base CURP client) sends the propose message to **ALL replicas** for the fast-path quorum. For non-leader replicas, this writes to `c.writers[rid]` **without** `writerMu[rid]`, racing with `remoteSender(rid)` which does hold the mutex.
 
-**Consequence chain**: corrupted bytes → replica drops connection → strong commands can't form quorum → commands timeout after ~1s (explaining S-P99 ~1000ms) → throughput tanks.
+Client logs confirm: `"sending command 0 to everyone"` (the "to everyone" path in SendProposal).
 
-**Why Phase 42 didn't have this**: Phase 42 ran before Phase 44.5c (async send queues). Without `remoteSender` goroutines, all writes to `c.writers[rid]` came from the single HybridLoop goroutine — no concurrent access.
+**Consequence chain**: c.Fast=true → SendProposal writes all replicas without mutex → corrupted bytes on non-leader streams → replica drops connection → strong commands can't form quorum → commands timeout after ~1s (explaining S-P99 ~1000ms) → throughput tanks.
+
+**Why Phase 42 didn't have this**: Phase 42 ran before Phase 44.5c (async send queues). Without `remoteSender` goroutines, all writes to `c.writers[rid]` came from the single HybridLoop goroutine — no concurrent access, even with Fast=true.
+
+**Fix applied**: Set `c.Fast = false` explicitly for `curpho` (and `curpht`) in `main.go`. CURP-HO uses its own `sendMsgToAll` for causal broadcast; `SendProposal` should only write to the leader.
 
 ---
 
@@ -3074,9 +3079,9 @@ func (c *Client) SendStrongWrite(key int64, value []byte) int32 {
 
 **Goal**: Confirm the writer race hypothesis before fixing.
 
-- [ ] **46.1a** Run `go test -race ./curp-ho/` to check if the race detector catches the data race
-- [ ] **46.1b** Check `SendProposal` code path: confirm it writes to ALL `c.writers[rid]` (not just leader)
-- [ ] **46.1c** Verify by reverting Phase 44.5c (async queues) locally and running one 4-thread benchmark — if "unknown client message" errors disappear and throughput recovers, root cause confirmed
+- [x] **46.1a** Run `go test -race ./curp-ho/` to check if the race detector catches the data race — no race found (tests don't exercise concurrent path)
+- [x] **46.1b** Check `SendProposal` code path — found actual root cause: `c.Fast=true` inherited from config, not overridden in `curpho` case
+- [x] **46.1c** (Skipped — root cause confirmed via code analysis and client log evidence `"sending command 0 to everyone"`)
 
 ---
 
@@ -3084,38 +3089,28 @@ func (c *Client) SendStrongWrite(key int64, value []byte) int32 {
 
 **Goal**: Ensure ALL writes to `c.writers[rid]` are protected by `writerMu[rid]`.
 
-**Option A — Lock all replicas in SendStrongWrite/Read**:
-```go
-func (c *Client) SendStrongWrite(key int64, value []byte) int32 {
-    for i := 0; i < c.N; i++ {
-        c.writerMu[i].Lock()
-    }
-    seqnum := c.SendWrite(key, value)
-    for i := 0; i < c.N; i++ {
-        c.writerMu[i].Unlock()
-    }
-    ...
-}
-```
-Pro: Minimal change. Con: Holds all locks during SendProposal (blocks remoteSenders).
+**Fix applied**: Set `c.Fast = false` for `curpho` and `curpht` in `main.go` (1-line fix each).
+This is simpler than Options A-C because the root cause was the config flag, not the mutex architecture.
+CURP-HO strong ops should only go to leader; causal broadcast uses the dedicated `sendMsgToAll` path.
 
-**Option B — Route all non-bound sends through async queues** (recommended):
-Override `SendProposal` to send to leader synchronously and enqueue non-leader sends. This way `remoteSender` is the ONLY writer for each non-leader `c.writers[rid]`, eliminating the race entirely.
-Pro: Clean separation of concerns, no lock contention. Con: More refactoring.
+- [x] **46.2a** Set `c.Fast = false` for curpho and curpht in main.go
+- [x] **46.2b** `go test ./...` — all tests pass
+- [x] **46.2c** `go test -race ./curp-ho/` — no data races
 
-**Option C — Remove async queues, revert to synchronous sendMsgToAll**:
-Revert Phase 44.5c entirely. W-P99 at 4 threads would go back to ~100ms, but throughput would recover.
-Pro: Simplest. Con: Loses the W-P99 improvement.
+---
 
-- [ ] **46.2a** Implement chosen fix (Option A or B)
-- [ ] **46.2b** `go test ./...` — no regressions
-- [ ] **46.2c** `go test -race ./curp-ho/` — no data races
+#### Phase 46.2.5: Fix Benchmark Script Thread Count Bug
+
+**Bug found during investigation**: `run-multi-client.sh` accepts `-t N` to set thread count, but only uses it for display/total calculation. The config file's `clientThreads: 2` is NOT overwritten, so the actual client binary always uses 2 threads regardless of `-t`. Phase 45 sweep "t96" actually ran with 2 threads per machine.
+
+- [ ] **46.2.5a** Fix `run-multi-client.sh` to write `clientThreads: N` to the temp config when `-t N` is specified
+- [ ] **46.2.5b** Fix `run-phase44-sweep.sh` to pass threads correctly
 
 ---
 
 #### Phase 46.3: Validation Benchmark
 
-- [ ] **46.3a** Run CURP-HO sweep: 2, 4, 8, 16, 32, 64, 96 threads
+- [ ] **46.3a** Run CURP-HO sweep: 2, 4, 8, 16, 32, 64, 96 threads (after fixing thread count bug)
 - [ ] **46.3b** Verify: no "unknown client message" in any replica log
 - [ ] **46.3c** Verify: throughput scales with thread count (within 20% of Phase 42 reference)
 - [ ] **46.3d** Verify: W-P99 still < 1ms at 4-64 threads (async queue fix preserved)
