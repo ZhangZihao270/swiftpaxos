@@ -3131,6 +3131,100 @@ CURP-HO strong ops should only go to leader; causal broadcast uses the dedicated
 
 ---
 
+### Phase 47: Restore CURP-HO Fast Path — 1-RTT Strong Commands [HIGH PRIORITY]
+
+**Goal**: Restore `Fast=true` for CURP-HO so strong commands complete in 1-RTT (50ms), not 2-RTT (100ms), while keeping the writer race fix.
+
+**Problem**: Phase 46 set `c.Fast = false` to eliminate the writer race between `SendProposal` and `remoteSender` goroutines. This was a sledgehammer fix — it disabled the fast path entirely:
+- S-Med = 100ms (2-RTT slow path) instead of ~51ms (1-RTT fast path)
+- S-Avg = 136ms > S-P99 = 101ms — because P99.9 = **12,005ms** (extreme outliers from MSync retry storms when fast path is disabled)
+- Throughput at low thread counts cut in half (1,336 vs 3,551 at 2t)
+
+**CURP fast path recap** (`Fast=true`, `conflicts: 0`):
+1. Client broadcasts `Propose` to ALL replicas via `SendProposal`
+2. Each replica checks for conflicts → no conflict → sends `RecordAck` immediately
+3. Client collects quorum of `RecordAck`s → command complete in **1-RTT (50ms)**
+4. No `Accept/Commit` round needed for non-conflicting commands
+
+With `Fast=false`, ALL strong commands go through 2-RTT `Accept/Commit` slow path (100ms).
+
+**Root cause of the race** (from Phase 46 analysis):
+`SendProposal` (in `client/client.go:186-194`) writes to `c.writers[rep]` for ALL replicas when `Fast=true`:
+```go
+for rep := 0; rep < len(c.servers); rep++ {
+    c.writers[rep].WriteByte(defs.PROPOSE)
+    cmd.Marshal(c.writers[rep])
+    c.writers[rep].Flush()
+}
+```
+This runs in the HybridLoop goroutine WITHOUT `writerMu[rep]`. Meanwhile `remoteSender(rep)` goroutines write to the same `c.writers[rep]` via `sendMsgSafe` (WITH `writerMu`). Result: interleaved bytes → corrupted TCP stream.
+
+**Fix approach**: Bypass `SendProposal` entirely. In `SendStrongWrite`/`SendStrongRead`, build the `Propose` message manually and send via `sendMsgSafe` per-replica — each write individually protected by `writerMu[rep]`:
+
+```go
+func (c *Client) SendStrongWrite(key int64, value []byte) int32 {
+    seqnum := c.getNextSeqnum()
+    p := defs.Propose{
+        CommandId: seqnum,
+        ClientId:  c.ClientId,
+        Command:   state.Command{Op: state.PUT, K: state.Key(key), V: value},
+        Timestamp: 0,
+    }
+    // Fast path: send to each replica with per-replica mutex protection
+    for rep := 0; rep < c.N; rep++ {
+        c.sendMsgSafe(int32(rep), defs.PROPOSE, &p)
+    }
+    c.mu.Lock()
+    c.strongPendingKeys[seqnum] = key
+    c.mu.Unlock()
+    return seqnum
+}
+```
+
+This is equivalent to `SendProposal` with `Fast=true`, but each write is protected by `writerMu[rep]`. No concurrent access to any `c.writers[rep]`. The sequential per-replica locking (same goroutine) cannot deadlock.
+
+**Why not lock all mutexes at once (Phase 46 Option A)?**
+`SendProposal` calls `Flush()` per replica, which can block ~50ms on remote TCP. Holding all mutexes during that time would block ALL `remoteSender` goroutines, delaying causal write delivery. Per-replica locking only blocks each `remoteSender` briefly during its own write.
+
+**Why not modify `SendProposal` itself?**
+`SendProposal` is in the base `client/client.go` shared by all protocols. Adding mutexes there would affect Paxos, EPaxos, etc. Protocol-specific overrides in `curp-ho/client.go` are cleaner.
+
+**CURP-HT note**: Keep `Fast=false` for CURP-HT for now. CURP-HT doesn't have `remoteSender` goroutines, but its `handleMsgs` goroutine does send retries via `SendMsg` in a separate goroutine. Enabling fast path for CURP-HT would need similar mutex protection. Can be done separately.
+
+---
+
+#### Phase 47.1: Implement Fix (~30 LOC)
+
+- [ ] **47.1a** In `main.go`: change CURP-HO case back to `c.Fast = true`
+- [ ] **47.1b** In `curp-ho/client.go`: rewrite `SendStrongWrite` to bypass base `SendWrite`. Build `defs.Propose` manually, send to all replicas via `sendMsgSafe` per-replica. Use `getNextSeqnum()` for seqnum.
+- [ ] **47.1c** In `curp-ho/client.go`: same for `SendStrongRead` — bypass base `SendRead`, use `sendMsgSafe` per-replica.
+- [ ] **47.1d** Remove the `writerMu[leader].Lock/Unlock` in old `SendStrongWrite`/`SendStrongRead` (no longer needed since sendMsgSafe handles it)
+- [ ] **47.1e** `go test ./...` — no regressions
+- [ ] **47.1f** `go test -race ./curp-ho/` — no data races
+
+---
+
+#### Phase 47.2: Validation Benchmark
+
+- [ ] **47.2a** Run CURP-HO sweep: 2, 4, 8, 16, 32, 64, 96 threads
+
+**Success criteria**:
+1. **S-Med ≈ 51ms** at all thread counts (1-RTT fast path restored)
+2. **Throughput ≥ Phase 42 reference** at each thread count (3.5K at 2t, 71K at 96t)
+3. **W-P99 < 2ms** at 4-16 threads (Phase 46 async queue improvement preserved)
+4. **Zero "unknown client message"** errors (writer race fixed)
+
+- [ ] **47.2b** Verify success criteria
+- [ ] **47.2c** Create evaluation/phase47-results.md
+
+---
+
+#### Phase 47.3: Commit and Push
+
+- [ ] **47.3a** Commit and push
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
