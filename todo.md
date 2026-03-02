@@ -3029,6 +3029,113 @@ For the LEADER, causal propose processing requires `lastCmdSlot`, `leaderSlots`,
 
 ---
 
+### Phase 46: Fix CURP-HO Throughput Regression — Writer Race in Async Send Queues [HIGH PRIORITY]
+
+**Goal**: Fix throughput regression from ~3,500-71,000 (Phase 42) → ~1,300-2,200 ops/sec (Phase 45).
+
+**Symptoms** (from Phase 45 sweep logs):
+1. **Throughput flat** at ~1,300-2,200 ops/sec regardless of thread count (2→96)
+2. **S-P99 ~1,000-1,600ms** (Phase 42 had ~53ms) — strong commands hitting extreme delays
+3. **"unknown client message"** errors on every non-leader replica, every run (2-4 per replica per run)
+4. **Client connections dropped** by replicas after receiving corrupted message bytes
+5. **Client2 panic** at 8 threads: `index out of range [-1588519078]` — corrupted data
+6. **MSync "not recoverable"** floods — commands stuck because quorum can't form with dropped connections
+
+**Root Cause Analysis**:
+
+The "unknown client message" errors on non-leader replicas are the smoking gun. Replica logs show:
+```
+Client up 130.245.173.101:45196 ( false )
+Warning: received unknown client message 72 from 130.245.173.101:45196 - closing connection
+```
+Random byte values (29, 31, 46, 48, 72, 150, 178, 215, 238, 240) indicate **interleaved writes on the TCP stream** — two goroutines writing to the same `bufio.Writer` concurrently, producing garbled message bytes on the wire.
+
+**The bug: `SendProposal` races with `remoteSender` on non-leader writers.**
+
+Phase 44.5c introduced `remoteSender` goroutines that drain per-replica async queues via `sendMsgSafe(rid, ...)` (acquires `writerMu[rid]`). But `SendStrongWrite`/`SendStrongRead` only acquire `writerMu[leader]`:
+```go
+func (c *Client) SendStrongWrite(key int64, value []byte) int32 {
+    leader := int32(c.LeaderId)
+    c.writerMu[leader].Lock()        // Only locks LEADER
+    seqnum := c.SendWrite(key, value) // SendWrite → SendProposal → writes to ALL replicas!
+    c.writerMu[leader].Unlock()
+    ...
+}
+```
+`SendProposal` (in the base CURP client) sends the propose message to **ALL replicas** for the fast-path quorum. For non-leader replicas, this writes to `c.writers[rid]` **without** `writerMu[rid]`, racing with `remoteSender(rid)` which does hold the mutex.
+
+**Consequence chain**: corrupted bytes → replica drops connection → strong commands can't form quorum → commands timeout after ~1s (explaining S-P99 ~1000ms) → throughput tanks.
+
+**Why Phase 42 didn't have this**: Phase 42 ran before Phase 44.5c (async send queues). Without `remoteSender` goroutines, all writes to `c.writers[rid]` came from the single HybridLoop goroutine — no concurrent access.
+
+---
+
+#### Phase 46.1: Verify Root Cause
+
+**Goal**: Confirm the writer race hypothesis before fixing.
+
+- [ ] **46.1a** Run `go test -race ./curp-ho/` to check if the race detector catches the data race
+- [ ] **46.1b** Check `SendProposal` code path: confirm it writes to ALL `c.writers[rid]` (not just leader)
+- [ ] **46.1c** Verify by reverting Phase 44.5c (async queues) locally and running one 4-thread benchmark — if "unknown client message" errors disappear and throughput recovers, root cause confirmed
+
+---
+
+#### Phase 46.2: Fix the Writer Race (~20 LOC)
+
+**Goal**: Ensure ALL writes to `c.writers[rid]` are protected by `writerMu[rid]`.
+
+**Option A — Lock all replicas in SendStrongWrite/Read**:
+```go
+func (c *Client) SendStrongWrite(key int64, value []byte) int32 {
+    for i := 0; i < c.N; i++ {
+        c.writerMu[i].Lock()
+    }
+    seqnum := c.SendWrite(key, value)
+    for i := 0; i < c.N; i++ {
+        c.writerMu[i].Unlock()
+    }
+    ...
+}
+```
+Pro: Minimal change. Con: Holds all locks during SendProposal (blocks remoteSenders).
+
+**Option B — Route all non-bound sends through async queues** (recommended):
+Override `SendProposal` to send to leader synchronously and enqueue non-leader sends. This way `remoteSender` is the ONLY writer for each non-leader `c.writers[rid]`, eliminating the race entirely.
+Pro: Clean separation of concerns, no lock contention. Con: More refactoring.
+
+**Option C — Remove async queues, revert to synchronous sendMsgToAll**:
+Revert Phase 44.5c entirely. W-P99 at 4 threads would go back to ~100ms, but throughput would recover.
+Pro: Simplest. Con: Loses the W-P99 improvement.
+
+- [ ] **46.2a** Implement chosen fix (Option A or B)
+- [ ] **46.2b** `go test ./...` — no regressions
+- [ ] **46.2c** `go test -race ./curp-ho/` — no data races
+
+---
+
+#### Phase 46.3: Validation Benchmark
+
+- [ ] **46.3a** Run CURP-HO sweep: 2, 4, 8, 16, 32, 64, 96 threads
+- [ ] **46.3b** Verify: no "unknown client message" in any replica log
+- [ ] **46.3c** Verify: throughput scales with thread count (within 20% of Phase 42 reference)
+- [ ] **46.3d** Verify: W-P99 still < 1ms at 4-64 threads (async queue fix preserved)
+- [ ] **46.3e** Verify: S-P99 < 200ms at all thread counts (no more timeout-level delays)
+
+**Success criteria**:
+1. Zero "unknown client message" errors
+2. Throughput: 2 threads ≥ 3K, 32 threads ≥ 25K, 96 threads ≥ 60K
+3. W-P99 at 4-32 threads < 5ms
+4. S-P99 at all threads < 200ms
+
+---
+
+#### Phase 46.4: Commit and Push
+
+- [ ] **46.4a** Update evaluation/phase46-results.md with benchmark results
+- [ ] **46.4b** Commit and push
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
