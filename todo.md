@@ -2968,6 +2968,37 @@ For the LEADER, causal propose processing requires `lastCmdSlot`, `leaderSlots`,
 
 ---
 
+### Phase 45: CURP-HO Re-evaluation on New Machine Configuration [IN PROGRESS]
+
+**Goal**: Re-run CURP-HO full evaluation after replacing .102 with .103.
+
+**Background**: Machine 130.245.173.102 is no longer available. Configuration updated:
+- `.101` — replica0, client2
+- **`.103`** — replica1, client0, master0 (was .102)
+- `.104` — replica2, client1
+
+**Phase 42 reference** (evaluation/2026-02-19.md — target to match):
+
+| Threads | Throughput | W-P99 (ms) | S-Median (ms) |
+|---------|-----------|------------|----------------|
+| 2       | 3,551     | 0.86       | 51.26          |
+| 4       | 4,109     | 100.96     | 51.17          |
+| 8       | 14,050    | 2.62       | 50.97          |
+| 16      | 8,771     | 100.95     | 50.89          |
+| 32      | 30,339    | 100.38     | 59.16          |
+| 64      | 34,797    | 102.51     | 67.26          |
+| 96      | 71,595    | 119.61     | 94.85          |
+
+**Tasks**:
+- [x] **45.1** Update config files: .102 → .103 in benchmark.conf, multi-client.conf, scripts/run-phase44-sweep.sh [26:03:02]
+- [x] **45.2** Verify SSH connectivity between .101, .103, .104 [26:03:02]
+- [ ] **45.3** Build swiftpaxos and verify .103 machine readiness
+- [ ] **45.4** Run CURP-HO benchmark sweep: 2, 4, 8, 16, 32, 64, 96 threads
+- [ ] **45.5** Summarize results in evaluation/phase45-results.md, compare with Phase 42 reference
+- [ ] **45.6** Update Phase 44 pending tasks based on results
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task

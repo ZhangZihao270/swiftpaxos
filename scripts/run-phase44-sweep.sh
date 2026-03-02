@@ -14,7 +14,7 @@ set -e
 WORK_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$WORK_DIR"
 
-HOSTS=("130.245.173.101" "130.245.173.102" "130.245.173.104")
+HOSTS=("130.245.173.101" "130.245.173.103" "130.245.173.104")
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10"
 SSH_USER="$(whoami)"
 LOAD_THRESHOLD=2.0
