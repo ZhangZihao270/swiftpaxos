@@ -141,7 +141,8 @@ func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads i
 	case "swiftpaxos":
 	case "curp":
 	case "curpht":
-		c.Fast = false // CURP-HT sends strong ops to leader only; weak ops use separate MWeakPropose path
+		// CURP-HT uses config fast: setting (default true for 1-RTT strong fast path).
+		// Safe: no remoteSender goroutines, so no concurrent writer race (Phase 48.1a audit).
 	case "curpho":
 		c.Fast = true // CURP-HO restores fast path for 1-RTT strong commands; SendStrongWrite/Read bypass SendProposal with per-replica mutex protection
 	case "fastpaxos":

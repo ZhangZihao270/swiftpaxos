@@ -3250,19 +3250,19 @@ This is equivalent to `SendProposal` with `Fast=true`, but each write is protect
 
 #### Phase 48.1: Audit & Root Cause Analysis (no code changes)
 
-- [ ] **48.1a** Audit CURP-HT client (`curp-ht/client.go`) for concurrent writer access — check if `handleMsgs`, timer goroutines, or other goroutines write to `c.writers[]` without mutex
-- [ ] **48.1b** Trace CURP-HT weak write path end-to-end in replica code (`curp-ht/curp-ht.go`): `handleWeakPropose` → `asyncReplicateWeak` → reply. Confirm W-P99 ~104ms matches 2-RTT design (Accept-Commit). Identify if weak reads also incur 2-RTT or can be optimized.
-- [ ] **48.1c** Clarify CURP-HT strong path: `Fast=false` now means 2-RTT (~100ms). Confirm the 2026-02-19 baseline ran with `Fast=true` (1-RTT ~51ms). Determine if restoring `Fast=true` is safe for CURP-HT.
+- [x] **48.1a** Audit CURP-HT client (`curp-ht/client.go`) for concurrent writer access — **RESULT: No race.** Only the HybridLoop goroutine writes to `c.writers[]` (via `SendProposal`/`SendMsg`). The `handleMsgs` goroutine only reads from channels and modifies in-memory maps. Timer only sends signals. Each thread creates its own client with its own TCP connections. No `writerMu` needed (unlike CURP-HO which has `remoteSender` goroutines writing concurrently).
+- [x] **48.1b** Trace CURP-HT weak write/read path — **RESULT: Weak writes = 2-RTT (~100ms) by design.** Path: client→leader (1 hop) → leader sends MAccept to replicas + self (1 RTT) → waits for majority AcceptAcks (commitCh) → sends MWeakReply to client (1 hop) = 2 RTT total. **Weak reads = local (0 RTT network).** Path: client→nearest replica → `handleWeakRead` reads local state machine + `keyVersions` → sends MWeakReadReply immediately. The W-P99 ~104ms in baseline comes from weak writes pulling up the combined metric. WW-P99 ≈ 100ms (expected), WR-P99 should be sub-ms.
+- [x] **48.1c** Clarify CURP-HT strong path — **RESULT: `Fast=true` is safe to restore.** Pre-Phase 46, `curpht` case was empty in main.go switch, so `c.Fast` came from config (`fast: true`). Phase 46 (`9c1e232`) hardcoded `c.Fast = false` as precaution against writer race. But 48.1a confirmed CURP-HT has NO writer race (no `remoteSender` goroutines). Protocol supports fast path: non-leader replicas send `MRecordAck` (line 261-267), client collects three-quarters quorum via `handleRecordAck`. **Fix: change `c.Fast = false` to remove override (let config `fast: true` apply) — 1-line change in main.go.**
 - [ ] **48.1d** Run CURP-HT baseline benchmark (same environment as Phase 47: 3 replicas, 25ms delay, 50% weak ratio, sweep 2/4/8/16/32/64/96 threads) to establish current performance
 
 #### Phase 48.2: Apply Applicable Optimizations
 
-- [ ] **48.2a** If writer race found (48.1a): add `writerMu[]` per-replica mutexes + `sendMsgSafe` to CURP-HT client (port from CURP-HO Phase 44.3)
-- [ ] **48.2b** If `handleMsgs` is bottleneck: split into separate goroutines for strong vs weak replies (port from CURP-HO Phase 43.2c)
-- [ ] **48.2c** If weak reads can bypass 2-RTT (local read from nearest replica): optimize weak read path
-- [ ] **48.2d** If CURP-HT protocol supports fast path: restore `Fast=true` with `sendProposeSafe` per-replica mutex protection (port from CURP-HO Phase 47)
-- [ ] **48.2e** `go test ./curp-ht/ -v` — all tests pass
-- [ ] **48.2f** `go build -o swiftpaxos .` — compiles
+- [x] **48.2a** ~~If writer race found (48.1a): add `writerMu[]`~~ — SKIPPED: No race found (48.1a). No `writerMu` needed.
+- [x] **48.2b** ~~If `handleMsgs` is bottleneck: split into separate goroutines~~ — SKIPPED: Not a bottleneck in CURP-HT (single handleMsgs goroutine handles all reply types without blocking writes).
+- [x] **48.2c** ~~If weak reads can bypass 2-RTT~~ — ALREADY DONE: Weak reads already go to nearest replica and return locally (0 RTT). See 48.1b.
+- [x] **48.2d** Restore `Fast=true` for CURP-HT — Removed `c.Fast = false` override in main.go:143. Config `fast: true` now applies. Safe: no writer race (48.1a), protocol supports fast path (48.1c).
+- [x] **48.2e** `go test ./...` — all tests pass
+- [x] **48.2f** `go build -o swiftpaxos .` — compiles
 
 #### Phase 48.3: Re-evaluate & Compare
 
