@@ -3586,6 +3586,101 @@ With 50.1 removing weakReadChan from the event loop:
 
 ---
 
+### Phase 52: Vanilla CURP Optimization & Benchmarking
+
+**Goal**: Add vanilla CURP to the 4-protocol comparison table. Currently CURP has no benchmark results because (1) it collects no metrics through the multi-client pipeline, and (2) it carries untuned parameters from early development. Port the proven optimizations from CURP-HT/HO and run a full thread-count sweep.
+
+**Context — what's missing from vanilla CURP**:
+
+| Parameter | curp/ (current) | curp-ht/ (tuned) | Impact |
+|-----------|----------------|-------------------|--------|
+| `cmap.SHARD_COUNT` | 32768 | 512 | Cache thrashing at high concurrency |
+| `MaxDescRoutines` | 100 | 10000 | Serializes all descriptors once >100 goroutines, hard throughput ceiling |
+| Batcher batch delay | none (immediate) | configurable 150μs | No coalescing; each Accept/AcceptAck sent individually |
+| Benchmark loop | `cl.Loop()` → returns `nil, 0` | `HybridLoopWithOptions` → returns metrics | **No metrics collected** — pipeline always shows 0 |
+
+Notes on what's **NOT** applicable:
+- `closedChan` pre-allocation: CURP has no weak reads, so this pattern doesn't appear
+- `stringCache` (sync.Map for int32→string): Minor; CURP already inlines `strconv.Itoa/FormatInt`; defer unless profiling shows it matters
+- `commitNotify` channels: CURP uses `deliverChan` for the same purpose (slot-based ordering); different architecture, no direct port needed
+
+**Benchmark config**: CURP is strong-only (`weakRatio=0`). Thread sweep at 6/12/24/48/96/192/288 (same orca scale as all other protocols).
+
+#### 52.1: Fix SHARD_COUNT (curp/)
+
+Change `cmap.SHARD_COUNT = 32768` to `cmap.SHARD_COUNT = 512` in `curp/curp.go`.
+
+Rationale: CURP-HT was tuned to 512 in Phase 18.6 (from 32768) and showed significant improvement. Same fix applies here.
+
+- [ ] **52.1a** Change `cmap.SHARD_COUNT = 32768` → `512` in `curp/curp.go` New() (~1 line)
+- [ ] **52.1b** Run `go test ./curp/ -v` — all tests pass
+
+#### 52.2: Raise MaxDescRoutines (curp/)
+
+Change `var MaxDescRoutines = 100` → `var MaxDescRoutines = 10000` in `curp/defs.go`.
+
+Rationale: At `MaxDescRoutines=100`, any slot beyond the first 100 runs sequentially (`desc.seq=true`). At 288 concurrent threads with 15 pendings each, this serializes most work. CURP-HT uses 10000. The `run.go` override (`if c.MaxDescRoutines != 0`) continues to work.
+
+- [ ] **52.2a** Change default `MaxDescRoutines` to `10000` in `curp/defs.go` (~1 line)
+
+#### 52.3: Add batch delay to CURP Batcher (~60 LOC)
+
+Port configurable batch delay from `curp-ht/batcher.go` to `curp/batcher.go`.
+
+Specifically:
+- Add `batchDelayNs int64` field (read via `atomic.LoadInt64`) to `Batcher`
+- Add `SetBatchDelay(delayNs int64)` method
+- In `SendAccept` / `SendAcceptAck`: after draining the immediate channel with `len()`, if `batchDelayNs > 0` and no messages arrived yet, wait up to `batchDelayNs` on a `time.After` before sending batch
+- Wire in `curp/curp.go` `New()`: `if conf.BatchDelayUs > 0 { r.batcher.SetBatchDelay(int64(conf.BatchDelayUs) * 1000) }`
+
+Scope: ~60 LOC modified in `curp/batcher.go`, ~3 LOC in `curp/curp.go`.
+
+- [ ] **52.3a** Add `batchDelayNs int64` + `SetBatchDelay()` + batch-wait logic to `curp/batcher.go`
+- [ ] **52.3b** Wire `conf.BatchDelayUs` → `r.batcher.SetBatchDelay()` in `curp/curp.go` New()
+- [ ] **52.3c** Run `go test ./curp/ -v` — all tests pass
+
+#### 52.4: Wire CURP into shared benchmark pipeline (~40 LOC in main.go)
+
+**Problem**: The current CURP client path in `main.go` calls `cl.Loop()` and returns `nil, 0` — the multi-client runner receives no metrics.
+
+**Fix**: Switch CURP to the same `HybridLoopWithOptions` + `HybridBufferClient` pattern as CURP-HT/HO, configured with `weakRatio=0`:
+- Implement the `HybridClient` interface on `curp.Client` (add stub `SendWeakRead`, `SendWeakWrite`, `GetClosestId`, `SetClosestId` — never called when weakRatio=0)
+- In `main.go`, replace the CURP `cl.Loop(); return nil, 0` block with the same `hbc.HybridLoopWithOptions(printResults); return hbc.GetMetrics(), hbc.GetDuration()` pattern
+- `WeakRatio=0` ensures HybridLoop only issues strong commands, matching CURP's all-strong design
+
+Alternative (simpler): If implementing the full `HybridClient` interface is too invasive, add a `LoopWithMetrics() (client.MetricMap, time.Duration)` method to `BufferClient` and call it from main.go. The multi-client aggregation already has the plumbing for this.
+
+Scope: ~40 LOC in `main.go` + ~30 LOC interface stubs in `curp/client.go` (or `BufferClient`).
+
+- [ ] **52.4a** Add `HybridClient` interface stubs to `curp.Client` (SendWeakRead, SendWeakWrite, etc.) OR add LoopWithMetrics to BufferClient
+- [ ] **52.4b** Update CURP case in `main.go` to collect and return metrics
+- [ ] **52.4c** Create `multi-client-curp.conf`: copy `multi-client.conf`, set `protocol: curp`, `weakRatio: 0`, `batchDelayUs: 150`, keep all other params identical
+- [ ] **52.4d** Manual smoke test: run 1-thread CURP benchmark with new conf, verify output format matches other protocols
+
+#### 52.5: Create sweep script and run benchmark
+
+- [ ] **52.5a** Create `scripts/run-phase52-curp-sweep.sh`: thread counts 2/4/8/16/32/64/96 (per-client), poll server loads, run sweep, extract results — follow same structure as `run-phase50-raftht-sweep.sh`
+- [ ] **52.5b** Run full sweep at 2/4/8/16/32/64/96 threads/client (= 6/12/24/48/96/192/288 total across 3 clients)
+- [ ] **52.5c** Record raw results in `evaluation/phase52-curp-results.md`
+
+#### 52.6: Document results and update comparison tables
+
+- [ ] **52.6a** Add CURP column to the 4-protocol throughput table in `orca/benchmark-2026-03-02.md` (becomes 5-protocol)
+- [ ] **52.6b** Add CURP row to strong latency S-Med comparison table
+- [ ] **52.6c** Write analysis: CURP vs CURP-HO/HT strong latency (all use 1-RTT fast path, so S-Med should be ~51ms); CURP vs Raft throughput scaling; overhead of optimized (`-opt`) flag
+
+**Success Criteria**:
+1. `go test ./curp/ -v` passes with all existing tests
+2. `go test ./... -count=1` passes (no regressions in other protocols)
+3. CURP benchmark completes at all 7 thread counts without timeout
+4. CURP throughput scales monotonically (no collapse like pre-fix Raft)
+5. CURP S-Med ≈ CURP-HO/HT S-Med (~51ms at low load) — all share the 1-RTT fast path
+6. Results recorded in `evaluation/phase52-curp-results.md` and `orca/benchmark-2026-03-02.md` updated
+
+**Estimated changes**: ~5 LOC in `curp/curp.go`, ~5 LOC in `curp/defs.go`, ~60 LOC in `curp/batcher.go`, ~70 LOC in `curp/client.go` + `main.go`, ~60 LOC new sweep script
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
