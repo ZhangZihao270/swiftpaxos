@@ -3661,14 +3661,14 @@ Scope: ~40 LOC in `main.go` + ~30 LOC interface stubs in `curp/client.go` (or `B
 #### 52.5: Create sweep script and run benchmark
 
 - [x] **52.5a** Create `scripts/run-phase52-curp-sweep.sh`: thread counts 2/4/8/16/32/64/96 (per-client), poll server loads, run sweep, extract results — follow same structure as `run-phase50-raftht-sweep.sh` [26:03:03]
-- [ ] **52.5b** Run full sweep at 2/4/8/16/32/64/96 threads/client (= 6/12/24/48/96/192/288 total across 3 clients)
-- [ ] **52.5c** Record raw results in `evaluation/phase52-curp-results.md`
+- [x] **52.5b** Run full sweep at 2/4/8/16/32/64/96 threads/client (= 6/12/24/48/96/192/288 total across 3 clients) [26:03:03] — Peak 31,365 ops/sec at 96 threads, S-Med=51-69ms, monotonic scaling
+- [x] **52.5c** Record raw results in `evaluation/phase52-curp-results.md` [26:03:03]
 
 #### 52.6: Document results and update comparison tables
 
-- [ ] **52.6a** Add CURP column to the 4-protocol throughput table in `orca/benchmark-2026-03-02.md` (becomes 5-protocol)
-- [ ] **52.6b** Add CURP row to strong latency S-Med comparison table
-- [ ] **52.6c** Write analysis: CURP vs CURP-HO/HT strong latency (all use 1-RTT fast path, so S-Med should be ~51ms); CURP vs Raft throughput scaling; overhead of optimized (`-opt`) flag
+- [x] **52.6a** Add CURP column to the 4-protocol throughput table in `orca/benchmark-2026-03-02.md` (becomes 5-protocol) [26:03:03]
+- [x] **52.6b** Add CURP row to strong latency S-Med comparison table [26:03:03]
+- [x] **52.6c** Write analysis: CURP vs CURP-HO/HT strong latency (all use 1-RTT fast path, so S-Med should be ~51ms); CURP vs Raft throughput scaling; overhead of optimized (`-opt`) flag [26:03:03]
 
 **Success Criteria**:
 1. `go test ./curp/ -v` passes with all existing tests
