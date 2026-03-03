@@ -20,6 +20,7 @@ import (
 	"github.com/imdea-software/swiftpaxos/n2paxos"
 	"github.com/imdea-software/swiftpaxos/paxos"
 	"github.com/imdea-software/swiftpaxos/raft"
+	raftht "github.com/imdea-software/swiftpaxos/raft-ht"
 	"github.com/imdea-software/swiftpaxos/replica/defs"
 	"github.com/imdea-software/swiftpaxos/swift"
 )
@@ -86,6 +87,10 @@ func runReplica(c *config.Config, logger *dlog.Logger) {
 	case "raft":
 		log.Println("Starting Raft replica...")
 		rep := raft.New(c.Alias, replicaId, nodeList, isLeader, f, c, logger)
+		rpc.Register(rep)
+	case "raftht":
+		log.Println("Starting Raft-HT replica...")
+		rep := raftht.New(c.Alias, replicaId, nodeList, isLeader, f, c, logger)
 		rpc.Register(rep)
 	}
 

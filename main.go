@@ -18,6 +18,7 @@ import (
 	"github.com/imdea-software/swiftpaxos/dlog"
 	"github.com/imdea-software/swiftpaxos/master"
 	"github.com/imdea-software/swiftpaxos/raft"
+	raftht "github.com/imdea-software/swiftpaxos/raft-ht"
 	"github.com/imdea-software/swiftpaxos/replica/defs"
 	"github.com/imdea-software/swiftpaxos/swift"
 )
@@ -119,7 +120,7 @@ func runClient(c *config.Config, verbose bool) {
 
 	// Aggregate and print metrics (for protocols using HybridBufferClient with multiple threads)
 	p := strings.ToLower(c.Protocol)
-	if numThreads > 1 && (p == "curpht" || p == "curpho" || p == "raft") {
+	if numThreads > 1 && (p == "curpht" || p == "curpho" || p == "raft" || p == "raftht") {
 		aggregated := client.AggregateMetrics(allMetrics)
 		l := dlog.New(*logFile, verbose)
 		l.Printf("Test took %v\n", maxDuration)
@@ -158,6 +159,9 @@ func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads i
 		c.WaitClosest = false
 		c.Fast = false
 	case "raft":
+		c.WaitClosest = false
+		c.Fast = false
+	case "raftht":
 		c.WaitClosest = false
 		c.Fast = false
 	}
@@ -252,6 +256,17 @@ func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads i
 		raftCl := raft.NewClient(b)
 		hbc := client.NewHybridBufferClient(b, 0, 0) // weakRatio=0: all strong
 		hbc.SetHybridClient(raftCl)
+		printResults := (numThreads == 1)
+		hbc.HybridLoopWithOptions(printResults)
+		return hbc.GetMetrics(), hbc.GetDuration()
+	} else if p == "raftht" {
+		rafthtCl := raftht.NewClient(b)
+		weakWrites := c.WeakWrites
+		if weakWrites == 0 && c.WeakRatio > 0 {
+			weakWrites = 50
+		}
+		hbc := client.NewHybridBufferClient(b, c.WeakRatio, weakWrites)
+		hbc.SetHybridClient(rafthtCl)
 		printResults := (numThreads == 1)
 		hbc.HybridLoopWithOptions(printResults)
 		return hbc.GetMetrics(), hbc.GetDuration()

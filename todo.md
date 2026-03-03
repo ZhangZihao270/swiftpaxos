@@ -3304,15 +3304,15 @@ This is equivalent to `SendProposal` with `Fast=true`, but each write is protect
 
 #### Phase 49.1: Create Package & Copy Vanilla Raft (~0 new LOC)
 
-- [ ] **49.1a** Create directory `raft-ht/`
-- [ ] **49.1b** Copy `raft/raft.go` → `raft-ht/raft-ht.go`, change `package raft` → `package raftht`
-- [ ] **49.1c** Copy `raft/defs.go` → `raft-ht/defs.go`, change package name
-- [ ] **49.1d** Copy `raft/client.go` → `raft-ht/client.go`, change package name
-- [ ] **49.1e** Update imports: `raft-ht` references itself (not `raft/`)
-- [ ] **49.1f** Wire in `run.go`: add `case "raftht":` using same pattern as `case "raft":`
-- [ ] **49.1g** Wire in `main.go`: add `case "raftht":` using same pattern as `case "raft":` but with `SupportsWeak() = false` initially
-- [ ] **49.1h** `go build -o swiftpaxos .` — compiles
-- [ ] **49.1i** Run basic test: verify raftht works identically to raft with strong-only workload
+- [x] **49.1a** Create directory `raft-ht/`
+- [x] **49.1b** Copy `raft/raft.go` → `raft-ht/raft-ht.go`, change `package raft` → `package raftht`
+- [x] **49.1c** Copy `raft/defs.go` → `raft-ht/defs.go`, change package name
+- [x] **49.1d** Copy `raft/client.go` → `raft-ht/client.go`, change package name
+- [x] **49.1e** Update imports: `raft-ht` references itself (not `raft/`)
+- [x] **49.1f** Wire in `run.go`: add `case "raftht":` using same pattern as `case "raft":`
+- [x] **49.1g** Wire in `main.go`: add `case "raftht":` using same pattern as `case "raft":` but with `SupportsWeak() = false` initially
+- [x] **49.1h** `go build -o swiftpaxos .` — compiles
+- [x] **49.1i** Run basic test: verify raftht works identically to raft with strong-only workload
 
 ---
 
@@ -3331,12 +3331,12 @@ New message types (modeled on `curp-ht/defs.go`):
 **MWeakReadReply** (any replica → client): `Replica int32, Term int32, CmdId CommandId, Rep []byte, Version int32`
 
 Tasks:
-- [ ] **49.2a** Add MWeakPropose: struct, New(), BinarySize(), Marshal(), Unmarshal(), cache pool
-- [ ] **49.2b** Add MWeakReply: struct, New(), BinarySize(), Marshal(), Unmarshal(), cache pool
-- [ ] **49.2c** Add MWeakRead: struct, New(), BinarySize(), Marshal(), Unmarshal(), cache pool
-- [ ] **49.2d** Add MWeakReadReply: struct, New(), BinarySize(), Marshal(), Unmarshal(), cache pool
-- [ ] **49.2e** Add channels + RPCs to CommunicationSupply: weakProposeChan, weakReplyChan, weakReadChan, weakReadReplyChan
-- [ ] **49.2f** Register new RPCs in `initCs()`
+- [x] **49.2a** Add MWeakPropose: struct, New(), BinarySize(), Marshal(), Unmarshal(), cache pool
+- [x] **49.2b** Add MWeakReply: struct, New(), BinarySize(), Marshal(), Unmarshal(), cache pool
+- [x] **49.2c** Add MWeakRead: struct, New(), BinarySize(), Marshal(), Unmarshal(), cache pool
+- [x] **49.2d** Add MWeakReadReply: struct, New(), BinarySize(), Marshal(), Unmarshal(), cache pool
+- [x] **49.2e** Add channels + RPCs to CommunicationSupply: weakProposeChan, weakReplyChan, weakReadChan, weakReadReplyChan
+- [x] **49.2f** Register new RPCs in `initCs()`
 - [ ] **49.2g** Add serialization round-trip tests for all 4 new message types
 
 ---
@@ -3356,11 +3356,11 @@ Leader receives MWeakPropose → assigns log slot → replies immediately → re
 **keyVersions tracking**: In `executeCommands()`, after `val := entry.Command.Execute(r.State)`, if PUT, store `r.keyVersions[key] = logIndex`. This only updates on committed+applied entries.
 
 Tasks:
-- [ ] **49.3a** Add `keyVersions map[int64]int32` to Replica struct, init in `New()`
-- [ ] **49.3b** Implement `handleWeakPropose()` — append to log, reply immediately, trigger AppendEntries
-- [ ] **49.3c** Add `weakProposeChan` case to `run()` select loop
-- [ ] **49.3d** Update `executeCommands()` to track `keyVersions` on PUT
-- [ ] **49.3e** `go build -o swiftpaxos .` — compiles
+- [x] **49.3a** Add `keyVersions map[int64]int32` to Replica struct, init in `New()`
+- [x] **49.3b** Implement `handleWeakPropose()` — append to log, reply immediately, trigger AppendEntries
+- [x] **49.3c** Add `weakProposeChan` case to `run()` select loop
+- [x] **49.3d** Update `executeCommands()` to track `keyVersions` on PUT
+- [x] **49.3e** `go build -o swiftpaxos .` — compiles
 
 ---
 
@@ -3376,9 +3376,9 @@ Any replica (including followers) can serve weak reads from committed state.
 **Important**: `keyVersions` is updated in `executeCommands()` which only applies committed entries. So weak reads always return committed state.
 
 Tasks:
-- [ ] **49.4a** Implement `handleWeakRead()` — read committed state + version, reply
-- [ ] **49.4b** Add `weakReadChan` case to `run()` select loop (ALL replicas, not just leader)
-- [ ] **49.4c** `go build -o swiftpaxos .` — compiles
+- [x] **49.4a** Implement `handleWeakRead()` — read committed state + version, reply
+- [x] **49.4b** Add `weakReadChan` case to `run()` select loop (ALL replicas, not just leader)
+- [x] **49.4c** `go build -o swiftpaxos .` — compiles
 
 ---
 
@@ -3397,35 +3397,35 @@ Rewrite `raft-ht/client.go` modeled on `curp-ht/client.go`. Key additions over v
 Strong ops delegate to base BufferClient (unchanged Raft path).
 
 Tasks:
-- [ ] **49.5a** Define Client struct with cache, pending maps, mutex
-- [ ] **49.5b** Implement `NewClient()` — init maps, register client-side RPCs, start `handleMsgs()`
-- [ ] **49.5c** Implement `handleMsgs()` — dispatch weakReplyChan and weakReadReplyChan
-- [ ] **49.5d** Implement `SendWeakWrite()` — MWeakPropose to leader
-- [ ] **49.5e** Implement `SendWeakRead()` — MWeakRead to ClosestId
-- [ ] **49.5f** Implement `handleWeakReply()` — cache update on weak write ack
-- [ ] **49.5g** Implement `handleWeakReadReply()` — max-version merge with local cache
-- [ ] **49.5h** Implement `SendStrongWrite/Read()` — delegate to base + track key for cache
-- [ ] **49.5i** Implement `SupportsWeak() → true`, `MarkAllSent()`
+- [x] **49.5a** Define Client struct with cache, pending maps, mutex
+- [x] **49.5b** Implement `NewClient()` — init maps, register client-side RPCs, start `handleMsgs()`
+- [x] **49.5c** Implement `handleMsgs()` — dispatch weakReplyChan and weakReadReplyChan
+- [x] **49.5d** Implement `SendWeakWrite()` — MWeakPropose to leader
+- [x] **49.5e** Implement `SendWeakRead()` — MWeakRead to ClosestId
+- [x] **49.5f** Implement `handleWeakReply()` — cache update on weak write ack
+- [x] **49.5g** Implement `handleWeakReadReply()` — max-version merge with local cache
+- [x] **49.5h** Implement `SendStrongWrite/Read()` — delegate to base + track key for cache
+- [x] **49.5i** Implement `SupportsWeak() → true`, `MarkAllSent()`
 
 ---
 
 #### Phase 49.6: Wire into main.go and run.go (~20 LOC)
 
-- [ ] **49.6a** `run.go`: add `case "raftht":` — `rep := raftht.New(...)` + `rpc.Register(rep)`
-- [ ] **49.6b** `main.go`: add `case "raftht":` — create raftht.Client, wrap in HybridBufferClient with weakRatio/weakWrites, run HybridLoopWithOptions. Set `c.Fast = false`.
-- [ ] **49.6c** `go build -o swiftpaxos .` — compiles
+- [x] **49.6a** `run.go`: add `case "raftht":` — `rep := raftht.New(...)` + `rpc.Register(rep)`
+- [x] **49.6b** `main.go`: add `case "raftht":` — create raftht.Client, wrap in HybridBufferClient with weakRatio/weakWrites, run HybridLoopWithOptions. Set `c.Fast = false`.
+- [x] **49.6c** `go build -o swiftpaxos .` — compiles
 
 ---
 
 #### Phase 49.7: Tests (~150 LOC)
 
-- [ ] **49.7a** Serialization round-trip tests for MWeakPropose, MWeakReply, MWeakRead, MWeakReadReply
-- [ ] **49.7b** Unit test: `handleWeakPropose` appends to log, sends reply with correct slot
-- [ ] **49.7c** Unit test: `handleWeakRead` returns committed value + version from keyVersions
-- [ ] **49.7d** Unit test: `keyVersions` updated correctly on PUT in executeCommands
-- [ ] **49.7e** Unit test: client cache merge logic (cache wins vs replica wins)
-- [ ] **49.7f** `go test ./raft-ht/ -v` — all pass
-- [ ] **49.7g** `go test ./...` — no regressions
+- [x] **49.7a** Serialization round-trip tests for MWeakPropose, MWeakReply, MWeakRead, MWeakReadReply
+- [x] **49.7b** Unit test: `handleWeakPropose` appends to log, sends reply with correct slot
+- [x] **49.7c** Unit test: `handleWeakRead` returns committed value + version from keyVersions
+- [x] **49.7d** Unit test: `keyVersions` updated correctly on PUT in executeCommands
+- [x] **49.7e** Unit test: client cache merge logic (cache wins vs replica wins)
+- [x] **49.7f** `go test ./raft-ht/ -v` — all 28 tests pass
+- [x] **49.7g** `go test ./...` — no regressions
 
 ---
 
