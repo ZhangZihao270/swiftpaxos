@@ -3225,6 +3225,60 @@ This is equivalent to `SendProposal` with `Fast=true`, but each write is protect
 
 ---
 
+### Phase 48: Port CURP-HO Optimizations to CURP-HT & Re-evaluate [HIGH PRIORITY]
+
+**Goal**: Review all CURP-HO optimizations from Phases 43-47, apply the ones applicable to CURP-HT, re-run benchmarks under the same environment, and produce a comparative evaluation.
+
+**Background**: CURP-HO received several rounds of optimization (Phases 43-47) that improved throughput and latency significantly. CURP-HT shares much of the same architecture but has not received equivalent attention. Current CURP-HT baseline (2026-02-19, pre-Phase 43) shows:
+- W-P99 ≈ 104ms at all thread counts (expected: weak writes use 2-RTT synchronous replication by design)
+- S-Med ≈ 51ms (1-RTT fast path worked in that baseline)
+- Peak throughput: 70,388 ops/sec at 384 total threads
+
+**Optimization Applicability Assessment**:
+
+| # | CURP-HO Optimization | Applicable? | Rationale |
+|---|---|---|---|
+| 1 | **Phase 43.2a/44.5c: Async remote send queues** (`remoteSendQueues[]` + `remoteSender`) | ❌ No | CURP-HT weak writes only go to leader (no all-replica broadcast). No remote send blocking. |
+| 2 | **Phase 43.2c: Split `handleMsgs`** (separate goroutines for strong vs weak replies) | ⚠️ Investigate | CURP-HT `handleMsgs` processes MReply, MSyncReply, MWeakReply, MWeakReadReply in one goroutine. If strong reply processing blocks weak reply handling, splitting could help W-P99. |
+| 3 | **Phase 43.3: Skip non-bound replica replies** (`BoundReplica` field) | ❌ No | CURP-HT weak ops only go to leader; no non-bound replicas involved. |
+| 4 | **Phase 44.3: Per-replica writer mutexes** (`writerMu[]` + `sendMsgSafe`) | ⚠️ Audit | CURP-HT client currently has no `writerMu`. If any concurrent goroutine writes to `c.writers[]` (timer retries, handleMsgs goroutine), a race could exist. |
+| 5 | **Phase 46: `Fast=false`** | ✅ Already applied | CURP-HT set to `Fast=false` in Phase 46.2a. But the 2026-02-19 baseline was pre-Phase 46 — it ran with `Fast=true`, which is why S-Med was 51ms. Current S-Med is likely ~100ms (2-RTT). |
+| 6 | **Phase 47: `sendProposeSafe` per-replica mutex for fast path** | ⚠️ Investigate | CURP-HT currently `Fast=false` (2-RTT ~100ms strong). If we restore `Fast=true` with `sendProposeSafe`, strong ops could return to 1-RTT ~51ms. Need to verify CURP-HT protocol supports fast path (RecordAck quorum). |
+| 7 | **W-P99 ~104ms tail** (CURP-HT-specific) | ❌ By design | Not a bug. CURP-HT weak writes use 2-RTT synchronous replication (Accept-Commit), so W-P99 ≈ 2 × 50ms RTT ≈ 100ms is expected. |
+
+**Plan**:
+
+#### Phase 48.1: Audit & Root Cause Analysis (no code changes)
+
+- [ ] **48.1a** Audit CURP-HT client (`curp-ht/client.go`) for concurrent writer access — check if `handleMsgs`, timer goroutines, or other goroutines write to `c.writers[]` without mutex
+- [ ] **48.1b** Trace CURP-HT weak write path end-to-end in replica code (`curp-ht/curp-ht.go`): `handleWeakPropose` → `asyncReplicateWeak` → reply. Confirm W-P99 ~104ms matches 2-RTT design (Accept-Commit). Identify if weak reads also incur 2-RTT or can be optimized.
+- [ ] **48.1c** Clarify CURP-HT strong path: `Fast=false` now means 2-RTT (~100ms). Confirm the 2026-02-19 baseline ran with `Fast=true` (1-RTT ~51ms). Determine if restoring `Fast=true` is safe for CURP-HT.
+- [ ] **48.1d** Run CURP-HT baseline benchmark (same environment as Phase 47: 3 replicas, 25ms delay, 50% weak ratio, sweep 2/4/8/16/32/64/96 threads) to establish current performance
+
+#### Phase 48.2: Apply Applicable Optimizations
+
+- [ ] **48.2a** If writer race found (48.1a): add `writerMu[]` per-replica mutexes + `sendMsgSafe` to CURP-HT client (port from CURP-HO Phase 44.3)
+- [ ] **48.2b** If `handleMsgs` is bottleneck: split into separate goroutines for strong vs weak replies (port from CURP-HO Phase 43.2c)
+- [ ] **48.2c** If weak reads can bypass 2-RTT (local read from nearest replica): optimize weak read path
+- [ ] **48.2d** If CURP-HT protocol supports fast path: restore `Fast=true` with `sendProposeSafe` per-replica mutex protection (port from CURP-HO Phase 47)
+- [ ] **48.2e** `go test ./curp-ht/ -v` — all tests pass
+- [ ] **48.2f** `go build -o swiftpaxos .` — compiles
+
+#### Phase 48.3: Re-evaluate & Compare
+
+- [ ] **48.3a** Run CURP-HT benchmark sweep (same environment: 2, 4, 8, 16, 32, 64, 96 threads)
+- [ ] **48.3b** Record results in `evaluation/phase48-curpht-results.md`
+- [ ] **48.3c** Produce comparison table: CURP-HT baseline (2026-02-19) vs CURP-HT Phase 48 vs CURP-HO Phase 47
+- [ ] **48.3d** Output final summary to `results/curp-ht-phase48-YYYY-MM-DD.md`
+
+**Success Criteria**:
+1. S-Med ≤ 51ms (1-RTT if fast path restored) or documented reason if 2-RTT
+2. Throughput ≥ 2026-02-19 baseline at all thread counts
+3. Zero "unknown client message" errors
+4. W-P99 ≈ 100ms for weak writes is expected (2-RTT by design); weak reads may improve if local-read optimization is applicable
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
