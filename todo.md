@@ -3279,6 +3279,175 @@ This is equivalent to `SendProposal` with `Fast=true`, but each write is protect
 
 ---
 
+### Phase 49: Implement Raft-HT (Hybrid Consistency + Transparency on Raft) [HIGH PRIORITY]
+
+**Goal**: Implement Raft-HT by extending vanilla Raft with weak writes (early leader reply) and weak reads (local at nearest replica). Strong operations remain completely unchanged (Transparency). Protocol spec: `docs/Raft-HT.md`.
+
+**Key design**: Raft's sequential log implicitly satisfies C1-C3 without modifying the strong path. Weak writes get a log slot and reply immediately (1 WAN RTT). Weak reads go to nearest replica (1 LAN RTT). The strong path is zero lines of change.
+
+**Architecture**: New package `raft-ht/` (package `raftht`), copying vanilla `raft/` as base and adding weak ops. Reuse patterns from `curp-ht/` for client-side cache, weak read routing, and HybridClient interface.
+
+**Files to create/modify**:
+- `raft-ht/raft-ht.go` — Replica (copy from `raft/raft.go`, add weak handlers)
+- `raft-ht/defs.go` — Messages (copy from `raft/defs.go`, add weak message types)
+- `raft-ht/client.go` — Client (new, modeled on `curp-ht/client.go`)
+- `raft-ht/raft-ht_test.go` — Tests
+- `run.go` — Add "raftht" case for replica init
+- `main.go` — Add "raftht" case for client init
+
+**Latency expectations** (with 25ms one-way / 50ms RTT):
+- Strong read/write: 2 RTT = ~100ms (unchanged Raft: leader commit then reply)
+- Weak write: ~50ms (leader assigns slot, replies immediately, replicates in background)
+- Weak read: ~0ms LAN (nearest replica reads committed state)
+
+---
+
+#### Phase 49.1: Create Package & Copy Vanilla Raft (~0 new LOC)
+
+- [ ] **49.1a** Create directory `raft-ht/`
+- [ ] **49.1b** Copy `raft/raft.go` → `raft-ht/raft-ht.go`, change `package raft` → `package raftht`
+- [ ] **49.1c** Copy `raft/defs.go` → `raft-ht/defs.go`, change package name
+- [ ] **49.1d** Copy `raft/client.go` → `raft-ht/client.go`, change package name
+- [ ] **49.1e** Update imports: `raft-ht` references itself (not `raft/`)
+- [ ] **49.1f** Wire in `run.go`: add `case "raftht":` using same pattern as `case "raft":`
+- [ ] **49.1g** Wire in `main.go`: add `case "raftht":` using same pattern as `case "raft":` but with `SupportsWeak() = false` initially
+- [ ] **49.1h** `go build -o swiftpaxos .` — compiles
+- [ ] **49.1i** Run basic test: verify raftht works identically to raft with strong-only workload
+
+---
+
+#### Phase 49.2: Add Weak Message Types to defs.go (~150 LOC)
+
+New message types (modeled on `curp-ht/defs.go`):
+
+**MWeakPropose** (client → leader): `CommandId int32, ClientId int32, Command state.Command`
+- No CausalDep needed: Raft's sequential log provides implicit ordering (C1-C3). Weak write gets a slot in the same log — all ordering is via log position.
+
+**MWeakReply** (leader → client): `LeaderId int32, Term int32, CmdId CommandId, Slot int32`
+- Reply is immediate (before replication). Slot = log index for cache versioning.
+
+**MWeakRead** (client → nearest replica): `CommandId int32, ClientId int32, Key state.Key`
+
+**MWeakReadReply** (any replica → client): `Replica int32, Term int32, CmdId CommandId, Rep []byte, Version int32`
+
+Tasks:
+- [ ] **49.2a** Add MWeakPropose: struct, New(), BinarySize(), Marshal(), Unmarshal(), cache pool
+- [ ] **49.2b** Add MWeakReply: struct, New(), BinarySize(), Marshal(), Unmarshal(), cache pool
+- [ ] **49.2c** Add MWeakRead: struct, New(), BinarySize(), Marshal(), Unmarshal(), cache pool
+- [ ] **49.2d** Add MWeakReadReply: struct, New(), BinarySize(), Marshal(), Unmarshal(), cache pool
+- [ ] **49.2e** Add channels + RPCs to CommunicationSupply: weakProposeChan, weakReplyChan, weakReadChan, weakReadReplyChan
+- [ ] **49.2f** Register new RPCs in `initCs()`
+- [ ] **49.2g** Add serialization round-trip tests for all 4 new message types
+
+---
+
+#### Phase 49.3: Replica-Side — Weak Write Path (~80 LOC)
+
+Leader receives MWeakPropose → assigns log slot → replies immediately → replicates in background via normal AppendEntries.
+
+**handleWeakPropose()** logic:
+1. Reject if not leader (silently drop)
+2. Create LogEntry with command + term + cmdId, append to `r.log`
+3. Send MWeakReply immediately with Slot = log index (don't wait for commit)
+4. Call `r.broadcastAppendEntries()` to trigger replication
+
+**Why simpler than CURP-HT**: No `asyncReplicateWeak` goroutine needed. The weak write sits in the log and gets replicated by Raft's existing AppendEntries mechanism. No Accept/Commit round — Raft's commit rule handles it automatically when majority of followers receive the entry.
+
+**keyVersions tracking**: In `executeCommands()`, after `val := entry.Command.Execute(r.State)`, if PUT, store `r.keyVersions[key] = logIndex`. This only updates on committed+applied entries.
+
+Tasks:
+- [ ] **49.3a** Add `keyVersions map[int64]int32` to Replica struct, init in `New()`
+- [ ] **49.3b** Implement `handleWeakPropose()` — append to log, reply immediately, trigger AppendEntries
+- [ ] **49.3c** Add `weakProposeChan` case to `run()` select loop
+- [ ] **49.3d** Update `executeCommands()` to track `keyVersions` on PUT
+- [ ] **49.3e** `go build -o swiftpaxos .` — compiles
+
+---
+
+#### Phase 49.4: Replica-Side — Weak Read Path (~30 LOC)
+
+Any replica (including followers) can serve weak reads from committed state.
+
+**handleWeakRead()** logic:
+1. Execute GET on state machine (reads committed state up to `lastApplied`)
+2. Look up `keyVersions[key]` for version
+3. Send MWeakReadReply with value + version
+
+**Important**: `keyVersions` is updated in `executeCommands()` which only applies committed entries. So weak reads always return committed state.
+
+Tasks:
+- [ ] **49.4a** Implement `handleWeakRead()` — read committed state + version, reply
+- [ ] **49.4b** Add `weakReadChan` case to `run()` select loop (ALL replicas, not just leader)
+- [ ] **49.4c** `go build -o swiftpaxos .` — compiles
+
+---
+
+#### Phase 49.5: Client-Side — Full Weak Consistency Client (~200 LOC)
+
+Rewrite `raft-ht/client.go` modeled on `curp-ht/client.go`. Key additions over vanilla Raft client:
+
+1. **RPC channels** for weak messages (weakReplyChan, weakReadReplyChan)
+2. **handleMsgs()** goroutine dispatching weak replies
+3. **Local cache** `map[int64]cacheEntry` with max-version merge rule
+4. **SendWeakWrite()** → MWeakPropose to leader
+5. **SendWeakRead()** → MWeakRead to ClosestId (nearest replica)
+6. **handleWeakReply()** → update cache with (key, value, slot)
+7. **handleWeakReadReply()** → merge replica response with local cache
+
+Strong ops delegate to base BufferClient (unchanged Raft path).
+
+Tasks:
+- [ ] **49.5a** Define Client struct with cache, pending maps, mutex
+- [ ] **49.5b** Implement `NewClient()` — init maps, register client-side RPCs, start `handleMsgs()`
+- [ ] **49.5c** Implement `handleMsgs()` — dispatch weakReplyChan and weakReadReplyChan
+- [ ] **49.5d** Implement `SendWeakWrite()` — MWeakPropose to leader
+- [ ] **49.5e** Implement `SendWeakRead()` — MWeakRead to ClosestId
+- [ ] **49.5f** Implement `handleWeakReply()` — cache update on weak write ack
+- [ ] **49.5g** Implement `handleWeakReadReply()` — max-version merge with local cache
+- [ ] **49.5h** Implement `SendStrongWrite/Read()` — delegate to base + track key for cache
+- [ ] **49.5i** Implement `SupportsWeak() → true`, `MarkAllSent()`
+
+---
+
+#### Phase 49.6: Wire into main.go and run.go (~20 LOC)
+
+- [ ] **49.6a** `run.go`: add `case "raftht":` — `rep := raftht.New(...)` + `rpc.Register(rep)`
+- [ ] **49.6b** `main.go`: add `case "raftht":` — create raftht.Client, wrap in HybridBufferClient with weakRatio/weakWrites, run HybridLoopWithOptions. Set `c.Fast = false`.
+- [ ] **49.6c** `go build -o swiftpaxos .` — compiles
+
+---
+
+#### Phase 49.7: Tests (~150 LOC)
+
+- [ ] **49.7a** Serialization round-trip tests for MWeakPropose, MWeakReply, MWeakRead, MWeakReadReply
+- [ ] **49.7b** Unit test: `handleWeakPropose` appends to log, sends reply with correct slot
+- [ ] **49.7c** Unit test: `handleWeakRead` returns committed value + version from keyVersions
+- [ ] **49.7d** Unit test: `keyVersions` updated correctly on PUT in executeCommands
+- [ ] **49.7e** Unit test: client cache merge logic (cache wins vs replica wins)
+- [ ] **49.7f** `go test ./raft-ht/ -v` — all pass
+- [ ] **49.7g** `go test ./...` — no regressions
+
+---
+
+#### Phase 49.8: Benchmark & Evaluate
+
+- [ ] **49.8a** Run Raft-HT benchmark sweep (2, 4, 8, 16, 32, 64, 96 threads per client)
+- [ ] **49.8b** Run vanilla Raft benchmark sweep (same config) as baseline
+- [ ] **49.8c** Record results in `evaluation/phase49-raftht-results.md`
+- [ ] **49.8d** Produce comparison: Raft vs Raft-HT vs CURP-HO vs CURP-HT
+- [ ] **49.8e** Output to `orca/benchmark-raftht-YYYY-MM-DD.md`
+
+**Success Criteria**:
+1. Strong ops identical to vanilla Raft (S-Med ~100ms, 2-RTT) — Transparency verified
+2. Weak writes: WW-Med ~50ms (1 WAN RTT, leader early reply)
+3. Weak reads: WR-Med sub-ms (local at nearest replica)
+4. Throughput ≥ vanilla Raft (weak ops are cheaper)
+5. Zero errors, all tests pass
+
+**Estimated new code**: ~460 LOC (defs ~150, replica ~110, client ~200) + ~150 LOC tests
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
