@@ -3635,9 +3635,9 @@ Specifically:
 
 Scope: ~60 LOC modified in `curp/batcher.go`, ~3 LOC in `curp/curp.go`.
 
-- [ ] **52.3a** Add `batchDelayNs int64` + `SetBatchDelay()` + batch-wait logic to `curp/batcher.go`
-- [ ] **52.3b** Wire `conf.BatchDelayUs` → `r.batcher.SetBatchDelay()` in `curp/curp.go` New()
-- [ ] **52.3c** Run `go test ./curp/ -v` — all tests pass
+- [x] **52.3a** Add `batchDelayNs int64` + `SetBatchDelay()` + batch-wait logic to `curp/batcher.go` [26:03:03]
+- [x] **52.3b** Wire `conf.BatchDelayUs` → `r.batcher.SetBatchDelay()` in `curp/curp.go` New() [26:03:03]
+- [x] **52.3c** Run `go test ./curp/ -v` — all tests pass [26:03:03]
 
 #### 52.4: Wire CURP into shared benchmark pipeline (~40 LOC in main.go)
 

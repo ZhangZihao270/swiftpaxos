@@ -126,6 +126,11 @@ func New(alias string, rid int, addrs []string, exec bool, pl, f int,
 	r.sender = replica.NewSender(r.Replica)
 	r.batcher = NewBatcher(r, 8)
 
+	// Configure batch delay if specified (Phase 52.3)
+	if conf.BatchDelayUs > 0 {
+		r.batcher.SetBatchDelay(int64(conf.BatchDelayUs) * 1000)
+	}
+
 	_, leaderIds, err := replica.NewQuorumsFromFile(conf.Quorum, r.Replica)
 	if err == nil && len(leaderIds) != 0 {
 		r.ballot = leaderIds[0]
