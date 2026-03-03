@@ -3253,7 +3253,7 @@ This is equivalent to `SendProposal` with `Fast=true`, but each write is protect
 - [x] **48.1a** Audit CURP-HT client (`curp-ht/client.go`) for concurrent writer access — **RESULT: No race.** Only the HybridLoop goroutine writes to `c.writers[]` (via `SendProposal`/`SendMsg`). The `handleMsgs` goroutine only reads from channels and modifies in-memory maps. Timer only sends signals. Each thread creates its own client with its own TCP connections. No `writerMu` needed (unlike CURP-HO which has `remoteSender` goroutines writing concurrently).
 - [x] **48.1b** Trace CURP-HT weak write/read path — **RESULT: Weak writes = 2-RTT (~100ms) by design.** Path: client→leader (1 hop) → leader sends MAccept to replicas + self (1 RTT) → waits for majority AcceptAcks (commitCh) → sends MWeakReply to client (1 hop) = 2 RTT total. **Weak reads = local (0 RTT network).** Path: client→nearest replica → `handleWeakRead` reads local state machine + `keyVersions` → sends MWeakReadReply immediately. The W-P99 ~104ms in baseline comes from weak writes pulling up the combined metric. WW-P99 ≈ 100ms (expected), WR-P99 should be sub-ms.
 - [x] **48.1c** Clarify CURP-HT strong path — **RESULT: `Fast=true` is safe to restore.** Pre-Phase 46, `curpht` case was empty in main.go switch, so `c.Fast` came from config (`fast: true`). Phase 46 (`9c1e232`) hardcoded `c.Fast = false` as precaution against writer race. But 48.1a confirmed CURP-HT has NO writer race (no `remoteSender` goroutines). Protocol supports fast path: non-leader replicas send `MRecordAck` (line 261-267), client collects three-quarters quorum via `handleRecordAck`. **Fix: change `c.Fast = false` to remove override (let config `fast: true` apply) — 1-line change in main.go.**
-- [ ] **48.1d** Run CURP-HT baseline benchmark (same environment as Phase 47: 3 replicas, 25ms delay, 50% weak ratio, sweep 2/4/8/16/32/64/96 threads) to establish current performance
+- [x] **48.1d** Run CURP-HT benchmark (same environment as Phase 47). Results: S-Med 51ms at 2-16t (1-RTT restored), throughput 2.9K-50K, zero errors. 96t run standalone (skipped in sweep due to load).
 
 #### Phase 48.2: Apply Applicable Optimizations
 
@@ -3266,10 +3266,10 @@ This is equivalent to `SendProposal` with `Fast=true`, but each write is protect
 
 #### Phase 48.3: Re-evaluate & Compare
 
-- [ ] **48.3a** Run CURP-HT benchmark sweep (same environment: 2, 4, 8, 16, 32, 64, 96 threads)
-- [ ] **48.3b** Record results in `evaluation/phase48-curpht-results.md`
-- [ ] **48.3c** Produce comparison table: CURP-HT baseline (2026-02-19) vs CURP-HT Phase 48 vs CURP-HO Phase 47
-- [ ] **48.3d** Output final summary to `results/curp-ht-phase48-YYYY-MM-DD.md`
+- [x] **48.3a** Run CURP-HT benchmark sweep — Completed 7 runs (2/4/8/16/32/64 in sweep + 96t standalone)
+- [x] **48.3b** Record results in `evaluation/phase48-curpht-results.md`
+- [x] **48.3c** Comparison table included: HT baseline vs HT Phase 48 vs HO Phase 47. S-Med matches at 2-16t (~51ms). WW-P99 ~104ms (2-RTT by design). WR-P99 < 2ms (local).
+- [x] **48.3d** Output final summary to `results/curp-ht-phase48-2026-03-02.md`
 
 **Success Criteria**:
 1. S-Med ≤ 51ms (1-RTT if fast path restored) or documented reason if 2-RTT
