@@ -3621,7 +3621,7 @@ Change `var MaxDescRoutines = 100` → `var MaxDescRoutines = 10000` in `curp/de
 
 Rationale: At `MaxDescRoutines=100`, any slot beyond the first 100 runs sequentially (`desc.seq=true`). At 288 concurrent threads with 15 pendings each, this serializes most work. CURP-HT uses 10000. The `run.go` override (`if c.MaxDescRoutines != 0`) continues to work.
 
-- [ ] **52.2a** Change default `MaxDescRoutines` to `10000` in `curp/defs.go` (~1 line)
+- [x] **52.2a** Change default `MaxDescRoutines` to `10000` in `curp/defs.go` (~1 line) [26:03:03]
 
 #### 52.3: Add batch delay to CURP Batcher (~60 LOC)
 

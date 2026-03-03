@@ -33,7 +33,7 @@ const (
 	ORDERED      = uint8(2)
 )
 
-var MaxDescRoutines = 100
+var MaxDescRoutines = 10000
 
 type CommandId struct {
 	ClientId int32
