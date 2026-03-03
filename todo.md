@@ -3654,8 +3654,8 @@ Scope: ~40 LOC in `main.go` + ~30 LOC interface stubs in `curp/client.go` (or `B
 
 - [x] **52.4a** Add `HybridClient` interface stubs to `curp.Client` (SendWeakRead, SendWeakWrite, etc.) OR add LoopWithMetrics to BufferClient [26:03:03]
 - [x] **52.4b** Update CURP case in `main.go` to collect and return metrics [26:03:03]
-- [ ] **52.4c** Create `multi-client-curp.conf`: copy `multi-client.conf`, set `protocol: curp`, `weakRatio: 0`, `batchDelayUs: 150`, keep all other params identical
-- [ ] **52.4d** Manual smoke test: run 1-thread CURP benchmark with new conf, verify output format matches other protocols
+- [x] **52.4c** Create `multi-client-curp.conf`: copy `multi-client.conf`, set `protocol: curp`, `weakRatio: 0`, `batchDelayUs: 150`, keep all other params identical [26:03:03]
+- [ ] **52.4d** Manual smoke test: run 1-thread CURP benchmark with new conf, verify output format matches other protocols — DEFERRED (requires cluster access)
 
 #### 52.5: Create sweep script and run benchmark
 
