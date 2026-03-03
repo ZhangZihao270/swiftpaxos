@@ -3540,13 +3540,13 @@ With 50.1 removing weakReadChan from the event loop:
 
 #### 50.4: Benchmark and validate
 
-- [ ] **50.4a** Run Raft-HT benchmark at 6-288 threads
-- [ ] **50.4b** Run vanilla Raft baseline at 6-288 threads (verify unchanged)
-- [ ] **50.4c** Verify peak Raft-HT throughput > 30K ops/sec
-- [ ] **50.4d** Verify Raft-HT throughput >= Raft baseline at all thread counts
-- [ ] **50.4e** Verify WR-P99 stays sub-ms at low concurrency, reasonable at high
-- [ ] **50.4f** Record results in `evaluation/phase50-results.md`
-- [ ] **50.4g** Update `orca/benchmark-2026-03-02.md` with new results
+- [x] **50.4a** Run Raft-HT benchmark at 6-288 threads [26:03:02] — Peak 36,999 ops/sec at 288 threads
+- [x] **50.4b** Run vanilla Raft baseline at 6-288 threads (verify unchanged) [26:03:02] — Consistent with Phase 49 (1,361-17,781)
+- [x] **50.4c** Verify peak Raft-HT throughput > 30K ops/sec [26:03:02] — PASS: 36,999 at 288 threads, 32,501 at 192 threads
+- [x] **50.4d** Verify Raft-HT throughput >= Raft baseline at all thread counts [26:03:02] — PASS: 1.36-1.71x faster at all points
+- [x] **50.4e** Verify WR-P99 stays sub-ms at low concurrency, reasonable at high [26:03:02] — PASS: 0.48ms at 6 threads, 48.58ms at 96 (was 134.83ms)
+- [x] **50.4f** Record results in `evaluation/phase50-raftht-results.md` [26:03:02]
+- [x] **50.4g** Update `orca/benchmark-2026-03-02.md` with new results [26:03:02]
 
 **Success Criteria**:
 1. Peak Raft-HT throughput > 30K ops/sec
