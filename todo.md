@@ -3337,7 +3337,7 @@ Tasks:
 - [x] **49.2d** Add MWeakReadReply: struct, New(), BinarySize(), Marshal(), Unmarshal(), cache pool
 - [x] **49.2e** Add channels + RPCs to CommunicationSupply: weakProposeChan, weakReplyChan, weakReadChan, weakReadReplyChan
 - [x] **49.2f** Register new RPCs in `initCs()`
-- [ ] **49.2g** Add serialization round-trip tests for all 4 new message types
+- [x] **49.2g** Add serialization round-trip tests for all 4 new message types (done in 49.7a)
 
 ---
 
