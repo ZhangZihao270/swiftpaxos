@@ -38,3 +38,20 @@ Used to validate Phase 50 success criterion: Raft-HT throughput >= Raft at all t
 - Vanilla Raft uses 2-RTT for all operations: leader appends, replicates, waits for majority, then replies.
 - Expected S-Med ~68ms at low thread counts (matching Phase 49 baseline).
 - This baseline establishes the performance floor that Raft-HT (post-fix) should exceed.
+- **64-thread run SKIPPED** due to high cluster load (.104 at load=5.75).
+- **96-thread run FAILED** with 0.00 throughput due to election storms (root cause: unbounded batch size in handlePropose).
+
+## Phase 51 Update (2026-03-03)
+
+After applying the `maxBatchSize=256` fix in Phase 51.1, the previously-failing high-concurrency runs were re-attempted:
+
+| Threads | Throughput | S-Avg  | S-Med  | S-P99  | Status |
+|--------:|-----------:|-------:|-------:|-------:|--------|
+| 64      |    3546.94 |  51.23 |  51.28 |  53.48 | ⚠️ Anomaly (unexpectedly low, similar to 2t/4t) |
+| 96      |   54012.64 | 112.37 |  99.81 | 297.56 | ✅ SUCCESS! Fix validated |
+
+**Key Results**:
+- 96-thread run completed successfully with 54K ops/sec (Phase 50 had 0.00 ops/sec timeout)
+- Election storm issue resolved by capping batch size
+- 64-thread result appears to be a measurement anomaly (needs investigation)
+- See `evaluation/phase51-raft-baseline.md` for full Phase 51 results

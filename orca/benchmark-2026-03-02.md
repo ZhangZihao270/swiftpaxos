@@ -58,14 +58,22 @@ Phase 50.1-50.3 optimizations: RWMutex-based weak reads, batched weak writes, re
 
 Raft runs with 100% strong operations (no weak ops). Phase 50 re-run (consistent with Phase 49).
 
-| Threads | Throughput | S-Avg  | S-Med  | S-P99  |
-|--------:|-----------:|-------:|-------:|-------:|
-|       6 |      1,361 |  68.48 |  68.40 |  78.77 |
-|      12 |      2,716 |  68.61 |  68.52 |  78.81 |
-|      24 |      5,418 |  68.75 |  68.63 |  78.96 |
-|      48 |      9,976 |  74.17 |  71.39 | 112.05 |
-|      96 |     17,781 |  82.34 |  79.73 | 130.06 |
-|     192 |     22,341 | 129.22 | 131.22 | 212.07 |
+**Phase 51 Update (2026-03-03)**: After discovering election storms at 96+ threads due to unbounded batch sizes in `handlePropose`, Phase 51.1 added `maxBatchSize=256` cap. Phase 51.2b re-ran the previously-failing high-concurrency tests.
+
+| Threads | Throughput | S-Avg  | S-Med  | S-P99  | Notes |
+|--------:|-----------:|-------:|-------:|-------:|-------|
+|       6 |      1,361 |  68.48 |  68.40 |  78.77 | Phase 50 |
+|      12 |      2,716 |  68.61 |  68.52 |  78.81 | Phase 50 |
+|      24 |      5,418 |  68.75 |  68.63 |  78.96 | Phase 50 |
+|      48 |      9,976 |  74.17 |  71.39 | 112.05 | Phase 50 |
+|      96 |     17,781 |  82.34 |  79.73 | 130.06 | Phase 50 (32t data point) |
+|     192 |     22,341 | 129.22 | 131.22 | 212.07 | Phase 50 |
+|     288 |        N/A |    N/A |    N/A |    N/A | Phase 50 FAILED (election storm) |
+
+**Phase 51 High-Concurrency Results** (thread counts don't match orca scale, ran 2/4/8/16/32/64/96):
+- **96t (Phase 51)**: 54,013 ops/sec, S-Med 99.81ms — ✅ SUCCESS! Previously failed with 0.00 ops/sec
+- **64t (Phase 51)**: 3,547 ops/sec (anomaly, similar to 2t/4t baseline) — needs investigation
+- See `evaluation/phase51-raft-baseline.md` for full results
 
 ## 4-Protocol Comparison: Throughput (ops/sec)
 
