@@ -3470,6 +3470,94 @@ Code review discovered 4 bugs that would prevent Raft-HT from working correctly 
 - [x] **49.9d** Route weak reads through `executeCommands` goroutine via `weakReadCh` channel — `handleWeakRead` was reading `r.State` and `r.keyVersions` from the event loop while `executeCommands` writes them from a separate goroutine (concurrent map access) [26:03:02, 10:00]
 - [x] **49.9e** Add tests for `GetClientId()`, `processWeakRead`, update `newTestReplica` — 31 tests pass [26:03:02, 10:00]
 
+### Phase 50: Fix Raft-HT High-Concurrency Throughput (Target: Peak > 30K ops/sec)
+
+**Problem**: Raft-HT throughput drops below vanilla Raft baseline at 32+ threads:
+
+| Threads | Raft    | Raft-HT | Delta |
+|--------:|--------:|--------:|------:|
+|      48 |  9,950  | 14,523  | +46%  |
+|      96 | 17,648  | 14,699  | -17%  |
+|     192 | 22,341  |  7,584  | -66%  |
+
+This should never happen — weak ops are cheaper, so Raft-HT throughput should always be >= Raft.
+
+**Root Cause Analysis**:
+
+1. **Weak writes each trigger `broadcastAppendEntries`** (line 829): Every single weak write calls `broadcastAppendEntries()`, which builds and sends AppendEntries to all followers. At 192 threads with 50% weak ratio, the leader sends ~2x as many AppendEntries as vanilla Raft. Strong proposals batch (drain `ProposeChan`), but weak proposals process one-at-a-time from the select loop.
+
+2. **Weak reads routed through 2-stage channel to `executeCommands`** (lines 272→837→743): Event loop receives MWeakRead on `cs.weakReadChan`, forwards to `weakReadCh`, `executeCommands` goroutine polls and processes. Two channel hops + single-consumer bottleneck. When `executeCommands` is busy executing a batch of commits, weak reads queue and starve — WR-P99 explodes from 0.68ms to 1029ms.
+
+3. **Event loop overloaded with 10 select cases**: Vanilla Raft has 8 cases, Raft-HT adds `weakProposeChan` + `weakReadChan`. Go select uses fair random ordering, so each case gets ~10% scheduling priority. Weak reads and strong ops compete for event loop attention.
+
+4. **No batching for weak writes**: Strong proposals batch via `len(r.ProposeChan) + 1` drain (line 345-350). Weak writes process individually — each one appends to log, broadcasts, pays full overhead.
+
+**Plan**:
+
+#### 50.1: Decouple weak reads from executeCommands (RWMutex approach)
+
+The core problem: weak reads go through `executeCommands` goroutine because it "owns" `r.State` and `r.keyVersions`. Fix: protect with `sync.RWMutex`.
+
+- Add `stateMu sync.RWMutex` to Replica struct
+- `executeCommands`: acquire `stateMu.Lock()` around the execution batch (`r.lastApplied` to `r.commitIndex`), release after the batch
+- Weak reads: acquire `stateMu.RLock()` — multiple concurrent readers OK
+- Remove `weakReadCh`, `weakReadReq`, `drainWeakReads`
+- Handle weak reads directly in `handleWeakRead` (no channel routing)
+- Remove weak read case from `executeCommands` select (only `<-r.commitNotify`)
+- Remove `weakReadChan` case from event loop (handle weak reads in dedicated goroutine or RPC handler directly)
+
+Expected impact: Weak reads no longer blocked by command execution. WR-P99 should stay sub-ms at all concurrency levels.
+
+- [ ] **50.1a** Add `stateMu sync.RWMutex` to Replica, wrap `executeCommands` execution loop with `stateMu.Lock()`
+- [ ] **50.1b** Rewrite `handleWeakRead` to process directly with `stateMu.RLock()` (no channel routing)
+- [ ] **50.1c** Remove `weakReadCh`, `weakReadReq`, `drainWeakReads`, weak read case from `executeCommands` select
+- [ ] **50.1d** Remove `weakReadChan` from event loop select — register weak read RPC handler that processes directly in RPC goroutine (with `stateMu.RLock()`)
+- [ ] **50.1e** Update tests: remove weakReadCh-based tests, add RWMutex-based processWeakRead tests
+
+#### 50.2: Batch weak write replication
+
+Currently each `handleWeakPropose` calls `broadcastAppendEntries()` individually. Fix: batch weak writes the same way strong proposals batch.
+
+- Add `weakProposeBatch []*MWeakPropose` buffer to Replica
+- In the event loop weak propose case: append to batch, reply immediately, but DON'T broadcast
+- Broadcast in two places: (a) when strong proposal batch triggers `broadcastAppendEntries`, and (b) on `batchClockChan` tick
+- This way, weak writes piggyback on the next strong batch or batch timer tick (150μs max delay)
+- Alternatively: drain `weakProposeChan` like strong proposals drain `ProposeChan`, batch all pending weak writes, then broadcast once
+
+- [ ] **50.2a** Add weak write batching: drain `weakProposeChan` on each weak propose case, append all to log, reply immediately to each, broadcast once
+- [ ] **50.2b** Verify that `broadcastAppendEntries` sends all pending entries (entries from nextIndex[i] to end of log) — this naturally batches both strong and weak entries in a single AppendEntries message
+- [ ] **50.2c** Update tests for batched weak write handling
+
+#### 50.3: Reduce event loop contention
+
+With 50.1 removing weakReadChan from the event loop:
+
+- Event loop drops from 10 cases to 9 (or 8 if we also handle weak reads outside the loop)
+- Consider: handle weak reads entirely outside event loop (in RPC handler goroutines, protected by `stateMu.RLock()`), so event loop only handles consensus messages
+
+- [ ] **50.3a** Verify event loop case count is reduced after 50.1
+- [ ] **50.3b** If weak read RPC handler runs in RPC goroutine directly, remove `weakReadChan` from `CommunicationSupply` (simplify wiring)
+
+#### 50.4: Benchmark and validate
+
+- [ ] **50.4a** Run Raft-HT benchmark at 6-288 threads
+- [ ] **50.4b** Run vanilla Raft baseline at 6-288 threads (verify unchanged)
+- [ ] **50.4c** Verify peak Raft-HT throughput > 30K ops/sec
+- [ ] **50.4d** Verify Raft-HT throughput >= Raft baseline at all thread counts
+- [ ] **50.4e** Verify WR-P99 stays sub-ms at low concurrency, reasonable at high
+- [ ] **50.4f** Record results in `evaluation/phase50-results.md`
+- [ ] **50.4g** Update `orca/benchmark-2026-03-02.md` with new results
+
+**Success Criteria**:
+1. Peak Raft-HT throughput > 30K ops/sec
+2. Raft-HT throughput >= Raft baseline at all thread counts
+3. WR-P99 < 5ms at 96 threads (currently 134ms)
+4. WW-P99 unchanged (~52ms at low load)
+5. S-Med unchanged (~85ms at low load)
+6. All tests pass, zero errors
+
+**Estimated changes**: ~100 LOC modified in `raft-ht.go`, ~30 LOC in `defs.go`, ~50 LOC tests
+
 ---
 
 ## Legend
