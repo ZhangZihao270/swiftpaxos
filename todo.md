@@ -3575,9 +3575,9 @@ With 50.1 removing weakReadChan from the event loop:
 - [x] **51.1c** Add 3 unit tests to `raft/raft_test.go`: `TestMaxBatchSizeConstant`, `TestBatchSizeCap_ExactBoundary`, `TestBatchSizeCap_ChannelDrain` [26:03:03]
 - [x] **51.1d** Full test suite passes: `go test ./... -count=1` — all packages pass [26:03:03]
 - [x] **51.2a** Create `scripts/run-phase51-raft-baseline.sh` for re-running Raft baseline with batch cap fix [26:03:03]
-- [ ] **51.2b** Run Raft baseline benchmark at 6-288 threads (collect missing 64-thread and 96-thread data) — BLOCKED: waiting for cluster availability (current loads: 1.62, 1.78, 2.02)
-- [ ] **51.2c** Update `orca/benchmark-2026-03-02.md` and `evaluation/phase50-raft-baseline.md` with new 64-thread and 96-thread results — BLOCKED: depends on 51.2b
-- [ ] **51.2d** Verify 4-protocol comparison table completeness (all Raft rows filled) — BLOCKED: depends on 51.2b
+- [ ] **51.2b** Run Raft baseline benchmark at 6-288 threads (collect missing 64-thread and 96-thread data) — IN PROGRESS: benchmark started at 07:12:23, polling for cluster availability (log: /tmp/phase51-benchmark.log)
+- [ ] **51.2c** Update `orca/benchmark-2026-03-02.md` and `evaluation/phase50-raft-baseline.md` with new 64-thread and 96-thread results — BLOCKED: depends on 51.2b completion
+- [ ] **51.2d** Verify 4-protocol comparison table completeness (all Raft rows filled) — BLOCKED: depends on 51.2b completion
 
 **Success Criteria**:
 1. Raft benchmark completes at 64 and 96 threads without timeout
