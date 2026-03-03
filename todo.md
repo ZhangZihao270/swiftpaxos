@@ -3612,8 +3612,8 @@ Change `cmap.SHARD_COUNT = 32768` to `cmap.SHARD_COUNT = 512` in `curp/curp.go`.
 
 Rationale: CURP-HT was tuned to 512 in Phase 18.6 (from 32768) and showed significant improvement. Same fix applies here.
 
-- [ ] **52.1a** Change `cmap.SHARD_COUNT = 32768` → `512` in `curp/curp.go` New() (~1 line)
-- [ ] **52.1b** Run `go test ./curp/ -v` — all tests pass
+- [x] **52.1a** Change `cmap.SHARD_COUNT = 32768` → `512` in `curp/curp.go` New() (~1 line) [26:03:03]
+- [x] **52.1b** Run `go test ./curp/ -v` — all tests pass [26:03:03]
 
 #### 52.2: Raise MaxDescRoutines (curp/)
 

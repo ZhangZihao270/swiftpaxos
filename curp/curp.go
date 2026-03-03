@@ -84,7 +84,7 @@ type commandStaticDesc struct {
 
 func New(alias string, rid int, addrs []string, exec bool, pl, f int,
 	opt bool, conf *config.Config, logger *dlog.Logger) *Replica {
-	cmap.SHARD_COUNT = 32768
+	cmap.SHARD_COUNT = 512
 
 	r := &Replica{
 		Replica: replica.New(alias, rid, f, addrs, false, exec, false, conf, logger),
