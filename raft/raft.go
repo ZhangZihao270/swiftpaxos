@@ -295,6 +295,12 @@ func (r *Replica) becomeLeader() {
 	}
 }
 
+// maxBatchSize caps the number of proposals processed per event-loop iteration.
+// Without a cap, a burst of N concurrent clients×pendings proposals are drained
+// all at once, blocking the event loop for hundreds of milliseconds and causing
+// follower election timeouts. 256 entries ≈ 50KB payload — safely under 1ms.
+const maxBatchSize = 256
+
 // --- handlePropose: Batch proposals, append to log, broadcast AppendEntries ---
 
 func (r *Replica) handlePropose(propose *defs.GPropose) {
@@ -310,8 +316,15 @@ func (r *Replica) handlePropose(propose *defs.GPropose) {
 		return
 	}
 
-	// Batch: drain all queued proposals
-	batchSize := len(r.ProposeChan) + 1
+	// Batch: drain queued proposals up to maxBatchSize.
+	// Capping the batch prevents the event loop from being blocked for too long
+	// when a burst of proposals arrives (e.g. 288 threads × 15 pendings = 4320).
+	// Remaining proposals stay in ProposeChan for the next batch-clock tick (150μs).
+	available := len(r.ProposeChan)
+	if available > maxBatchSize-1 {
+		available = maxBatchSize - 1
+	}
+	batchSize := available + 1
 	proposals := make([]*defs.GPropose, batchSize)
 	proposals[0] = propose
 	for i := 1; i < batchSize; i++ {

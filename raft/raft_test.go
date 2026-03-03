@@ -1988,6 +1988,89 @@ func TestAdvanceCommitIndex_NoNotifyWhenNoAdvance(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// Phase 51: Batch size cap tests (prevent election storms at high concurrency)
+// ============================================================================
+
+// TestMaxBatchSizeConstant verifies the constant is within a safe range:
+// large enough for throughput, small enough to not starve the event loop.
+func TestMaxBatchSizeConstant(t *testing.T) {
+	if maxBatchSize < 64 {
+		t.Errorf("maxBatchSize=%d is too small (< 64), will hurt throughput", maxBatchSize)
+	}
+	if maxBatchSize > 1024 {
+		t.Errorf("maxBatchSize=%d is too large (> 1024), event loop can still stall", maxBatchSize)
+	}
+}
+
+// computeBatchSize returns the number of proposals a single handlePropose call
+// would process given `queued` items already in ProposeChan (plus the 1 already
+// dequeued as the trigger). This matches the cap logic in handlePropose.
+func computeBatchSize(queued int) int {
+	available := queued
+	if available > maxBatchSize-1 {
+		available = maxBatchSize - 1
+	}
+	return available + 1
+}
+
+func TestBatchSizeCap_ExactBoundary(t *testing.T) {
+	cases := []struct {
+		queued int
+		want   int
+	}{
+		{0, 1},                    // only the trigger proposal, channel empty
+		{1, 2},                    // trigger + 1
+		{maxBatchSize - 2, maxBatchSize - 1}, // trigger + (cap-2) = cap-1
+		{maxBatchSize - 1, maxBatchSize},     // trigger + (cap-1) = cap exactly
+		{maxBatchSize, maxBatchSize},         // cap reached, one left behind
+		{maxBatchSize + 1, maxBatchSize},     // cap reached, two left behind
+		{4320, maxBatchSize},      // 288 threads × 15 pendings — must cap
+	}
+	for _, c := range cases {
+		got := computeBatchSize(c.queued)
+		if got != c.want {
+			t.Errorf("computeBatchSize(%d) = %d, want %d", c.queued, got, c.want)
+		}
+	}
+}
+
+// TestBatchSizeCap_ChannelDrain simulates handlePropose's channel drain:
+// fills a channel with total proposals, pops one as the trigger, then
+// verifies the cap leaves the right number remaining.
+func TestBatchSizeCap_ChannelDrain(t *testing.T) {
+	cases := []struct {
+		total    int
+		wantLeft int // items remaining in channel after one capped batch
+	}{
+		{1, 0},
+		{maxBatchSize, 0},            // exactly one batch, channel empty after
+		{maxBatchSize + 1, 1},        // one left over
+		{maxBatchSize + 100, 100},    // 100 left over
+		{maxBatchSize * 2, maxBatchSize}, // second batch still needed
+	}
+	for _, c := range cases {
+		ch := make(chan *defs.GPropose, c.total+1)
+		for i := 0; i < c.total; i++ {
+			ch <- &defs.GPropose{Propose: &defs.Propose{CommandId: int32(i)}}
+		}
+		// Simulate: event loop pops trigger, handlePropose drains more
+		<-ch // trigger
+		queued := len(ch)
+		available := queued
+		if available > maxBatchSize-1 {
+			available = maxBatchSize - 1
+		}
+		for i := 0; i < available; i++ {
+			<-ch
+		}
+		remaining := len(ch)
+		if remaining != c.wantLeft {
+			t.Errorf("total=%d: remaining=%d, want %d", c.total, remaining, c.wantLeft)
+		}
+	}
+}
+
 func TestExecuteCommands_WakesOnNotify(t *testing.T) {
 	r := newTestReplica(0, 3)
 	r.log = []LogEntry{

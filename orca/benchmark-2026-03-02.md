@@ -122,3 +122,35 @@ All latencies in milliseconds. Throughput in ops/sec.
 - **WR-P99**: Weak Read P99 latency
 - Raft baseline runs 100% strong ops (no weak consistency support)
 - Raft-HT/CURP-HO/CURP-HT run 50% weak ratio, 10% weak writes, 10% strong writes
+
+## Analysis
+
+### Raft-HT vs Raft Baseline
+
+Raft-HT achieves 1.36-1.71x throughput over vanilla Raft at all concurrency levels. The throughput advantage comes from weak operations (50% of workload) bypassing the 2-RTT strong path:
+
+- **Weak reads**: local state read with `stateMu.RLock()`, sub-ms at low concurrency
+- **Weak writes**: 1-RTT leader-only apply with early reply, ~52ms WW-P99
+
+Raft-HT S-Med (~85ms) is higher than Raft S-Med (~68ms) due to event loop contention between strong and weak paths.
+
+### Raft-HT vs CURP-HO / CURP-HT
+
+Raft-HT throughput is approximately 0.6-0.7x of CURP protocols at all concurrency levels. This is a fundamental protocol-level difference:
+
+| Metric             | Raft-HT          | CURP-HO           | CURP-HT           |
+|--------------------|-------------------|--------------------|--------------------|
+| Strong path        | 2-RTT (Raft)      | 1-RTT (fast path)  | 1-RTT (fast path)  |
+| Weak write         | 1-RTT leader-only | Leader-local apply | 2-RTT sync repl.   |
+| Weak read          | Local RLock        | Local read         | Versioned snapshot  |
+| Peak throughput    | 37K               | 52K                | 50K                |
+
+- **Strong latency**: CURP S-Med ~51ms (1-RTT fast path) vs Raft-HT ~85ms (2-RTT). This is the primary throughput gap.
+- **WW-P99**: CURP-HO < 1ms (local apply), Raft-HT ~52ms (1-RTT), CURP-HT ~105ms (2-RTT sync replication)
+- **WR-P99**: Raft-HT best at low concurrency (0.48ms vs CURP-HO 0.81ms), but degrades at high concurrency due to RWMutex contention. CURP-HT maintains <7ms WR-P99 at all levels via versioned snapshots.
+
+### Key Takeaways
+
+1. Hybrid transparency improves throughput over baseline for both Raft and CURP
+2. The throughput ceiling is primarily determined by the strong path RTT count
+3. Weak read implementation matters at high concurrency: lock-based (Raft-HT) degrades, version-based (CURP-HT) does not

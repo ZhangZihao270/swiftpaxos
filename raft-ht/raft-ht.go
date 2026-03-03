@@ -319,6 +319,11 @@ func (r *Replica) becomeLeader() {
 	}
 }
 
+// maxBatchSize caps proposals processed per event-loop iteration to prevent
+// the event loop from blocking long enough to trigger follower election timeouts.
+// 256 entries ≈ 50KB payload, safely under 1ms processing time.
+const maxBatchSize = 256
+
 // --- handlePropose: Batch proposals, append to log, broadcast AppendEntries ---
 
 func (r *Replica) handlePropose(propose *defs.GPropose) {
@@ -333,8 +338,13 @@ func (r *Replica) handlePropose(propose *defs.GPropose) {
 		return
 	}
 
-	// Batch: drain all queued proposals
-	batchSize := len(r.ProposeChan) + 1
+	// Batch: drain queued proposals up to maxBatchSize.
+	// Capping prevents event loop starvation when many proposals arrive simultaneously.
+	available := len(r.ProposeChan)
+	if available > maxBatchSize-1 {
+		available = maxBatchSize - 1
+	}
+	batchSize := available + 1
 	proposals := make([]*defs.GPropose, batchSize)
 	proposals[0] = propose
 	for i := 1; i < batchSize; i++ {
@@ -789,8 +799,12 @@ func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
 		return
 	}
 
-	// Batch: drain all queued weak proposals (same pattern as handlePropose)
-	batchSize := len(r.cs.weakProposeChan) + 1
+	// Batch: drain queued weak proposals up to maxBatchSize.
+	available := len(r.cs.weakProposeChan)
+	if available > maxBatchSize-1 {
+		available = maxBatchSize - 1
+	}
+	batchSize := available + 1
 	proposals := make([]*MWeakPropose, batchSize)
 	proposals[0] = propose
 	for i := 1; i < batchSize; i++ {

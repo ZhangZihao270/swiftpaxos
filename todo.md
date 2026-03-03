@@ -3560,6 +3560,32 @@ With 50.1 removing weakReadChan from the event loop:
 
 ---
 
+### Phase 51: Fix Vanilla Raft High-Concurrency Timeout (Batch Size Cap)
+
+**Problem**: Vanilla Raft produces 0 throughput at 96 threads/client (288 total) and is SKIPPED at 64 threads. Root cause: election storms triggered by event loop starvation.
+
+**Root Cause**: `handlePropose` drains the entire `ProposeChan` in one pass. At 288 concurrent threads × 15 pendings = 4,320 proposals, the leader's event loop serializes ~864KB of AppendEntries payloads before handling any other message. This blocks heartbeats for hundreds of milliseconds, causing followers to trigger elections (300-500ms timeout).
+
+**Why Raft-HT did not have this problem post-Phase-50**: With 50% weak ratio, only ~2,160 strong proposals arrive per batch. Phase 50.2 also batched weak writes, so both paths were roughly halved. Weak reads bypass the event loop entirely (Phase 50.1 `weakReadLoop` goroutine).
+
+**Fix**: Add `const maxBatchSize = 256` cap to `handlePropose` in both `raft/raft.go` and `raft-ht/raft-ht.go`, and to `handleWeakPropose` in `raft-ht/raft-ht.go`. Remaining proposals stay in the channel for the next batch-clock tick (150μs).
+
+- [x] **51.1a** Add `maxBatchSize = 256` + cap logic to `raft/raft.go` `handlePropose` [26:03:03]
+- [x] **51.1b** Add `maxBatchSize = 256` + cap logic to `raft-ht/raft-ht.go` `handlePropose` and `handleWeakPropose` [26:03:03]
+- [x] **51.1c** Add 3 unit tests to `raft/raft_test.go`: `TestMaxBatchSizeConstant`, `TestBatchSizeCap_ExactBoundary`, `TestBatchSizeCap_ChannelDrain` [26:03:03]
+- [x] **51.1d** Full test suite passes: `go test ./... -count=1` — all packages pass [26:03:03]
+- [ ] **51.2a** Create `scripts/run-phase51-raft-baseline.sh` for re-running Raft baseline with batch cap fix
+- [ ] **51.2b** Run Raft baseline benchmark at 6-288 threads (collect missing 64-thread and 96-thread data)
+- [ ] **51.2c** Update `orca/benchmark-2026-03-02.md` and `evaluation/phase50-raft-baseline.md` with new 64-thread and 96-thread results
+- [ ] **51.2d** Verify 4-protocol comparison table completeness (all Raft rows filled)
+
+**Success Criteria**:
+1. Raft benchmark completes at 64 and 96 threads without timeout
+2. Raft throughput at 64/96 threads is consistent with linear scaling trend
+3. All existing Raft-HT and CURP results unaffected
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
