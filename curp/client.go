@@ -207,3 +207,32 @@ func (c *Client) handleAcks(leaderMsg interface{}, msgs []interface{}) {
 	c.RegisterReply(c.val, leaderMsg.(*MRecordAck).CmdId.SeqNum)
 	c.Println("Slow Paths:", c.slowPaths)
 }
+
+// HybridClient interface implementation (Phase 52.4)
+// CURP only supports strong consistency, so weak methods are stubs.
+
+func (c *Client) SendStrongWrite(key int64, value []byte) int32 {
+	return c.SendWrite(key, value)
+}
+
+func (c *Client) SendStrongRead(key int64) int32 {
+	return c.SendRead(key)
+}
+
+func (c *Client) SendWeakWrite(key int64, value []byte) int32 {
+	// CURP doesn't support weak writes - should never be called when weakRatio=0
+	panic("CURP does not support weak writes")
+}
+
+func (c *Client) SendWeakRead(key int64) int32 {
+	// CURP doesn't support weak reads - should never be called when weakRatio=0
+	panic("CURP does not support weak reads")
+}
+
+func (c *Client) SupportsWeak() bool {
+	return false
+}
+
+func (c *Client) MarkAllSent() {
+	// CURP doesn't have MSync retry mechanism, no-op
+}

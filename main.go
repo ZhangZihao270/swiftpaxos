@@ -120,7 +120,7 @@ func runClient(c *config.Config, verbose bool) {
 
 	// Aggregate and print metrics (for protocols using HybridBufferClient with multiple threads)
 	p := strings.ToLower(c.Protocol)
-	if numThreads > 1 && (p == "curpht" || p == "curpho" || p == "raft" || p == "raftht") {
+	if numThreads > 1 && (p == "curp" || p == "curpht" || p == "curpho" || p == "raft" || p == "raftht") {
 		aggregated := client.AggregateMetrics(allMetrics)
 		l := dlog.New(*logFile, verbose)
 		l.Printf("Test took %v\n", maxDuration)
@@ -201,8 +201,13 @@ func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads i
 		if cl == nil {
 			return nil, 0
 		}
-		cl.Loop()
-		return nil, 0
+		// Use HybridLoop with weakRatio=0 to collect metrics (Phase 52.4)
+		// CURP only supports strong consistency, so all commands are strong
+		hbc := client.NewHybridBufferClient(b, 0, 0) // weakRatio=0, weakWrites=0
+		hbc.SetHybridClient(cl)
+		printResults := (numThreads == 1)
+		hbc.HybridLoopWithOptions(printResults)
+		return hbc.GetMetrics(), hbc.GetDuration()
 	} else if p == "curpht" {
 		cls := []string{}
 		for a := range c.ClientAddrs {
