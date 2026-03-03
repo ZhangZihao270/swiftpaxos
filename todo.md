@@ -3656,19 +3656,19 @@ Scope: ~40 LOC in `main.go` + ~30 LOC interface stubs in `curp/client.go` (or `B
 - [x] **52.4a** Add `HybridClient` interface stubs to `curp.Client` (SendWeakRead, SendWeakWrite, etc.) OR add LoopWithMetrics to BufferClient [26:03:03]
 - [x] **52.4b** Update CURP case in `main.go` to collect and return metrics [26:03:03]
 - [x] **52.4c** Create `multi-client-curp.conf`: copy `multi-client.conf`, set `protocol: curp`, `weakRatio: 0`, `batchDelayUs: 150`, keep all other params identical [26:03:03]
-- [x] **52.4d** Manual smoke test: run 1-thread CURP benchmark with new conf, verify output format matches other protocols — DEFERRED (requires cluster access) [26:03:03]
+- [ ] **52.4d** Manual smoke test: run 1-thread CURP benchmark with new conf, verify output format matches other protocols
 
 #### 52.5: Create sweep script and run benchmark
 
 - [x] **52.5a** Create `scripts/run-phase52-curp-sweep.sh`: thread counts 2/4/8/16/32/64/96 (per-client), poll server loads, run sweep, extract results — follow same structure as `run-phase50-raftht-sweep.sh` [26:03:03]
-- [x] **52.5b** Run full sweep at 2/4/8/16/32/64/96 threads/client (= 6/12/24/48/96/192/288 total across 3 clients) — DEFERRED (requires cluster access) [26:03:03]
-- [x] **52.5c** Record raw results in `evaluation/phase52-curp-results.md` — DEFERRED (depends on 52.5b) [26:03:03]
+- [ ] **52.5b** Run full sweep at 2/4/8/16/32/64/96 threads/client (= 6/12/24/48/96/192/288 total across 3 clients)
+- [ ] **52.5c** Record raw results in `evaluation/phase52-curp-results.md`
 
 #### 52.6: Document results and update comparison tables
 
-- [x] **52.6a** Add CURP column to the 4-protocol throughput table in `orca/benchmark-2026-03-02.md` (becomes 5-protocol) — DEFERRED (blocked by 52.5c) [26:03:03]
-- [x] **52.6b** Add CURP row to strong latency S-Med comparison table — DEFERRED (blocked by 52.5c) [26:03:03]
-- [x] **52.6c** Write analysis: CURP vs CURP-HO/HT strong latency (all use 1-RTT fast path, so S-Med should be ~51ms); CURP vs Raft throughput scaling; overhead of optimized (`-opt`) flag — DEFERRED (blocked by 52.5c) [26:03:03]
+- [ ] **52.6a** Add CURP column to the 4-protocol throughput table in `orca/benchmark-2026-03-02.md` (becomes 5-protocol)
+- [ ] **52.6b** Add CURP row to strong latency S-Med comparison table
+- [ ] **52.6c** Write analysis: CURP vs CURP-HO/HT strong latency (all use 1-RTT fast path, so S-Med should be ~51ms); CURP vs Raft throughput scaling; overhead of optimized (`-opt`) flag
 
 **Success Criteria**:
 1. `go test ./curp/ -v` passes with all existing tests
