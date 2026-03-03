@@ -16,8 +16,10 @@ type cacheEntry struct {
 }
 
 // Client implements the HybridClient interface for the Raft-HT protocol.
-// Strong ops use the base WaitReplies mechanism (same as vanilla Raft).
-// Weak writes go to leader (1-RTT early reply). Weak reads go to nearest replica.
+// ALL replies (strong + weak) are received through the RPC table — no WaitReplies.
+// Strong ops: leader sends RaftReply via SendToClient (type-prefixed).
+// Weak writes: leader sends MWeakReply via SendToClient (1-RTT early reply).
+// Weak reads: nearest replica sends MWeakReadReply via SendToClient (local).
 type Client struct {
 	*client.BufferClient
 
@@ -32,7 +34,7 @@ type Client struct {
 	// Per-command key tracking for cache updates
 	weakPendingKeys   map[int32]int64      // seqnum → key (for weak writes and reads)
 	weakPendingValues map[int32]state.Value // seqnum → value (for weak writes)
-	strongPendingKeys map[int32]int64      // seqnum → key (for strong ops)
+	strongPendingKeys map[int32]int64       // seqnum → key (for strong ops)
 
 	// Client local cache: key → (value, version) with slot-based versioning
 	localCache map[int64]cacheEntry
@@ -58,15 +60,14 @@ func NewClient(b *client.BufferClient) *Client {
 		localCache:        make(map[int64]cacheEntry),
 	}
 
-	// Register weak message types with RPC table
+	// Register ALL message types (strong + weak) with a single RPC table.
+	// This ensures a single reader goroutine per replica connection,
+	// avoiding the data race from using both WaitReplies and RegisterRPCTable.
 	t := fastrpc.NewTableId(defs.RPC_TABLE)
 	initCs(&c.cs, t)
 	c.RegisterRPCTable(t)
 
-	// Start reading strong replies from leader (ProposeReplyTS via base writer)
-	c.WaitReplies(int(b.LeaderId))
-
-	// Start handling weak messages
+	// Handle ALL replies in a single goroutine
 	go c.handleMsgs()
 
 	return c
@@ -75,15 +76,44 @@ func NewClient(b *client.BufferClient) *Client {
 func (c *Client) handleMsgs() {
 	for {
 		select {
+		// Strong op replies (from leader, after commit)
+		case m := <-c.cs.raftReplyChan:
+			rep := m.(*RaftReply)
+			c.handleRaftReply(rep)
+
+		// Weak write replies (from leader, immediate)
 		case m := <-c.cs.weakReplyChan:
 			rep := m.(*MWeakReply)
 			c.handleWeakReply(rep)
 
+		// Weak read replies (from nearest replica)
 		case m := <-c.cs.weakReadReplyChan:
 			rep := m.(*MWeakReadReply)
 			c.handleWeakReadReply(rep)
 		}
 	}
+}
+
+// handleRaftReply handles strong op replies from the leader (after commit).
+func (c *Client) handleRaftReply(rep *RaftReply) {
+	c.mu.Lock()
+	if _, exists := c.delivered[rep.CmdId.SeqNum]; exists {
+		c.mu.Unlock()
+		return
+	}
+
+	c.val = state.Value(rep.Value)
+	c.delivered[rep.CmdId.SeqNum] = struct{}{}
+
+	// Update local cache from strong op result
+	if key, hasKey := c.strongPendingKeys[rep.CmdId.SeqNum]; hasKey {
+		c.maxVersion++
+		c.localCache[key] = cacheEntry{value: c.val, version: c.maxVersion}
+		delete(c.strongPendingKeys, rep.CmdId.SeqNum)
+	}
+
+	c.mu.Unlock()
+	c.RegisterReply(c.val, rep.CmdId.SeqNum)
 }
 
 // handleWeakReply handles weak write reply from leader (immediate, before commit)

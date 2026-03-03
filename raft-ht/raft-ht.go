@@ -27,6 +27,14 @@ type LogEntry struct {
 	CmdId   CommandId
 }
 
+// weakReadReq routes a weak read from the event loop to executeCommands,
+// which owns r.State and r.keyVersions.
+type weakReadReq struct {
+	msg      *MWeakRead
+	replicaId int32
+	term     int32
+}
+
 // Replica implements the Raft-HT consensus protocol.
 // Raft-HT extends vanilla Raft with weak (causal) operations:
 // - Strong ops: unchanged Raft (2-RTT, linearizable)
@@ -86,6 +94,10 @@ type Replica struct {
 
 	// Raft-HT: per-key version tracking for weak reads
 	keyVersions map[int64]int32 // key → log index of last committed write
+
+	// Channel for routing weak reads to executeCommands goroutine
+	// (which owns r.State and r.keyVersions, avoiding concurrent access)
+	weakReadCh chan weakReadReq
 }
 
 // New creates a new Raft-HT replica.
@@ -125,6 +137,7 @@ func New(alias string, id int, addrs []string, isLeader bool, f int,
 		raftReplyCache:          NewRaftReplyCache(),
 
 		keyVersions: make(map[int64]int32),
+		weakReadCh:  make(chan weakReadReq, defs.CHAN_BUFFER_SIZE),
 	}
 
 	// Set timer durations
@@ -318,14 +331,13 @@ func (r *Replica) becomeLeader() {
 
 func (r *Replica) handlePropose(propose *defs.GPropose) {
 	if r.role != LEADER {
-		// Reject: only leader accepts proposals
-		preply := &defs.ProposeReplyTS{
-			OK:        defs.FALSE,
-			CommandId: propose.CommandId,
-			Value:     state.NIL(),
-			Timestamp: propose.Timestamp,
-		}
-		r.ReplyProposeTS(preply, propose.Reply, propose.Mutex)
+		// Reject: only leader accepts proposals.
+		// Send RaftReply with empty value — client treats any reply as success
+		// since Raft-HT always routes proposals to the designated leader.
+		reply := r.raftReplyCache.Get()
+		reply.CmdId = CommandId{ClientId: propose.ClientId, SeqNum: propose.CommandId}
+		reply.Value = state.NIL()
+		r.sender.SendToClient(propose.ClientId, reply, r.cs.raftReplyRPC)
 		return
 	}
 
@@ -685,10 +697,13 @@ func (r *Replica) sendHeartbeats() {
 }
 
 // --- executeCommands: Apply committed entries, send reply for strong ops ---
-// Also tracks keyVersions for weak read support.
+// Also tracks keyVersions and processes weak reads (owns r.State + r.keyVersions).
 
 func (r *Replica) executeCommands() {
 	for !r.Shutdown {
+		// Process any pending weak reads (non-blocking drain)
+		r.drainWeakReads()
+
 		for r.lastApplied < r.commitIndex {
 			r.lastApplied++
 			idx := r.lastApplied
@@ -713,19 +728,56 @@ func (r *Replica) executeCommands() {
 			}
 
 			if propose != nil {
-				propreply := &defs.ProposeReplyTS{
-					OK:        defs.TRUE,
-					CommandId: propose.CommandId,
-					Value:     val,
-					Timestamp: propose.Timestamp,
-				}
-				r.ReplyProposeTS(propreply, propose.Reply, propose.Mutex)
+				// Send RaftReply via SendToClient (type-prefixed wire format).
+				// The client handles this through RegisterRPCTable → raftReplyChan.
+				reply := r.raftReplyCache.Get()
+				reply.CmdId = CommandId{ClientId: propose.ClientId, SeqNum: propose.CommandId}
+				reply.Value = val
+				r.sender.SendToClient(propose.ClientId, reply, r.cs.raftReplyRPC)
 			}
 		}
 
-		// Block until commitIndex advances instead of polling
-		<-r.commitNotify
+		// Block until commitIndex advances or a weak read arrives
+		select {
+		case <-r.commitNotify:
+		case req := <-r.weakReadCh:
+			r.processWeakRead(req)
+		}
 	}
+}
+
+// drainWeakReads processes all queued weak reads without blocking.
+func (r *Replica) drainWeakReads() {
+	for {
+		select {
+		case req := <-r.weakReadCh:
+			r.processWeakRead(req)
+		default:
+			return
+		}
+	}
+}
+
+// processWeakRead reads committed state and replies to client.
+// Must run in executeCommands goroutine (owns r.State and r.keyVersions).
+func (r *Replica) processWeakRead(req weakReadReq) {
+	msg := req.msg
+	cmd := state.Command{Op: state.GET, K: msg.Key, V: state.NIL()}
+	value := cmd.Execute(r.State)
+
+	version := int32(0)
+	if v, ok := r.keyVersions[int64(msg.Key)]; ok {
+		version = v
+	}
+
+	reply := &MWeakReadReply{
+		Replica: req.replicaId,
+		Term:    req.term,
+		CmdId:   CommandId{ClientId: msg.ClientId, SeqNum: msg.CommandId},
+		Rep:     value,
+		Version: version,
+	}
+	r.sender.SendToClient(msg.ClientId, reply, r.cs.weakReadReplyRPC)
 }
 
 // notifyCommit wakes executeCommands after commitIndex advances.
@@ -779,25 +831,12 @@ func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
 
 // --- Raft-HT: Weak Read Path ---
 
-// handleWeakRead handles a weak read from a client.
-// Any replica (including followers) can serve weak reads from committed state.
+// handleWeakRead routes a weak read to the executeCommands goroutine,
+// which owns r.State and r.keyVersions (avoiding concurrent map access).
 func (r *Replica) handleWeakRead(msg *MWeakRead) {
-	// Read from committed state machine
-	cmd := state.Command{Op: state.GET, K: msg.Key, V: state.NIL()}
-	value := cmd.Execute(r.State)
-
-	// Look up version (log index of last committed write to this key)
-	version := int32(0)
-	if v, ok := r.keyVersions[int64(msg.Key)]; ok {
-		version = v
+	r.weakReadCh <- weakReadReq{
+		msg:       msg,
+		replicaId: r.id,
+		term:      r.currentTerm,
 	}
-
-	reply := &MWeakReadReply{
-		Replica: r.id,
-		Term:    r.currentTerm,
-		CmdId:   CommandId{ClientId: msg.ClientId, SeqNum: msg.CommandId},
-		Rep:     value,
-		Version: version,
-	}
-	r.sender.SendToClient(msg.ClientId, reply, r.cs.weakReadReplyRPC)
 }

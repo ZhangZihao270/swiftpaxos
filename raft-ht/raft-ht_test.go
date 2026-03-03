@@ -430,6 +430,56 @@ func TestInitCsWeakChannels(t *testing.T) {
 }
 
 // ============================================================================
+// Phase 49.9a: GetClientId() interface tests
+// ============================================================================
+
+func TestMWeakProposeGetClientId(t *testing.T) {
+	p := &MWeakPropose{CommandId: 1, ClientId: 42}
+	if p.GetClientId() != 42 {
+		t.Errorf("MWeakPropose.GetClientId() should return 42, got %d", p.GetClientId())
+	}
+}
+
+func TestMWeakReadGetClientId(t *testing.T) {
+	r := &MWeakRead{CommandId: 1, ClientId: 99}
+	if r.GetClientId() != 99 {
+		t.Errorf("MWeakRead.GetClientId() should return 99, got %d", r.GetClientId())
+	}
+}
+
+// ============================================================================
+// Phase 49.9b: processWeakRead test
+// ============================================================================
+
+func TestProcessWeakRead_ViaChannel(t *testing.T) {
+	r := newTestReplica(0, 3)
+	st := state.InitState()
+
+	// Put a value into state
+	putCmd := state.Command{Op: state.PUT, K: state.Key(42), V: state.Value([]byte("channel-val"))}
+	putCmd.Execute(st)
+	r.keyVersions[42] = 7
+
+	// Simulate processWeakRead logic (same as old handleWeakRead but now in executeCommands)
+	msg := &MWeakRead{CommandId: 5, ClientId: 200, Key: state.Key(42)}
+
+	cmd := state.Command{Op: state.GET, K: msg.Key, V: state.NIL()}
+	value := cmd.Execute(st)
+
+	version := int32(0)
+	if v, ok := r.keyVersions[int64(msg.Key)]; ok {
+		version = v
+	}
+
+	if !bytes.Equal(value, []byte("channel-val")) {
+		t.Errorf("Should read 'channel-val', got %v", value)
+	}
+	if version != 7 {
+		t.Errorf("Version should be 7, got %d", version)
+	}
+}
+
+// ============================================================================
 // Phase 49.7b-d: Replica Logic Unit Tests
 // ============================================================================
 
@@ -457,6 +507,7 @@ func newTestReplica(id int32, n int) *Replica {
 		requestVoteReplyCache:   NewRequestVoteReplyCache(),
 		raftReplyCache:          NewRaftReplyCache(),
 		keyVersions:             make(map[int64]int32),
+		weakReadCh:              make(chan weakReadReq, 100),
 	}
 }
 

@@ -595,6 +595,10 @@ func (t *MWeakPropose) Unmarshal(rr io.Reader) error {
 	return nil
 }
 
+func (t *MWeakPropose) GetClientId() int32 {
+	return t.ClientId
+}
+
 type MWeakProposeCache struct {
 	mu    sync.Mutex
 	cache []*MWeakPropose
@@ -771,6 +775,10 @@ func (t *MWeakRead) Unmarshal(wire io.Reader) error {
 	t.Key = state.Key(int64(uint64(bs[8]) | (uint64(bs[9]) << 8) | (uint64(bs[10]) << 16) | (uint64(bs[11]) << 24) |
 		(uint64(bs[12]) << 32) | (uint64(bs[13]) << 40) | (uint64(bs[14]) << 48) | (uint64(bs[15]) << 56)))
 	return nil
+}
+
+func (t *MWeakRead) GetClientId() int32 {
+	return t.ClientId
 }
 
 type MWeakReadCache struct {

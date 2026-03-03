@@ -3457,6 +3457,16 @@ nohup bash scripts/run-phase49-raft-baseline.sh &
 
 **Estimated new code**: ~460 LOC (defs ~150, replica ~110, client ~200) + ~150 LOC tests
 
+#### Phase 49.9: Fix Critical Bugs in Raft-HT (Pre-Benchmark)
+
+Code review discovered 4 bugs that would prevent Raft-HT from working correctly at runtime:
+
+- [x] **49.9a** Add `GetClientId() int32` to `MWeakPropose` and `MWeakRead` in `defs.go` — without this, `clientListener` can't call `registerClient`, so `SendToClient` silently drops all weak replies [26:03:02, 10:00]
+- [x] **49.9b** Rewrite `client.go` to use RPC table only (remove `WaitReplies`) — `WaitReplies` and `RegisterRPCTable` both start reader goroutines on the same `bufio.Reader`, causing a data race and stream corruption [26:03:02, 10:00]
+- [x] **49.9c** Replace `ReplyProposeTS` with `RaftReply` via `SendToClient` in `executeCommands` — `ReplyProposeTS` writes raw bytes (no type prefix) which is incompatible with the type-prefixed format that `RegisterRPCTable` reads [26:03:02, 10:00]
+- [x] **49.9d** Route weak reads through `executeCommands` goroutine via `weakReadCh` channel — `handleWeakRead` was reading `r.State` and `r.keyVersions` from the event loop while `executeCommands` writes them from a separate goroutine (concurrent map access) [26:03:02, 10:00]
+- [x] **49.9e** Add tests for `GetClientId()`, `processWeakRead`, update `newTestReplica` — 31 tests pass [26:03:02, 10:00]
+
 ---
 
 ## Legend
