@@ -2,6 +2,7 @@ package raftht
 
 import (
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/imdea-software/swiftpaxos/config"
@@ -25,14 +26,6 @@ type LogEntry struct {
 	Command state.Command
 	Term    int32
 	CmdId   CommandId
-}
-
-// weakReadReq routes a weak read from the event loop to executeCommands,
-// which owns r.State and r.keyVersions.
-type weakReadReq struct {
-	msg      *MWeakRead
-	replicaId int32
-	term     int32
 }
 
 // Replica implements the Raft-HT consensus protocol.
@@ -92,12 +85,14 @@ type Replica struct {
 	requestVoteReplyCache   *RequestVoteReplyCache
 	raftReplyCache          *RaftReplyCache
 
-	// Raft-HT: per-key version tracking for weak reads
+	// Raft-HT: per-key version tracking for weak reads.
+	// Protected by stateMu: executeCommands holds write lock, weak reads hold read lock.
 	keyVersions map[int64]int32 // key → log index of last committed write
 
-	// Channel for routing weak reads to executeCommands goroutine
-	// (which owns r.State and r.keyVersions, avoiding concurrent access)
-	weakReadCh chan weakReadReq
+	// Protects r.State and r.keyVersions for concurrent access.
+	// executeCommands takes Lock() during command execution batches.
+	// Weak reads take RLock() to read committed state concurrently.
+	stateMu sync.RWMutex
 }
 
 // New creates a new Raft-HT replica.
@@ -137,7 +132,6 @@ func New(alias string, id int, addrs []string, isLeader bool, f int,
 		raftReplyCache:          NewRaftReplyCache(),
 
 		keyVersions: make(map[int64]int32),
-		weakReadCh:  make(chan weakReadReq, defs.CHAN_BUFFER_SIZE),
 	}
 
 	// Set timer durations
@@ -205,6 +199,9 @@ func (r *Replica) run() {
 	// Launch command execution goroutine
 	go r.executeCommands()
 
+	// Launch weak read goroutine (decoupled from event loop and executeCommands)
+	go r.weakReadLoop()
+
 	// Set up batch timer
 	var batchClockChan chan bool
 	if r.batchWait > 0 {
@@ -267,11 +264,6 @@ func (r *Replica) run() {
 		case m := <-r.cs.weakProposeChan:
 			wp := m.(*MWeakPropose)
 			r.handleWeakPropose(wp)
-
-		// Raft-HT: weak read requests (any replica)
-		case m := <-r.cs.weakReadChan:
-			wr := m.(*MWeakRead)
-			r.handleWeakRead(wr)
 
 		case <-electionTimer.C:
 			if r.role != LEADER {
@@ -697,13 +689,12 @@ func (r *Replica) sendHeartbeats() {
 }
 
 // --- executeCommands: Apply committed entries, send reply for strong ops ---
-// Also tracks keyVersions and processes weak reads (owns r.State + r.keyVersions).
+// Holds stateMu write lock during execution batches so weak reads can
+// concurrently read committed state via stateMu read lock.
 
 func (r *Replica) executeCommands() {
 	for !r.Shutdown {
-		// Process any pending weak reads (non-blocking drain)
-		r.drainWeakReads()
-
+		r.stateMu.Lock()
 		for r.lastApplied < r.commitIndex {
 			r.lastApplied++
 			idx := r.lastApplied
@@ -728,40 +719,38 @@ func (r *Replica) executeCommands() {
 			}
 
 			if propose != nil {
-				// Send RaftReply via SendToClient (type-prefixed wire format).
-				// The client handles this through RegisterRPCTable → raftReplyChan.
 				reply := r.raftReplyCache.Get()
 				reply.CmdId = CommandId{ClientId: propose.ClientId, SeqNum: propose.CommandId}
 				reply.Value = val
 				r.sender.SendToClient(propose.ClientId, reply, r.cs.raftReplyRPC)
 			}
 		}
+		r.stateMu.Unlock()
 
-		// Block until commitIndex advances or a weak read arrives
-		select {
-		case <-r.commitNotify:
-		case req := <-r.weakReadCh:
-			r.processWeakRead(req)
-		}
+		// Block until commitIndex advances
+		<-r.commitNotify
 	}
 }
 
-// drainWeakReads processes all queued weak reads without blocking.
-func (r *Replica) drainWeakReads() {
-	for {
-		select {
-		case req := <-r.weakReadCh:
-			r.processWeakRead(req)
-		default:
+// weakReadLoop processes weak reads in a dedicated goroutine,
+// decoupled from both the event loop and executeCommands.
+// Uses stateMu read lock to safely read committed state concurrently
+// with executeCommands' write lock.
+func (r *Replica) weakReadLoop() {
+	for !r.Shutdown {
+		m, ok := <-r.cs.weakReadChan
+		if !ok {
 			return
 		}
+		msg := m.(*MWeakRead)
+		r.processWeakRead(msg)
 	}
 }
 
 // processWeakRead reads committed state and replies to client.
-// Must run in executeCommands goroutine (owns r.State and r.keyVersions).
-func (r *Replica) processWeakRead(req weakReadReq) {
-	msg := req.msg
+// Safe to call from any goroutine — acquires stateMu read lock.
+func (r *Replica) processWeakRead(msg *MWeakRead) {
+	r.stateMu.RLock()
 	cmd := state.Command{Op: state.GET, K: msg.Key, V: state.NIL()}
 	value := cmd.Execute(r.State)
 
@@ -769,10 +758,11 @@ func (r *Replica) processWeakRead(req weakReadReq) {
 	if v, ok := r.keyVersions[int64(msg.Key)]; ok {
 		version = v
 	}
+	r.stateMu.RUnlock()
 
 	reply := &MWeakReadReply{
-		Replica: req.replicaId,
-		Term:    req.term,
+		Replica: r.id,
+		Term:    0, // informational; client does not use Term for weak reads
 		CmdId:   CommandId{ClientId: msg.ClientId, SeqNum: msg.CommandId},
 		Rep:     value,
 		Version: version,
@@ -791,52 +781,52 @@ func (r *Replica) notifyCommit() {
 
 // --- Raft-HT: Weak Write Path ---
 
-// handleWeakPropose handles a weak write from a client.
-// The leader assigns a log slot, replies immediately, and replicates in background.
+// handleWeakPropose handles weak writes from clients.
+// Batches all pending weak proposals (drains weakProposeChan), appends to log,
+// replies immediately to each client, then broadcasts AppendEntries once.
 func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
 	if r.role != LEADER {
-		// Only leader handles weak writes; silently drop on followers
 		return
 	}
 
-	// Append to log (same log as strong ops — implicit ordering for C1-C3)
-	entry := LogEntry{
-		Command: propose.Command,
-		Term:    r.currentTerm,
-		CmdId:   CommandId{ClientId: propose.ClientId, SeqNum: propose.CommandId},
-	}
-	idx := int32(len(r.log))
-	r.log = append(r.log, entry)
-
-	// Ensure pendingProposals is large enough (no pending proposal for weak writes)
-	for int32(len(r.pendingProposals)) <= idx {
-		r.pendingProposals = append(r.pendingProposals, nil)
+	// Batch: drain all queued weak proposals (same pattern as handlePropose)
+	batchSize := len(r.cs.weakProposeChan) + 1
+	proposals := make([]*MWeakPropose, batchSize)
+	proposals[0] = propose
+	for i := 1; i < batchSize; i++ {
+		m := <-r.cs.weakProposeChan
+		proposals[i] = m.(*MWeakPropose)
 	}
 
-	// Update leader's own matchIndex
+	for _, wp := range proposals {
+		// Append to log (same log as strong ops — implicit ordering for C1-C3)
+		entry := LogEntry{
+			Command: wp.Command,
+			Term:    r.currentTerm,
+			CmdId:   CommandId{ClientId: wp.ClientId, SeqNum: wp.CommandId},
+		}
+		idx := int32(len(r.log))
+		r.log = append(r.log, entry)
+
+		// Ensure pendingProposals is large enough (no pending proposal for weak writes)
+		for int32(len(r.pendingProposals)) <= idx {
+			r.pendingProposals = append(r.pendingProposals, nil)
+		}
+
+		// Reply IMMEDIATELY — don't wait for commit (1 WAN RTT)
+		reply := &MWeakReply{
+			LeaderId: r.id,
+			Term:     r.currentTerm,
+			CmdId:    entry.CmdId,
+			Slot:     idx,
+		}
+		r.sender.SendToClient(wp.ClientId, reply, r.cs.weakReplyRPC)
+	}
+
+	// Update leader's own matchIndex (once, after all entries appended)
 	r.matchIndex[r.id] = int32(len(r.log) - 1)
 
-	// Reply IMMEDIATELY — don't wait for commit (1 WAN RTT)
-	reply := &MWeakReply{
-		LeaderId: r.id,
-		Term:     r.currentTerm,
-		CmdId:    entry.CmdId,
-		Slot:     idx,
-	}
-	r.sender.SendToClient(propose.ClientId, reply, r.cs.weakReplyRPC)
-
-	// Trigger replication via normal AppendEntries
+	// Broadcast AppendEntries once for the entire batch
 	r.broadcastAppendEntries()
 }
 
-// --- Raft-HT: Weak Read Path ---
-
-// handleWeakRead routes a weak read to the executeCommands goroutine,
-// which owns r.State and r.keyVersions (avoiding concurrent map access).
-func (r *Replica) handleWeakRead(msg *MWeakRead) {
-	r.weakReadCh <- weakReadReq{
-		msg:       msg,
-		replicaId: r.id,
-		term:      r.currentTerm,
-	}
-}

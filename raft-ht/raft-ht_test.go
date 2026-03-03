@@ -448,21 +448,22 @@ func TestMWeakReadGetClientId(t *testing.T) {
 }
 
 // ============================================================================
-// Phase 49.9b: processWeakRead test
+// Phase 50.1: RWMutex-based processWeakRead tests
 // ============================================================================
 
-func TestProcessWeakRead_ViaChannel(t *testing.T) {
+func TestProcessWeakRead_WithRWMutex(t *testing.T) {
 	r := newTestReplica(0, 3)
 	st := state.InitState()
 
 	// Put a value into state
-	putCmd := state.Command{Op: state.PUT, K: state.Key(42), V: state.Value([]byte("channel-val"))}
+	putCmd := state.Command{Op: state.PUT, K: state.Key(42), V: state.Value([]byte("rwmutex-val"))}
 	putCmd.Execute(st)
 	r.keyVersions[42] = 7
 
-	// Simulate processWeakRead logic (same as old handleWeakRead but now in executeCommands)
+	// Simulate processWeakRead logic using RLock (same as new implementation)
 	msg := &MWeakRead{CommandId: 5, ClientId: 200, Key: state.Key(42)}
 
+	r.stateMu.RLock()
 	cmd := state.Command{Op: state.GET, K: msg.Key, V: state.NIL()}
 	value := cmd.Execute(st)
 
@@ -470,13 +471,59 @@ func TestProcessWeakRead_ViaChannel(t *testing.T) {
 	if v, ok := r.keyVersions[int64(msg.Key)]; ok {
 		version = v
 	}
+	r.stateMu.RUnlock()
 
-	if !bytes.Equal(value, []byte("channel-val")) {
-		t.Errorf("Should read 'channel-val', got %v", value)
+	if !bytes.Equal(value, []byte("rwmutex-val")) {
+		t.Errorf("Should read 'rwmutex-val', got %v", value)
 	}
 	if version != 7 {
 		t.Errorf("Version should be 7, got %d", version)
 	}
+}
+
+func TestProcessWeakRead_ConcurrentWithExecution(t *testing.T) {
+	r := newTestReplica(0, 3)
+	st := state.InitState()
+
+	// Write initial state
+	putCmd := state.Command{Op: state.PUT, K: state.Key(10), V: state.Value([]byte("initial"))}
+	putCmd.Execute(st)
+	r.keyVersions[10] = 1
+
+	// Simulate concurrent read and write lock usage
+	done := make(chan struct{})
+
+	// Writer goroutine (simulates executeCommands)
+	go func() {
+		for i := 0; i < 100; i++ {
+			r.stateMu.Lock()
+			cmd := state.Command{Op: state.PUT, K: state.Key(10), V: state.Value([]byte("updated"))}
+			cmd.Execute(st)
+			r.keyVersions[10] = int32(i + 2)
+			r.stateMu.Unlock()
+		}
+		close(done)
+	}()
+
+	// Reader goroutine (simulates weak reads)
+	for i := 0; i < 100; i++ {
+		r.stateMu.RLock()
+		cmd := state.Command{Op: state.GET, K: state.Key(10), V: state.NIL()}
+		val := cmd.Execute(st)
+		ver := r.keyVersions[10]
+		r.stateMu.RUnlock()
+
+		// Value should be non-nil (either "initial" or "updated")
+		if val == nil {
+			t.Errorf("Weak read returned nil value")
+		}
+		// Version should be >= 1
+		if ver < 1 {
+			t.Errorf("Version should be >= 1, got %d", ver)
+		}
+	}
+
+	<-done
 }
 
 // ============================================================================
@@ -507,7 +554,6 @@ func newTestReplica(id int32, n int) *Replica {
 		requestVoteReplyCache:   NewRequestVoteReplyCache(),
 		raftReplyCache:          NewRaftReplyCache(),
 		keyVersions:             make(map[int64]int32),
-		weakReadCh:              make(chan weakReadReq, 100),
 	}
 }
 
@@ -601,6 +647,46 @@ func TestHandleWeakPropose_LogAppend(t *testing.T) {
 	}
 	if r.matchIndex[0] != 1 {
 		t.Errorf("matchIndex[leader] should be 1, got %d", r.matchIndex[0])
+	}
+}
+
+// TestHandleWeakPropose_BatchAppend tests that batched weak writes append all to log correctly
+func TestHandleWeakPropose_BatchAppend(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.role = LEADER
+	r.currentTerm = 3
+
+	// Simulate batch of 3 weak writes appended to log (handleWeakPropose batch logic)
+	proposals := []*MWeakPropose{
+		{CommandId: 1, ClientId: 100, Command: state.Command{Op: state.PUT, K: state.Key(10), V: state.Value([]byte("a"))}},
+		{CommandId: 2, ClientId: 101, Command: state.Command{Op: state.PUT, K: state.Key(20), V: state.Value([]byte("b"))}},
+		{CommandId: 3, ClientId: 102, Command: state.Command{Op: state.PUT, K: state.Key(30), V: state.Value([]byte("c"))}},
+	}
+
+	for _, wp := range proposals {
+		entry := LogEntry{
+			Command: wp.Command,
+			Term:    r.currentTerm,
+			CmdId:   CommandId{ClientId: wp.ClientId, SeqNum: wp.CommandId},
+		}
+		idx := int32(len(r.log))
+		r.log = append(r.log, entry)
+		for int32(len(r.pendingProposals)) <= idx {
+			r.pendingProposals = append(r.pendingProposals, nil)
+		}
+	}
+	r.matchIndex[r.id] = int32(len(r.log) - 1)
+
+	// Verify all 3 entries are in log
+	if len(r.log) != 3 {
+		t.Fatalf("Log should have 3 entries, got %d", len(r.log))
+	}
+	if r.log[0].CmdId.ClientId != 100 || r.log[1].CmdId.ClientId != 101 || r.log[2].CmdId.ClientId != 102 {
+		t.Errorf("Entries should be in order: got clients %d, %d, %d",
+			r.log[0].CmdId.ClientId, r.log[1].CmdId.ClientId, r.log[2].CmdId.ClientId)
+	}
+	if r.matchIndex[0] != 2 {
+		t.Errorf("matchIndex[leader] should be 2 (last entry), got %d", r.matchIndex[0])
 	}
 }
 

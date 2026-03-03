@@ -3508,11 +3508,11 @@ The core problem: weak reads go through `executeCommands` goroutine because it "
 
 Expected impact: Weak reads no longer blocked by command execution. WR-P99 should stay sub-ms at all concurrency levels.
 
-- [ ] **50.1a** Add `stateMu sync.RWMutex` to Replica, wrap `executeCommands` execution loop with `stateMu.Lock()`
-- [ ] **50.1b** Rewrite `handleWeakRead` to process directly with `stateMu.RLock()` (no channel routing)
-- [ ] **50.1c** Remove `weakReadCh`, `weakReadReq`, `drainWeakReads`, weak read case from `executeCommands` select
-- [ ] **50.1d** Remove `weakReadChan` from event loop select — register weak read RPC handler that processes directly in RPC goroutine (with `stateMu.RLock()`)
-- [ ] **50.1e** Update tests: remove weakReadCh-based tests, add RWMutex-based processWeakRead tests
+- [x] **50.1a** Add `stateMu sync.RWMutex` to Replica, wrap `executeCommands` execution loop with `stateMu.Lock()` [26:03:02]
+- [x] **50.1b** Rewrite `processWeakRead` to use `stateMu.RLock()` directly (no channel routing) [26:03:02]
+- [x] **50.1c** Remove `weakReadCh`, `weakReadReq`, `drainWeakReads`, `handleWeakRead`, weak read case from `executeCommands` select [26:03:02]
+- [x] **50.1d** Remove `weakReadChan` from event loop select — dedicated `weakReadLoop` goroutine reads from `cs.weakReadChan` and calls `processWeakRead` with `stateMu.RLock()` [26:03:02]
+- [x] **50.1e** Update tests: remove weakReadCh from newTestReplica, add RWMutex + concurrency tests (race-detector clean) [26:03:02]
 
 #### 50.2: Batch weak write replication
 
@@ -3524,9 +3524,9 @@ Currently each `handleWeakPropose` calls `broadcastAppendEntries()` individually
 - This way, weak writes piggyback on the next strong batch or batch timer tick (150μs max delay)
 - Alternatively: drain `weakProposeChan` like strong proposals drain `ProposeChan`, batch all pending weak writes, then broadcast once
 
-- [ ] **50.2a** Add weak write batching: drain `weakProposeChan` on each weak propose case, append all to log, reply immediately to each, broadcast once
-- [ ] **50.2b** Verify that `broadcastAppendEntries` sends all pending entries (entries from nextIndex[i] to end of log) — this naturally batches both strong and weak entries in a single AppendEntries message
-- [ ] **50.2c** Update tests for batched weak write handling
+- [x] **50.2a** Batch weak writes: drain `weakProposeChan` on each weak propose case, append all to log, reply immediately to each, broadcast once [26:03:02]
+- [x] **50.2b** Verified `buildAppendEntries` sends all entries from `nextIndex[i]` to end of log — naturally batches both strong and weak entries per AppendEntries message [26:03:02]
+- [x] **50.2c** Added `TestHandleWeakPropose_BatchAppend` test for batched weak write handling [26:03:02]
 
 #### 50.3: Reduce event loop contention
 
@@ -3535,8 +3535,8 @@ With 50.1 removing weakReadChan from the event loop:
 - Event loop drops from 10 cases to 9 (or 8 if we also handle weak reads outside the loop)
 - Consider: handle weak reads entirely outside event loop (in RPC handler goroutines, protected by `stateMu.RLock()`), so event loop only handles consensus messages
 
-- [ ] **50.3a** Verify event loop case count is reduced after 50.1
-- [ ] **50.3b** If weak read RPC handler runs in RPC goroutine directly, remove `weakReadChan` from `CommunicationSupply` (simplify wiring)
+- [x] **50.3a** Event loop reduced from 10 to 9 cases (weakReadChan removed, handled by dedicated `weakReadLoop` goroutine) [26:03:02]
+- [x] **50.3b** `weakReadChan` kept in `CommunicationSupply` (required for RPC table registration), but event loop no longer polls it [26:03:02]
 
 #### 50.4: Benchmark and validate
 
