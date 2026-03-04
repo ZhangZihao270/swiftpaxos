@@ -30,6 +30,7 @@ POLL_INTERVAL=60
 CONF="multi-client-curp.conf"
 
 THREAD_COUNTS=(2 4 8 16 32 64 96)
+NUM_CLIENTS=3  # Total threads = per-client threads × NUM_CLIENTS
 
 SWEEP_DIR="results/phase52-curp-sweep-$(date +%Y%m%d-%H%M%S)"
 EVAL_FILE="evaluation/phase52-curp-results.md"
@@ -61,15 +62,16 @@ check_loads() {
 
 extract_results() {
     local dir="$1"
-    local threads="$2"
+    local threads_per_client="$2"
+    local total_threads=$((threads_per_client * NUM_CLIENTS))
 
     if [ ! -f "$dir/summary.txt" ]; then
         log "  WARNING: No summary.txt in $dir"
-        echo "$threads|0|N/A|N/A|N/A"
+        echo "$total_threads|0|N/A|N/A|N/A"
         return
     fi
 
-    python3 - "$dir" "$threads" << 'PYEOF'
+    python3 - "$dir" "$total_threads" << 'PYEOF'
 import sys, os, re
 
 results_dir = sys.argv[1]
@@ -141,7 +143,8 @@ run_idx=0
 for threads in "${THREAD_COUNTS[@]}"; do
     run_idx=$((run_idx + 1))
     log ""
-    log "===== Run $run_idx/${#THREAD_COUNTS[@]}: $threads threads ====="
+    total_threads=$((threads * NUM_CLIENTS))
+    log "===== Run $run_idx/${#THREAD_COUNTS[@]}: $threads threads/client ($total_threads total) ====="
 
     # Mid-sweep load check
     if ! check_loads "$LOAD_ABORT_THRESHOLD"; then
@@ -149,8 +152,8 @@ for threads in "${THREAD_COUNTS[@]}"; do
         sleep 60
         if ! check_loads "$LOAD_ABORT_THRESHOLD"; then
             log "Servers still loaded (>$LOAD_ABORT_THRESHOLD), skipping run"
-            ALL_RESULTS+=("$threads|SKIPPED|N/A|N/A|N/A")
-            ALL_ERRORS+=("$threads|SKIPPED")
+            ALL_RESULTS+=("$total_threads|SKIPPED|N/A|N/A|N/A")
+            ALL_ERRORS+=("$total_threads|SKIPPED")
             continue
         fi
     fi
@@ -184,7 +187,7 @@ for threads in "${THREAD_COUNTS[@]}"; do
             e=$(echo "$e" | tr -d '[:space:]')
             errors=$((errors + e))
         done
-        ALL_ERRORS+=("$threads|$errors")
+        ALL_ERRORS+=("$total_threads|$errors")
         if [ "$errors" -eq 0 ]; then
             log "  OK: No 'unknown client message' errors"
         else
@@ -192,8 +195,8 @@ for threads in "${THREAD_COUNTS[@]}"; do
         fi
     else
         log "WARNING: No results found for run $run_idx"
-        ALL_RESULTS+=("$threads|0|N/A|N/A|N/A")
-        ALL_ERRORS+=("$threads|N/A")
+        ALL_RESULTS+=("$total_threads|0|N/A|N/A|N/A")
+        ALL_ERRORS+=("$total_threads|N/A")
     fi
 
     sleep 5
@@ -237,6 +240,8 @@ cat >> "$EVAL_FILE" << EOF
 | Date             | $(date '+%Y-%m-%d')                        |
 
 ## CURP Results
+
+Thread counts below are total (3 clients × N threads/client).
 
 | Threads | Throughput | S-Avg  | S-Med  | S-P99  |
 |--------:|-----------:|-------:|-------:|-------:|
@@ -285,7 +290,7 @@ cat >> "$EVAL_FILE" << 'EOF'
 
 ### 5. CURP S-Med ≈ CURP-HO/HT S-Med (~51ms at low load)
 
-(Check S-Med at 2-8 threads — all share 1-RTT fast path, should be ~51-53ms)
+(Check S-Med at 6-24 total threads — all share 1-RTT fast path, should be ~51-53ms)
 
 ### 6. Results recorded in evaluation/phase52-curp-results.md and orca/benchmark-2026-03-02.md updated
 

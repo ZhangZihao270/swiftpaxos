@@ -26,27 +26,29 @@ Phase 52.1-52.4 optimizations to bring vanilla CURP into benchmark pipeline:
 
 ## CURP Results
 
+Thread counts below are total (3 clients × N threads/client).
+
 | Threads | Throughput | S-Avg  | S-Med  | S-P99  |
 |--------:|-----------:|-------:|-------:|-------:|
-| 2       |    1747.64 |  51.42 |  51.37 |  53.29 |
-| 4       |    3497.45 |  51.39 |  51.30 |  53.72 |
-| 8       |    6989.82 |  51.42 |  51.24 |  55.07 |
-| 16      |   13361.84 |  53.90 |  50.87 | 185.08 |
-| 32      |   21217.10 |  76.89 |  51.04 | 1479.84 |
-| 64      |   30324.51 | 125.79 |  51.60 | 4747.18 |
-| 96      |   31365.61 | 188.91 |  69.26 | 5006.97 |
+| 6       |    1747.64 |  51.42 |  51.37 |  53.29 |
+| 12      |    3497.45 |  51.39 |  51.30 |  53.72 |
+| 24      |    6989.82 |  51.42 |  51.24 |  55.07 |
+| 48      |   13361.84 |  53.90 |  50.87 | 185.08 |
+| 96      |   21217.10 |  76.89 |  51.04 | 1479.84 |
+| 192     |   30324.51 | 125.79 |  51.60 | 4747.18 |
+| 288     |   31365.61 | 188.91 |  69.26 | 5006.97 |
 
 ## Unknown Client Message Errors
 
 | Threads | Errors |
 |--------:|-------:|
-| 2       |      0 |
-| 4       |      0 |
-| 8       |      0 |
-| 16      |      0 |
-| 32      |      0 |
-| 64      |      0 |
+| 6       |      0 |
+| 12      |      0 |
+| 24      |      0 |
+| 48      |      0 |
 | 96      |      0 |
+| 192     |      0 |
+| 288     |      0 |
 
 ## Validation Against Phase 52 Success Criteria
 
@@ -68,7 +70,7 @@ Phase 52.1-52.4 optimizations to bring vanilla CURP into benchmark pipeline:
 
 ### 5. CURP S-Med ≈ CURP-HO/HT S-Med (~51ms at low load)
 
-(Check S-Med at 2-8 threads — all share 1-RTT fast path, should be ~51-53ms)
+(Check S-Med at 6-24 threads — all share 1-RTT fast path, should be ~51-53ms)
 
 ### 6. Results recorded in evaluation/phase52-curp-results.md and orca/benchmark-2026-03-02.md updated
 
@@ -90,9 +92,9 @@ Reference values from orca/benchmark-2026-03-02.md:
 
 Expected: CURP throughput between Raft and CURP-HT (no weak ops overhead, but also no hybrid optimizations)
 
-S-Med reference (96 threads, from orca table):
-- CURP-HO: 51.92ms
-- CURP-HT: 51.50ms
-- Raft-HT: 85.36ms
-- Raft: 84.32ms
-- CURP: (fill) — should be ~51-53ms (same fast path as CURP-HO/HT)
+S-Med reference (96 total threads, from orca table):
+- CURP-HO: 69.68ms
+- CURP-HT: 53.66ms
+- Raft-HT: 113.32ms
+- Raft: 79.73ms
+- CURP: 51.04ms
