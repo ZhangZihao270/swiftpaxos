@@ -3890,6 +3890,45 @@ All invariants verified:
 3. **CausalConsistencyInv** (ReadsReturnValidValues ∧ MonotonicReads): all ops respect causal consistency — PASS
 4. **HybridCompatibilityInv**: ≺_T and ≺_P orderings are compatible — PASS
 
+#### 55.13: Strengthen CausalConsistencyInv + re-run model checking
+
+**Motivation**: The current CausalConsistencyInv is too weak. MonotonicReads only checks that non-Nil doesn't regress to Nil, but doesn't check that the *version* (slot of the source write) doesn't decrease. Additionally, standard causal consistency session guarantees (Read-Your-Writes, Monotonic Writes, Writes-Follow-Reads) are not explicitly verified.
+
+**Analysis of current gaps**:
+1. **MonotonicReads** (weak): checks `retVal ≠ Nil ⇒ next retVal ≠ Nil`. Should check `retVer[j] ≥ retVer[i]` — the version (slot of the write that produced the read value) must not decrease.
+2. **Read-Your-Writes** (missing): after client c writes key k and gets slot s, any subsequent read by c of key k must return a value from a write at slot ≥ s (i.e., `retVer ≥ s`).
+3. **Monotonic Writes** (missing): same client's writes must get increasing slots. If history[i] and history[j] are both writes by client c with i < j, then slot[i] < slot[j].
+4. **Writes-Follow-Reads** (missing): if client c reads key k and sees a value from slot s, then c's next write must get a slot > s. Ensures writes are ordered after causally-preceding reads.
+
+**Design — history entry change**:
+- Add `retVer` field to history entries: the version (slot) of the write that produced the read's return value.
+  - Strong reads: `retVer = slot - 1`? No — need to find the actual source write's slot. Better: compute from leader log replay, or simpler: record `finalVer` from client cache after merge.
+  - Weak reads: `retVer = finalVer` (the version after cache merge, already computed in `ClientHandleWeakReadReply`).
+  - Strong reply: `retVer = Max(cache.ver, slot)` — after cache merge in `ClientHandleStrongReply`. Actually for strong ops, the slot IS the linearization point. The retVer should be the version of the source write. For strong reads at slot s, the source write is the latest write to key k at slot < s. We can compute this: `retVer = keyVersion[leader][k]` at the time of apply? But that's not directly available at reply time. **Simpler approach**: record `clientCache[c][k].ver` AFTER the cache update in the reply handler — this is the max version the client has seen for this key.
+  - Writes: `retVer = slot` (the write's own slot is its version).
+
+**Simpler design — avoid history entry change**: Instead of adding retVer to history, derive version info from existing data:
+- For writes: `slot` is already in history — that's the version.
+- For strong reads: the slot is in history. The source write's version can be computed by replaying leader's log (same as StrongReadConsistency).
+- For weak reads: `slot = 0`, and we don't have version info. **This is the gap** — we need retVer for weak reads.
+
+**Chosen approach**: Add `retVer` field to history entries. Minimal change (~10 lines across 3 reply handlers + invariant definitions).
+
+**Implementation plan**:
+- [ ] **55.13a** Add `retVer` field to history entries in RaftHT.tla:
+  - `ClientHandleStrongReply`: `retVer |-> Max(clientCache[c][k].ver, m.slot)` (after cache merge, this is the new cache version for this key)
+  - `ClientHandleWeakWriteReply`: `retVer |-> Max(clientCache[c][k].ver, m.slot)` (the write's slot, or higher if cache already had newer)
+  - `ClientHandleWeakReadReply`: `retVer |-> finalVer` (already computed — the version after cache merge)
+  - Update MCTypeInv to include `retVer \in Nat` check
+- [ ] **55.13b** Strengthen MonotonicReads: same client, same key, i < j, both reads ⇒ `history[j].retVer >= history[i].retVer` (not just Nil/non-Nil check)
+- [ ] **55.13c** Add ReadYourWrites invariant: same client, history[i] is Write to key k with slot s, history[j] is Read of key k with j > i ⇒ `history[j].retVer >= s`
+- [ ] **55.13d** Add MonotonicWrites invariant: same client, history[i] and history[j] are both Writes with i < j ⇒ `history[i].slot < history[j].slot`
+- [ ] **55.13e** Add WritesFollowReads invariant: same client, history[i] is Read of key k with retVer = v, history[j] is Write with j > i ⇒ `history[j].slot > v`
+- [ ] **55.13f** Update SafetyInv to include new invariants, update CausalConsistencyInv definition
+- [ ] **55.13g** Sanity check: run TLC with 2c/2v/1k/MaxOps=1, confirm exhaustive PASS
+- [ ] **55.13h** Run TLC with 2c/2v/1k/MaxOps=2 for up to 2 hours. If no errors, stop and record partial stats.
+- [ ] **55.13i** Record results in todo.md, commit and push
+
 ---
 
 ## Legend
