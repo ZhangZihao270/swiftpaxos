@@ -3970,14 +3970,7 @@ Full causal consistency session guarantees verified:
 
 #### 56.1: TLA+ spec skeleton — constants, variables, Init
 
-- [ ] **56.1a** Create `tla/CurpHO.tla` with constants (Replicas, Clients, Keys, Values, MaxOps, Nil, InitLeader), variables:
-  - **Replica vars**: role, log, commitIndex, lastApplied, kvStore, keyVersion, nextIndex, matchIndex
-  - **Witness pool vars**: unsynced (per-replica, per-key: at most one UnsyncedEntry with {slot, isStrong, op, val, clientId, seqNum})
-  - **Client vars**: clientState, clientOp, clientCon, clientSeq, clientCache, clientInvEpoch, opsCompleted, clientWriteSet (tracks uncommitted weak writes for CausalDeps checking)
-  - **Network**: messages set
-  - **History**: history sequence, epoch counter
-  - **Bound replica**: boundReplica (per-client, fixed assignment for symmetry)
-  - Init: deterministic leader (InitLeader), empty logs, empty witness pools, each client bound to a replica
+- [x] **56.1a** Create `tla/CurpHO.tla` (318 lines) + `tla/MC_CurpHO.tla` + `tla/MC_CurpHO.cfg`. Constants, types (CmdIdType, UnsyncedEntryType, CacheEntryType), variables (replicaVars without nextIndex/matchIndex, unsyncedVars, clientVars with clientWriteSet/boundReplica/fastPathResponses), helpers (Majority, ThreeQuarters, UnsyncedVal, UnsyncedWeakWriteCmdId, CausalDepsFor, SpeculativeVal/Ver, StrongOps), Init. TLC parses successfully: 4 states generated, 2 distinct initial states, MCTypeInv PASS. Next==FALSE stub for actions. [26:03:04]
 
 #### 56.2: Model weak write path (1 RTT broadcast)
 
