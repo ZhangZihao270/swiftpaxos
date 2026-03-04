@@ -3831,12 +3831,8 @@ which can block on `slot-1` execution dependency — stalling ALL other messages
 **Reference**: Raft-HT protocol in `docs/Raft-HT.md`, hybrid consistency formal definition in `docs/protocol-overview.md` Section "Hybrid Consistency (C1-C3)"
 
 #### 55.1: TLA+ project setup
-- [ ] **55.1a** Create `tla/` directory with module structure:
-  - `RaftHT.tla` — protocol state machine (replicas, clients, network)
-  - `SeqKV.tla` — sequential KV store spec (refinement target for linearizability)
-  - `HybridConsistency.tla` — property definitions (causal consistency + hybrid compatibility invariants)
-  - `MC_RaftHT.tla` — TLC model configuration (constants, symmetry sets, state constraint)
-- [ ] **55.1b** Define constants and type definitions: `Replicas` (set), `Clients` (set), `Keys` (set), `Values` (set), `MaxOps` (nat), `ConsistencyLevel ∈ {Strong, Weak}`, `OpType ∈ {Read, Write}`
+- [x] **55.1a** Create `tla/` directory with module structure: RaftHT.tla (protocol state machine, 200 LOC skeleton with constants, variables, Init, helpers), SeqKV.tla (sequential KV refinement target, 70 LOC), HybridConsistency.tla (property definitions, parameterized module), MC_RaftHT.tla + MC_RaftHT.cfg (TLC config with 3 replicas, 2 clients, 2 keys, 2 values, symmetry). All 4 modules parse with SANY; TLC finds 3 initial states and completes successfully. [26:03:03]
+- [x] **55.1b** Constants and types defined in RaftHT.tla: Replicas, Clients, Keys, Values, MaxOps, Nil (model values), ConsistencyLevel ∈ {Strong, Weak}, OpType ∈ {Read, Write}, LogEntryType, CacheEntryType, HistoryEntry records. Client variables: clientState, clientOp, clientCon, clientSeq, clientCache, opsCompleted. Replica variables: role, currentTerm, log, commitIndex, lastApplied, kvStore, keyVersion, nextIndex, matchIndex. Network: messages set. History: history sequence + epoch counter. [26:03:03]
 
 #### 55.2: Model Raft-HT replica state machine
 - [ ] **55.2a** Replica state variables: `leader`, `log[r]` (sequence of `[term, cmd, consistency]`), `commitIndex[r]`, `appliedIndex[r]`, `kvStore[r]` (key→value map), `keyVersion[r]` (key→slot of last write)
