@@ -530,17 +530,487 @@ ApplyEntry(r) ==
           IN IF unsynced[r][k] # Nil /\ unsynced[r][k].cmdId = cmdId
              THEN unsynced' = [unsynced EXCEPT ![r][k] = Nil]
              ELSE UNCHANGED unsyncedVars
+       \* Leader sends SyncReply for strong ops (slow path completion)
+       /\ IF role[r] = Leader /\ entry.consistency = Strong
+          THEN LET result == IF isWrite THEN entry.cmd.val
+                             ELSE kvStore[r][entry.cmd.key]
+               IN messages' = messages \cup
+                  {[type   |-> "SyncReply",
+                    client |-> entry.client,
+                    seq    |-> entry.seq,
+                    val    |-> result,
+                    slot   |-> idx]}
+          ELSE UNCHANGED messages
        /\ UNCHANGED <<role, currentTerm, log, commitIndex,
-                      messages, clientVars, historyVars>>
-
-\* Discard stale messages to bound state space.
-\* Only discard messages that cannot be usefully processed:
-\*   - Accept/AcceptAck/Commit from previous terms (not modeled yet)
-\* We do NOT discard CausalPropose or CausalReply since they're needed
-\* for protocol correctness.
+                      clientVars, historyVars>>
 
 \* ============================================================================
-\* Placeholder: Strong ops (56.3-56.4) and weak reads (56.5) to be added
+\* Actions — Strong Write Path (Phase 56.3)
+\* ============================================================================
+
+\* (56.3a) Client issues a strong (linearizable) write.
+\* Broadcasts StrongPropose to ALL replicas (for witness fast path).
+ClientIssueStrongWrite(c) ==
+    /\ clientState[c] = Idle
+    /\ opsCompleted[c] < MaxOps
+    /\ \E k \in Keys, v \in Values :
+        LET cmd == [op |-> Write, key |-> k, val |-> v]
+        IN
+        /\ epoch'          = epoch + 1
+        /\ clientState'    = [clientState EXCEPT ![c] = Waiting]
+        /\ clientOp'       = [clientOp EXCEPT ![c] = cmd]
+        /\ clientCon'      = [clientCon EXCEPT ![c] = Strong]
+        /\ clientInvEpoch' = [clientInvEpoch EXCEPT ![c] = epoch + 1]
+        /\ clientSeq'      = [clientSeq EXCEPT ![c] = @ + 1]
+        \* Clear fast path responses for this new op
+        /\ fastPathResponses' = [fastPathResponses EXCEPT ![c] = {}]
+        \* Broadcast StrongPropose to ALL replicas
+        /\ messages' = messages \cup
+            {[type   |-> "StrongPropose",
+              dest   |-> r2,
+              client |-> c,
+              seq    |-> clientSeq[c],
+              cmd    |-> cmd] : r2 \in Replicas}
+        /\ UNCHANGED <<replicaVars, unsyncedVars, clientCache, opsCompleted,
+                       clientWriteSet, boundReplica, history>>
+
+\* (56.3b) Non-leader handles StrongPropose (strong write) — witness check.
+\* Adds strong cmd to witness pool, checks key conflict.
+\* Replies with MRecordAck: Ok/Nok + CausalDeps (same-client weak writes).
+\* ReadDep is only relevant for strong READS (not writes), so Nil here.
+HandleStrongProposeFollower(r) ==
+    \E m \in messages :
+        /\ m.type = "StrongPropose"
+        /\ m.dest = r
+        /\ role[r] = Follower
+        /\ LET k      == m.cmd.key
+               cmdId  == [client |-> m.client, seq |-> m.seq]
+               \* Check for key conflict: another STRONG write pending on same key
+               conflict == /\ unsynced[r][k] # Nil
+                           /\ unsynced[r][k].isStrong
+               \* Causal deps: same-client weak writes currently in witness pool
+               causalDeps == CausalDepsFor(r, m.client)
+               ok == ~conflict
+           IN
+           \* Add strong cmd to witness pool (overwrites any existing weak entry)
+           /\ unsynced' = [unsynced EXCEPT ![r][k] =
+                [isStrong |-> TRUE,
+                 op       |-> m.cmd.op,
+                 key      |-> k,
+                 val      |-> m.cmd.val,
+                 cmdId    |-> cmdId]]
+           \* Reply with witness ack (slot=0 for non-leaders, val=Nil for writes)
+           /\ messages' = (messages \ {m}) \cup
+              {[type       |-> "MRecordAck",
+                from       |-> r,
+                client     |-> m.client,
+                seq        |-> m.seq,
+                ok         |-> ok,
+                causalDeps |-> causalDeps,
+                readDep    |-> Nil,
+                slot       |-> 0,
+                val        |-> Nil,
+                isLeader   |-> FALSE]}
+        /\ UNCHANGED <<replicaVars, clientVars, historyVars>>
+
+\* (56.3b) Leader handles StrongPropose (strong write).
+\* Appends to log, sends Accept for replication, replies with leader ack.
+\* Leader always accepts (it assigns the slot, no conflict concept).
+HandleStrongProposeLeader(r) ==
+    \E m \in messages :
+        /\ m.type = "StrongPropose"
+        /\ m.dest = r
+        /\ role[r] = Leader
+        /\ LET k      == m.cmd.key
+               cmdId  == [client |-> m.client, seq |-> m.seq]
+               newLog == Append(log[r],
+                   [cmd         |-> m.cmd,
+                    consistency |-> Strong,
+                    term        |-> currentTerm[r],
+                    client      |-> m.client,
+                    seq         |-> m.seq])
+               slot == Len(newLog)
+               \* Leader sends Accept to followers for replication
+               accepts == {[type  |-> "Accept",
+                            from  |-> r,
+                            to    |-> f,
+                            slot  |-> slot,
+                            entry |-> newLog[slot]] : f \in Replicas \ {r}}
+               \* Leader ack: always ok (leader determines order)
+               \* Include slot so client can record it
+               leaderAck == [type       |-> "MRecordAck",
+                             from       |-> r,
+                             client     |-> m.client,
+                             seq        |-> m.seq,
+                             ok         |-> TRUE,
+                             causalDeps |-> {},
+                             readDep    |-> Nil,
+                             slot       |-> slot,
+                             val        |-> Nil,
+                             isLeader   |-> TRUE]
+           IN
+           \* Add strong cmd to witness pool
+           /\ unsynced' = [unsynced EXCEPT ![r][k] =
+                [isStrong |-> TRUE,
+                 op       |-> m.cmd.op,
+                 key      |-> k,
+                 val      |-> m.cmd.val,
+                 cmdId    |-> cmdId]]
+           /\ log' = [log EXCEPT ![r] = newLog]
+           /\ messages' = (messages \ {m}) \cup accepts \cup {leaderAck}
+        /\ UNCHANGED <<role, currentTerm, commitIndex, lastApplied,
+                       kvStore, keyVersion, clientVars, historyVars>>
+
+\* (56.3c) Client handles strong write fast path.
+\* Collects 3/4 quorum of Ok acks where:
+\*   - All Ok (no key conflicts)
+\*   - CausalDeps from all witnesses cover client's writeSet
+\* On success: complete immediately with leader's slot.
+\* On failure: fall through to slow path (ClientHandleStrongWriteSlowPath).
+ClientHandleStrongWriteFastPath(c) ==
+    \E m \in messages :
+        /\ m.type = "MRecordAck"
+        /\ m.client = c
+        /\ m.seq = clientSeq[c] - 1
+        /\ clientState[c] = Waiting
+        /\ clientCon[c] = Strong
+        /\ clientOp[c].op = Write
+        \* Accumulate this ack
+        /\ LET newResponses == fastPathResponses[c] \cup {m}
+               \* Follower acks (witnesses, not leader)
+               followerOkAcks == {a \in newResponses : a.ok = TRUE /\ ~a.isLeader}
+               \* Leader ack (has slot assignment)
+               leaderAcks == {a \in newResponses : a.isLeader}
+               haveLeader == Cardinality(leaderAcks) > 0
+               \* Total acks with ok=TRUE (leader always ok)
+               allOkAcks == {a \in newResponses : a.ok = TRUE}
+               \* Check if we have super-majority (3/4) of ok acks
+               haveQuorum == Cardinality(allOkAcks) >= ThreeQuarters
+               \* Check CausalDeps: every entry in client's writeSet must appear
+               \* in EVERY follower witness's causalDeps
+               causalDepsOk ==
+                   \A ws \in clientWriteSet[c] :
+                       \A a \in followerOkAcks :
+                           ws \in a.causalDeps
+               \* Fast path succeeds if: quorum + causal deps covered + have leader slot
+               fastPathOk == haveQuorum /\ causalDepsOk /\ haveLeader
+           IN
+           IF fastPathOk
+           THEN
+               \* Complete on fast path
+               LET leaderAck == CHOOSE a \in leaderAcks : TRUE
+                   slot == leaderAck.slot
+                   k    == clientOp[c].key
+                   v    == clientOp[c].val
+               IN
+               /\ epoch'          = epoch + 1
+               /\ clientState'    = [clientState EXCEPT ![c] = Idle]
+               /\ clientOp'       = [clientOp EXCEPT ![c] = Nil]
+               /\ opsCompleted'   = [opsCompleted EXCEPT ![c] = @ + 1]
+               /\ clientCache'    = [clientCache EXCEPT ![c][k] =
+                    [val |-> v, ver |-> Max(@.ver, slot)]]
+               \* Clear writeSet entries (strong op commits all prior weak writes)
+               /\ clientWriteSet' = [clientWriteSet EXCEPT ![c] = {}]
+               /\ fastPathResponses' = [fastPathResponses EXCEPT ![c] = {}]
+               /\ history' = Append(history,
+                    [client      |-> c,
+                     op          |-> Write,
+                     key         |-> k,
+                     reqVal      |-> v,
+                     retVal      |-> v,
+                     consistency |-> Strong,
+                     invEpoch    |-> clientInvEpoch[c],
+                     retEpoch    |-> epoch + 1,
+                     slot        |-> slot,
+                     retVer      |-> Max(clientCache[c][k].ver, slot)])
+               /\ messages' = messages \ {m}
+               /\ UNCHANGED <<replicaVars, unsyncedVars, clientCon, clientSeq,
+                              clientInvEpoch, boundReplica>>
+           ELSE
+               \* Not enough acks yet or conditions not met — just accumulate
+               /\ fastPathResponses' = [fastPathResponses EXCEPT ![c] = newResponses]
+               /\ messages' = messages \ {m}
+               /\ UNCHANGED <<replicaVars, unsyncedVars, clientState, clientOp,
+                              clientCon, clientSeq, clientCache, clientInvEpoch,
+                              opsCompleted, clientWriteSet, boundReplica,
+                              historyVars>>
+
+\* (56.3d) Client handles strong write slow path.
+\* Falls back when fast path cannot succeed: leader has committed + applied.
+\* Leader sends SyncReply after apply (in ApplyEntry).
+\* The client completes with the committed result.
+ClientHandleStrongWriteSlowPath(c) ==
+    \E m \in messages :
+        /\ m.type = "SyncReply"
+        /\ m.client = c
+        /\ m.seq = clientSeq[c] - 1
+        /\ clientState[c] = Waiting
+        /\ clientCon[c] = Strong
+        /\ clientOp[c].op = Write
+        /\ LET k    == clientOp[c].key
+               v    == m.val
+               slot == m.slot
+           IN
+           /\ epoch'          = epoch + 1
+           /\ clientState'    = [clientState EXCEPT ![c] = Idle]
+           /\ clientOp'       = [clientOp EXCEPT ![c] = Nil]
+           /\ opsCompleted'   = [opsCompleted EXCEPT ![c] = @ + 1]
+           /\ clientCache'    = [clientCache EXCEPT ![c][k] =
+                [val |-> v, ver |-> Max(@.ver, slot)]]
+           \* Clear writeSet on commit
+           /\ clientWriteSet' = [clientWriteSet EXCEPT ![c] = {}]
+           /\ fastPathResponses' = [fastPathResponses EXCEPT ![c] = {}]
+           /\ history' = Append(history,
+                [client      |-> c,
+                 op          |-> Write,
+                 key         |-> k,
+                 reqVal      |-> clientOp[c].val,
+                 retVal      |-> v,
+                 consistency |-> Strong,
+                 invEpoch    |-> clientInvEpoch[c],
+                 retEpoch    |-> epoch + 1,
+                 slot        |-> slot,
+                 retVer      |-> Max(clientCache[c][k].ver, slot)])
+        /\ messages' = messages \ {m}
+        /\ UNCHANGED <<replicaVars, unsyncedVars, clientCon, clientSeq,
+                       clientInvEpoch, boundReplica>>
+
+\* ============================================================================
+\* Actions — Strong Read Path (Phase 56.4)
+\* ============================================================================
+
+\* (56.4a) Client issues a strong (linearizable) read.
+\* Broadcasts StrongReadPropose to ALL replicas (for witness fast path).
+ClientIssueStrongRead(c) ==
+    /\ clientState[c] = Idle
+    /\ opsCompleted[c] < MaxOps
+    /\ \E k \in Keys :
+        LET cmd == [op |-> Read, key |-> k, val |-> Nil]
+        IN
+        /\ epoch'          = epoch + 1
+        /\ clientState'    = [clientState EXCEPT ![c] = Waiting]
+        /\ clientOp'       = [clientOp EXCEPT ![c] = cmd]
+        /\ clientCon'      = [clientCon EXCEPT ![c] = Strong]
+        /\ clientInvEpoch' = [clientInvEpoch EXCEPT ![c] = epoch + 1]
+        /\ clientSeq'      = [clientSeq EXCEPT ![c] = @ + 1]
+        \* Clear fast path responses for this new op
+        /\ fastPathResponses' = [fastPathResponses EXCEPT ![c] = {}]
+        \* Broadcast StrongReadPropose to ALL replicas
+        /\ messages' = messages \cup
+            {[type   |-> "StrongReadPropose",
+              dest   |-> r,
+              client |-> c,
+              seq    |-> clientSeq[c],
+              cmd    |-> cmd] : r \in Replicas}
+        /\ UNCHANGED <<replicaVars, unsyncedVars, clientCache, opsCompleted,
+                       clientWriteSet, boundReplica, history>>
+
+\* (56.4b) Non-leader handles StrongReadPropose — witness check.
+\* Reports Ok/Nok (conflict with strong write on same key) +
+\* CausalDeps (same-client weak writes) +
+\* ReadDep (weak write on same key, if any — for read consistency check).
+HandleStrongReadProposeFollower(r) ==
+    \E m \in messages :
+        /\ m.type = "StrongReadPropose"
+        /\ m.dest = r
+        /\ role[r] = Follower
+        /\ LET k      == m.cmd.key
+               cmdId  == [client |-> m.client, seq |-> m.seq]
+               \* Check for key conflict: another STRONG entry pending on same key
+               conflict == /\ unsynced[r][k] # Nil
+                           /\ unsynced[r][k].isStrong
+               \* Causal deps: same-client weak writes currently in witness pool
+               causalDeps == CausalDepsFor(r, m.client)
+               \* ReadDep: weak write on same key (not strong — those cause conflict)
+               readDep == UnsyncedWeakWriteCmdId(r, k)
+               ok == ~conflict
+           IN
+           \* Add strong read to witness pool (mark as strong, op=Read)
+           /\ unsynced' = [unsynced EXCEPT ![r][k] =
+                [isStrong |-> TRUE,
+                 op       |-> Read,
+                 key      |-> k,
+                 val      |-> Nil,
+                 cmdId    |-> cmdId]]
+           \* Reply with witness ack including ReadDep
+           /\ messages' = (messages \ {m}) \cup
+              {[type       |-> "MRecordAck",
+                from       |-> r,
+                client     |-> m.client,
+                seq        |-> m.seq,
+                ok         |-> ok,
+                causalDeps |-> causalDeps,
+                readDep    |-> readDep,
+                slot       |-> 0,
+                val        |-> Nil,
+                isLeader   |-> FALSE]}
+        /\ UNCHANGED <<replicaVars, clientVars, historyVars>>
+
+\* (56.4b) Leader handles StrongReadPropose.
+\* Appends read to log, computes speculative result (including unsynced weak writes),
+\* sends Accept for replication, replies with leader ack including result.
+HandleStrongReadProposeLeader(r) ==
+    \E m \in messages :
+        /\ m.type = "StrongReadPropose"
+        /\ m.dest = r
+        /\ role[r] = Leader
+        /\ LET k      == m.cmd.key
+               cmdId  == [client |-> m.client, seq |-> m.seq]
+               newLog == Append(log[r],
+                   [cmd         |-> m.cmd,
+                    consistency |-> Strong,
+                    term        |-> currentTerm[r],
+                    client      |-> m.client,
+                    seq         |-> m.seq])
+               slot == Len(newLog)
+               \* Speculative result: sees unsynced weak writes on this key
+               specVal == SpeculativeVal(r, k)
+               \* Leader sends Accept to followers for replication
+               accepts == {[type  |-> "Accept",
+                            from  |-> r,
+                            to    |-> f,
+                            slot  |-> slot,
+                            entry |-> newLog[slot]] : f \in Replicas \ {r}}
+               \* Leader ack: always ok, includes slot + speculative value
+               leaderAck == [type       |-> "MRecordAck",
+                             from       |-> r,
+                             client     |-> m.client,
+                             seq        |-> m.seq,
+                             ok         |-> TRUE,
+                             causalDeps |-> {},
+                             readDep    |-> Nil,
+                             slot       |-> slot,
+                             val        |-> specVal,
+                             isLeader   |-> TRUE]
+           IN
+           \* Add strong read to witness pool
+           /\ unsynced' = [unsynced EXCEPT ![r][k] =
+                [isStrong |-> TRUE,
+                 op       |-> Read,
+                 key      |-> k,
+                 val      |-> Nil,
+                 cmdId    |-> cmdId]]
+           /\ log' = [log EXCEPT ![r] = newLog]
+           /\ messages' = (messages \ {m}) \cup accepts \cup {leaderAck}
+        /\ UNCHANGED <<role, currentTerm, commitIndex, lastApplied,
+                       kvStore, keyVersion, clientVars, historyVars>>
+
+\* (56.4c) Client handles strong read fast path.
+\* Requires: 3/4 quorum ok + CausalDeps cover writeSet + ReadDep consistent
+\* (all followers report same ReadDep — all nil or all same cmdId).
+\* On success: complete with leader's speculative value.
+ClientHandleStrongReadFastPath(c) ==
+    \E m \in messages :
+        /\ m.type = "MRecordAck"
+        /\ m.client = c
+        /\ m.seq = clientSeq[c] - 1
+        /\ clientState[c] = Waiting
+        /\ clientCon[c] = Strong
+        /\ clientOp[c].op = Read
+        \* Accumulate this ack
+        /\ LET newResponses == fastPathResponses[c] \cup {m}
+               \* Follower acks (witnesses, not leader)
+               followerOkAcks == {a \in newResponses : a.ok = TRUE /\ ~a.isLeader}
+               \* Leader ack (has slot + speculative value)
+               leaderAcks == {a \in newResponses : a.isLeader}
+               haveLeader == Cardinality(leaderAcks) > 0
+               \* Total acks with ok=TRUE
+               allOkAcks == {a \in newResponses : a.ok = TRUE}
+               \* Check super-majority quorum
+               haveQuorum == Cardinality(allOkAcks) >= ThreeQuarters
+               \* Check CausalDeps coverage
+               causalDepsOk ==
+                   \A ws \in clientWriteSet[c] :
+                       \A a \in followerOkAcks :
+                           ws \in a.causalDeps
+               \* Check ReadDep consistency: all follower acks must agree
+               \* (all Nil or all the same cmdId)
+               followerReadDeps == {a.readDep : a \in followerOkAcks}
+               readDepOk == Cardinality(followerReadDeps) <= 1
+               \* Fast path succeeds if all conditions met
+               fastPathOk == haveQuorum /\ causalDepsOk /\ readDepOk /\ haveLeader
+           IN
+           IF fastPathOk
+           THEN
+               \* Complete on fast path with leader's speculative value
+               LET leaderAck == CHOOSE a \in leaderAcks : TRUE
+                   slot == leaderAck.slot
+                   k    == clientOp[c].key
+                   retVal == leaderAck.val
+               IN
+               /\ epoch'          = epoch + 1
+               /\ clientState'    = [clientState EXCEPT ![c] = Idle]
+               /\ clientOp'       = [clientOp EXCEPT ![c] = Nil]
+               /\ opsCompleted'   = [opsCompleted EXCEPT ![c] = @ + 1]
+               /\ clientCache'    = [clientCache EXCEPT ![c][k] =
+                    [val |-> retVal, ver |-> Max(@.ver, slot)]]
+               \* Clear writeSet (strong op commits all prior weak writes)
+               /\ clientWriteSet' = [clientWriteSet EXCEPT ![c] = {}]
+               /\ fastPathResponses' = [fastPathResponses EXCEPT ![c] = {}]
+               /\ history' = Append(history,
+                    [client      |-> c,
+                     op          |-> Read,
+                     key         |-> k,
+                     reqVal      |-> Nil,
+                     retVal      |-> retVal,
+                     consistency |-> Strong,
+                     invEpoch    |-> clientInvEpoch[c],
+                     retEpoch    |-> epoch + 1,
+                     slot        |-> slot,
+                     retVer      |-> Max(clientCache[c][k].ver, slot)])
+               /\ messages' = messages \ {m}
+               /\ UNCHANGED <<replicaVars, unsyncedVars, clientCon, clientSeq,
+                              clientInvEpoch, boundReplica>>
+           ELSE
+               \* Not enough acks yet — just accumulate
+               /\ fastPathResponses' = [fastPathResponses EXCEPT ![c] = newResponses]
+               /\ messages' = messages \ {m}
+               /\ UNCHANGED <<replicaVars, unsyncedVars, clientState, clientOp,
+                              clientCon, clientSeq, clientCache, clientInvEpoch,
+                              opsCompleted, clientWriteSet, boundReplica,
+                              historyVars>>
+
+\* (56.4d) Client handles strong read slow path.
+\* Completes on SyncReply from leader (after commit+apply).
+\* The leader sends the committed result after applying the read.
+ClientHandleStrongReadSlowPath(c) ==
+    \E m \in messages :
+        /\ m.type = "SyncReply"
+        /\ m.client = c
+        /\ m.seq = clientSeq[c] - 1
+        /\ clientState[c] = Waiting
+        /\ clientCon[c] = Strong
+        /\ clientOp[c].op = Read
+        /\ LET k    == clientOp[c].key
+               retVal == m.val
+               slot == m.slot
+           IN
+           /\ epoch'          = epoch + 1
+           /\ clientState'    = [clientState EXCEPT ![c] = Idle]
+           /\ clientOp'       = [clientOp EXCEPT ![c] = Nil]
+           /\ opsCompleted'   = [opsCompleted EXCEPT ![c] = @ + 1]
+           /\ clientCache'    = [clientCache EXCEPT ![c][k] =
+                [val |-> retVal, ver |-> Max(@.ver, slot)]]
+           \* Clear writeSet on commit
+           /\ clientWriteSet' = [clientWriteSet EXCEPT ![c] = {}]
+           /\ fastPathResponses' = [fastPathResponses EXCEPT ![c] = {}]
+           /\ history' = Append(history,
+                [client      |-> c,
+                 op          |-> Read,
+                 key         |-> k,
+                 reqVal      |-> Nil,
+                 retVal      |-> retVal,
+                 consistency |-> Strong,
+                 invEpoch    |-> clientInvEpoch[c],
+                 retEpoch    |-> epoch + 1,
+                 slot        |-> slot,
+                 retVer      |-> Max(clientCache[c][k].ver, slot)])
+        /\ messages' = messages \ {m}
+        /\ UNCHANGED <<replicaVars, unsyncedVars, clientCon, clientSeq,
+                       clientInvEpoch, boundReplica>>
+
+\* ============================================================================
+\* Placeholder: Weak reads (56.5) to be added
 \* ============================================================================
 
 \* ============================================================================
@@ -548,12 +1018,27 @@ ApplyEntry(r) ==
 \* ============================================================================
 
 Next ==
-    \* Client actions
+    \* Client actions — weak write
     \/ \E c \in Clients : ClientIssueCausalWrite(c)
     \/ \E c \in Clients : ClientHandleCausalReply(c)
-    \* Replica actions
+    \* Client actions — strong write
+    \/ \E c \in Clients : ClientIssueStrongWrite(c)
+    \/ \E c \in Clients : ClientHandleStrongWriteFastPath(c)
+    \/ \E c \in Clients : ClientHandleStrongWriteSlowPath(c)
+    \* Client actions — strong read
+    \/ \E c \in Clients : ClientIssueStrongRead(c)
+    \/ \E c \in Clients : ClientHandleStrongReadFastPath(c)
+    \/ \E c \in Clients : ClientHandleStrongReadSlowPath(c)
+    \* Replica actions — weak write
     \/ \E r \in Replicas : HandleCausalProposeFollower(r)
     \/ \E r \in Replicas : HandleCausalProposeLeader(r)
+    \* Replica actions — strong write
+    \/ \E r \in Replicas : HandleStrongProposeFollower(r)
+    \/ \E r \in Replicas : HandleStrongProposeLeader(r)
+    \* Replica actions — strong read
+    \/ \E r \in Replicas : HandleStrongReadProposeFollower(r)
+    \/ \E r \in Replicas : HandleStrongReadProposeLeader(r)
+    \* Replica actions — replication
     \/ \E r \in Replicas : HandleAccept(r)
     \/ \E r \in Replicas : HandleAcceptAck(r)
     \/ \E r, f \in Replicas : SendCommit(r, f)

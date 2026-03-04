@@ -3989,10 +3989,10 @@ Full causal consistency session guarantees verified:
 
 #### 56.4: Model strong read path (fast path + ReadDep)
 
-- [ ] **56.4a** `ClientIssueStrongRead(c)`: client broadcasts Propose (read) to all replicas
-- [ ] **56.4b** `HandleStrongReadPropose(r)`: non-leader checks key conflict, also reports ReadDep (any weak write on same key in unsynced). Leader computes speculative result including unsynced weak writes.
-- [ ] **56.4c** `ClientHandleStrongReadFastPath(c)`: super-majority Ok + CausalDeps cover + ReadDep consistent (all nil or all same CmdId) → complete
-- [ ] **56.4d** `ClientHandleStrongReadSlowPath(c)`: complete on slow path
+- [x] **56.4a** `ClientIssueStrongRead(c)`: broadcasts StrongReadPropose to ALL replicas, clears fastPathResponses. [26:03:04]
+- [x] **56.4b** `HandleStrongReadProposeFollower(r)` + `HandleStrongReadProposeLeader(r)`: Follower checks key conflict (strong entries only), reports CausalDeps + ReadDep (via `UnsyncedWeakWriteCmdId`). Leader appends read to log, computes speculative result via `SpeculativeVal` (sees unsynced weak writes), sends Accept + leader MRecordAck with slot + val. Also added `val` field to all MRecordAck messages for uniform record shape. [26:03:04]
+- [x] **56.4c** `ClientHandleStrongReadFastPath(c)`: fast path requires 3/4 quorum ok + CausalDeps cover writeSet + ReadDep consistent (all followers agree: `Cardinality(followerReadDeps) <= 1`). On success: complete with leader's speculative value, record history with slot + retVer. [26:03:04]
+- [x] **56.4d** `ClientHandleStrongReadSlowPath(c)`: completes on SyncReply from leader (after commit+apply). ApplyEntry already handles reads correctly (`kvStore[r][key]`). TLC parse + 21M states explored, MCTypeInv PASS, no errors. [26:03:04]
 
 #### 56.5: Model weak read path (1 RTT to bound replica)
 
