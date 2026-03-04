@@ -301,11 +301,264 @@ Init ==
     /\ epoch       = 0
 
 \* ============================================================================
-\* Placeholder: Actions will be added in subsequent phases (56.2-56.5)
+\* Actions — Weak Write Path (Phase 56.2)
 \* ============================================================================
 
-\* Next-state relation (stub — will be populated in phases 56.2-56.5)
-Next == FALSE
+\* (56.2a) Client issues a weak (causal) write.
+\* Broadcasts CausalPropose to ALL replicas and adds to client's write set.
+ClientIssueCausalWrite(c) ==
+    /\ clientState[c] = Idle
+    /\ opsCompleted[c] < MaxOps
+    /\ \E k \in Keys, v \in Values :
+        LET cmd   == [op |-> Write, key |-> k, val |-> v]
+            cmdId == [client |-> c, seq |-> clientSeq[c]]
+        IN
+        /\ epoch'          = epoch + 1
+        /\ clientState'    = [clientState EXCEPT ![c] = Waiting]
+        /\ clientOp'       = [clientOp EXCEPT ![c] = cmd]
+        /\ clientCon'      = [clientCon EXCEPT ![c] = Weak]
+        /\ clientInvEpoch' = [clientInvEpoch EXCEPT ![c] = epoch + 1]
+        /\ clientSeq'      = [clientSeq EXCEPT ![c] = @ + 1]
+        \* Add to write set (cleared only on commit, not on 1-RTT reply)
+        /\ clientWriteSet' = [clientWriteSet EXCEPT ![c] = @ \cup {cmdId}]
+        \* Broadcast CausalPropose to ALL replicas (one message per replica)
+        /\ messages' = messages \cup
+            {[type       |-> "CausalPropose",
+              dest       |-> r2,
+              client     |-> c,
+              seq        |-> clientSeq[c],
+              cmd        |-> cmd,
+              boundRep   |-> boundReplica[c]] : r2 \in Replicas}
+        /\ UNCHANGED <<replicaVars, unsyncedVars, clientCache, opsCompleted,
+                       boundReplica, fastPathResponses, history>>
+
+\* (56.2b) Non-leader replica handles CausalPropose (weak write).
+\* Adds to witness pool. If bound replica, sends speculative CausalReply.
+HandleCausalProposeFollower(r) ==
+    \E m \in messages :
+        /\ m.type = "CausalPropose"
+        /\ m.dest = r
+        /\ role[r] = Follower
+        /\ LET k     == m.cmd.key
+               cmdId == [client |-> m.client, seq |-> m.seq]
+               reply == [type    |-> "CausalReply",
+                         client  |-> m.client,
+                         seq     |-> m.seq,
+                         val     |-> m.cmd.val,
+                         replica |-> r]
+           IN
+           \* Add to witness pool
+           /\ unsynced' = [unsynced EXCEPT ![r][k] =
+                [isStrong |-> FALSE,
+                 op       |-> m.cmd.op,
+                 key      |-> k,
+                 val      |-> m.cmd.val,
+                 cmdId    |-> cmdId]]
+           \* Bound replica sends CausalReply; others just consume
+           /\ messages' = (messages \ {m}) \cup
+                          (IF r = m.boundRep THEN {reply} ELSE {})
+        /\ UNCHANGED <<replicaVars, clientVars, historyVars>>
+
+\* (56.2b) Leader handles CausalPropose (weak write).
+\* Adds to witness pool, assigns slot, appends to log, sends Accept to
+\* followers. If also bound replica, sends CausalReply.
+HandleCausalProposeLeader(r) ==
+    \E m \in messages :
+        /\ m.type = "CausalPropose"
+        /\ m.dest = r
+        /\ role[r] = Leader
+        /\ LET k     == m.cmd.key
+               cmdId == [client |-> m.client, seq |-> m.seq]
+               newLog == Append(log[r],
+                   [cmd         |-> m.cmd,
+                    consistency |-> Weak,
+                    term        |-> currentTerm[r],
+                    client      |-> m.client,
+                    seq         |-> m.seq])
+               slot == Len(newLog)
+               reply == [type    |-> "CausalReply",
+                         client  |-> m.client,
+                         seq     |-> m.seq,
+                         val     |-> m.cmd.val,
+                         replica |-> r]
+               accepts == {[type  |-> "Accept",
+                            from  |-> r,
+                            to    |-> f,
+                            slot  |-> slot,
+                            entry |-> newLog[slot]] : f \in Replicas \ {r}}
+           IN
+           \* Add to witness pool
+           /\ unsynced' = [unsynced EXCEPT ![r][k] =
+                [isStrong |-> FALSE,
+                 op       |-> m.cmd.op,
+                 key      |-> k,
+                 val      |-> m.cmd.val,
+                 cmdId    |-> cmdId]]
+           \* Assign slot and append to log
+           /\ log' = [log EXCEPT ![r] = newLog]
+           \* Send Accept to followers + CausalReply if bound
+           /\ messages' = (messages \ {m}) \cup accepts \cup
+                          (IF r = m.boundRep THEN {reply} ELSE {})
+        /\ UNCHANGED <<role, currentTerm, commitIndex, lastApplied,
+                       kvStore, keyVersion, clientVars, historyVars>>
+
+\* (56.2c) Client handles CausalReply (bound replica's speculative reply).
+\* Completes the weak write in 1 RTT. Does NOT remove from write set.
+ClientHandleCausalReply(c) ==
+    \E m \in messages :
+        /\ m.type = "CausalReply"
+        /\ m.client = c
+        /\ m.seq = clientSeq[c] - 1  \* Match pending op
+        /\ clientState[c] = Waiting
+        /\ clientCon[c] = Weak
+        /\ clientOp[c].op = Write
+        /\ LET k == clientOp[c].key
+               v == clientOp[c].val
+           IN
+           /\ epoch'        = epoch + 1
+           /\ clientState'  = [clientState EXCEPT ![c] = Idle]
+           /\ clientOp'     = [clientOp EXCEPT ![c] = Nil]
+           /\ opsCompleted' = [opsCompleted EXCEPT ![c] = @ + 1]
+           \* Cache the written value — use a provisional version.
+           \* The real slot hasn't been assigned yet (leader does that async).
+           \* We use clientSeq as a proxy version that increases monotonically.
+           /\ clientCache'  = [clientCache EXCEPT ![c][k] =
+                [val |-> v, ver |-> Max(@.ver, clientSeq[c] - 1)]]
+           \* Record in history — slot=0 because leader hasn't assigned slot yet.
+           \* The slot will be determined later by leader's async replication.
+           \* For invariant checking, weak writes get slot 0 initially.
+           \* HybridCompatibilityInv only checks pairs where both slots > 0.
+           /\ history' = Append(history,
+                [client      |-> c,
+                 op          |-> Write,
+                 key         |-> k,
+                 reqVal      |-> v,
+                 retVal      |-> v,
+                 consistency |-> Weak,
+                 invEpoch    |-> clientInvEpoch[c],
+                 retEpoch    |-> epoch + 1,
+                 slot        |-> 0,
+                 retVer      |-> Max(clientCache[c][k].ver, clientSeq[c] - 1)])
+        /\ messages' = messages \ {m}
+        \* Write set NOT cleared here — only on SyncReply
+        /\ UNCHANGED <<replicaVars, unsyncedVars, clientCon, clientSeq,
+                       clientInvEpoch, clientWriteSet, boundReplica,
+                       fastPathResponses>>
+
+\* (56.2d) Follower handles Accept message — append entry to log at slot.
+HandleAccept(r) ==
+    \E m \in messages :
+        /\ m.type = "Accept"
+        /\ m.to = r
+        /\ role[r] = Follower
+        \* Append entry to log (may need to extend if slot > current length)
+        \* In CURP-HO, Accept messages arrive in slot order from leader.
+        \* Guard: only accept if slot = Len(log[r]) + 1 (next expected slot)
+        /\ m.slot = Len(log[r]) + 1
+        /\ log' = [log EXCEPT ![r] = Append(@, m.entry)]
+        \* Send AcceptAck back to leader
+        /\ messages' = (messages \ {m}) \cup
+           {[type |-> "AcceptAck",
+             from |-> r,
+             to   |-> m.from,
+             slot |-> m.slot]}
+        /\ UNCHANGED <<role, currentTerm, commitIndex, lastApplied,
+                       kvStore, keyVersion, unsyncedVars, clientVars,
+                       historyVars>>
+
+\* (56.2d) Leader handles AcceptAck — advance commit when majority reached.
+HandleAcceptAck(r) ==
+    \E m \in messages :
+        /\ m.type = "AcceptAck"
+        /\ m.to = r
+        /\ role[r] = Leader
+        \* Count replicas that have this slot (including leader)
+        /\ LET slot == m.slot
+               \* All replicas that have acked up to this slot (including self)
+               ackedReplicas == {r} \cup {r2 \in Replicas :
+                   \E a \in messages : a.type = "AcceptAck" /\ a.to = r /\ a.slot >= slot}
+           IN
+           \* Advance commitIndex if majority have this slot
+           /\ IF Cardinality(ackedReplicas) >= Majority
+              THEN commitIndex' = [commitIndex EXCEPT ![r] = Max(@, slot)]
+              ELSE UNCHANGED commitIndex
+        /\ messages' = messages \ {m}
+        /\ UNCHANGED <<role, currentTerm, log, lastApplied, kvStore, keyVersion,
+                       unsyncedVars, clientVars, historyVars>>
+
+\* (56.2d) Leader sends Commit to followers after advancing commitIndex.
+SendCommit(r, f) ==
+    /\ role[r] = Leader
+    /\ r # f
+    /\ commitIndex[r] > 0
+    \* Only send if follower doesn't already know about this commitIndex
+    /\ ~\E m \in messages : m.type = "Commit" /\ m.from = r /\ m.to = f
+                            /\ m.commitIndex >= commitIndex[r]
+    /\ messages' = messages \cup
+       {[type        |-> "Commit",
+         from        |-> r,
+         to          |-> f,
+         commitIndex |-> commitIndex[r]]}
+    /\ UNCHANGED <<replicaVars, unsyncedVars, clientVars, historyVars>>
+
+\* (56.2d) Follower handles Commit — advance commitIndex.
+HandleCommit(r) ==
+    \E m \in messages :
+        /\ m.type = "Commit"
+        /\ m.to = r
+        /\ commitIndex' = [commitIndex EXCEPT ![r] = Max(@, Min(m.commitIndex, Len(log[r])))]
+        /\ messages' = messages \ {m}
+        /\ UNCHANGED <<role, currentTerm, log, lastApplied, kvStore, keyVersion,
+                       unsyncedVars, clientVars, historyVars>>
+
+\* (56.2d) Any replica applies next committed entry to state machine.
+\* On apply: update kvStore, keyVersion, and clear unsynced entry for this key.
+ApplyEntry(r) ==
+    /\ lastApplied[r] < commitIndex[r]
+    /\ LET idx     == lastApplied[r] + 1
+           entry   == log[r][idx]
+           k       == entry.cmd.key
+           isWrite == entry.cmd.op = Write
+       IN
+       /\ lastApplied' = [lastApplied EXCEPT ![r] = idx]
+       /\ IF isWrite
+          THEN /\ kvStore'    = [kvStore EXCEPT ![r][k] = entry.cmd.val]
+               /\ keyVersion' = [keyVersion EXCEPT ![r][k] = idx]
+          ELSE UNCHANGED <<kvStore, keyVersion>>
+       \* Clear unsynced entry for this key if it matches the committed command
+       /\ LET cmdId == [client |-> entry.client, seq |-> entry.seq]
+          IN IF unsynced[r][k] # Nil /\ unsynced[r][k].cmdId = cmdId
+             THEN unsynced' = [unsynced EXCEPT ![r][k] = Nil]
+             ELSE UNCHANGED unsyncedVars
+       /\ UNCHANGED <<role, currentTerm, log, commitIndex,
+                      messages, clientVars, historyVars>>
+
+\* Discard stale messages to bound state space.
+\* Only discard messages that cannot be usefully processed:
+\*   - Accept/AcceptAck/Commit from previous terms (not modeled yet)
+\* We do NOT discard CausalPropose or CausalReply since they're needed
+\* for protocol correctness.
+
+\* ============================================================================
+\* Placeholder: Strong ops (56.3-56.4) and weak reads (56.5) to be added
+\* ============================================================================
+
+\* ============================================================================
+\* Next-State Relation
+\* ============================================================================
+
+Next ==
+    \* Client actions
+    \/ \E c \in Clients : ClientIssueCausalWrite(c)
+    \/ \E c \in Clients : ClientHandleCausalReply(c)
+    \* Replica actions
+    \/ \E r \in Replicas : HandleCausalProposeFollower(r)
+    \/ \E r \in Replicas : HandleCausalProposeLeader(r)
+    \/ \E r \in Replicas : HandleAccept(r)
+    \/ \E r \in Replicas : HandleAcceptAck(r)
+    \/ \E r, f \in Replicas : SendCommit(r, f)
+    \/ \E r \in Replicas : HandleCommit(r)
+    \/ \E r \in Replicas : ApplyEntry(r)
 
 Spec == Init /\ [][Next]_vars
 

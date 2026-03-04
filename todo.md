@@ -3974,10 +3974,10 @@ Full causal consistency session guarantees verified:
 
 #### 56.2: Model weak write path (1 RTT broadcast)
 
-- [ ] **56.2a** `ClientIssueCausalWrite(c)`: client broadcasts CausalPropose to ALL replicas, adds to clientWriteSet
-- [ ] **56.2b** `HandleCausalPropose(r)`: replica adds entry to unsynced[key], computes speculative result, sends CausalReply to client
-- [ ] **56.2c** `ClientHandleCausalReply(c)`: client completes on bound replica's reply (1 RTT), records history entry with retVer, does NOT remove from clientWriteSet (removed only on SyncReply)
-- [ ] **56.2d** Leader async slot assignment: leader takes unsynced entry, assigns log slot, starts replication (Accept → AcceptAck → Commit). On commit, clears unsynced entry.
+- [x] **56.2a** `ClientIssueCausalWrite(c)`: broadcasts CausalPropose (with dest field per replica) to ALL replicas, adds cmdId to clientWriteSet. [26:03:04]
+- [x] **56.2b** `HandleCausalProposeFollower(r)` + `HandleCausalProposeLeader(r)`: split into two actions to avoid duplicate messages' assignment. Follower: adds to unsynced, bound replica sends CausalReply. Leader: additionally assigns slot, appends to log, sends Accept to followers. [26:03:04]
+- [x] **56.2c** `ClientHandleCausalReply(c)`: completes weak write in 1 RTT, records history with slot=0 (leader assigns slot async), retVer from cache. Does NOT clear writeSet. [26:03:04]
+- [x] **56.2d** `HandleAccept(r)`, `HandleAcceptAck(r)`, `SendCommit(r,f)`, `HandleCommit(r)`, `ApplyEntry(r)`: full async replication chain. ApplyEntry also clears matching unsynced entry. TLC exhaustive check with 2c/2v/1k/MaxOps=1: **194,342,772 states, 25,490,126 distinct, depth 34, 6 min 24 sec, MCTypeInv PASS, NO ERRORS**. [26:03:04]
 
 #### 56.3: Model strong write path (fast path + slow path)
 
