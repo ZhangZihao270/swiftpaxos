@@ -19,3 +19,4 @@ results/
 # TLA+ tools (downloaded at runtime)
 tla/tla2tools.jar
 tla/states/
+tla/*_TTrace_*
