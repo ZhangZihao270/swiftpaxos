@@ -3943,6 +3943,88 @@ Full causal consistency session guarantees verified:
    - WritesFollowReads — PASS
 4. **HybridCompatibilityInv**: ≺_T/≺_P compatibility — PASS
 
+### Phase 56: TLA+ Model Checking for CURP-HO Hybrid Consistency — HIGH
+
+**Objective**: Build a TLA+ spec for CURP-HO and verify the same hybrid consistency properties as Raft-HT (Phase 55), using comparable model checking scale.
+
+**Reference**: CURP-HO protocol in `docs/protocol-overview.md`, implementation in `curp-ho/`, Raft-HT TLA+ spec in `tla/RaftHT.tla`.
+
+**Key differences from Raft-HT that affect the TLA+ model**:
+
+1. **Weak writes — broadcast + witness pool (1 RTT)**: Client broadcasts `CausalPropose` to ALL replicas. Each replica adds to witness pool (`unsynced` map), computes speculative result, replies. Client completes on bound replica's reply (1 RTT). Leader asynchronously assigns slot and replicates. In Raft-HT, weak writes go to leader only and reply after slot assignment.
+
+2. **Strong ops — fast path with dependency tracking**: Client broadcasts `Propose` to all replicas. Non-leaders check per-key conflict in witness pool, report `Ok` + `CausalDeps` (same-session weak writes in pool) + `ReadDep` (weak write on same key, for reads). Fast path completes at super-majority (3/4) with: all Ok, CausalDeps cover client's write set, ReadDep consistent. Otherwise falls back to slow path (majority quorum or SyncReply from leader).
+
+3. **Witness pool**: Both strong and weak commands stored per-key in `unsynced` map. Used for conflict detection, causal dependency tracking, and speculative read result computation.
+
+4. **Linearization**: Slot order in the single leader log (same as Raft-HT). But the timing of slot assignment differs — weak writes get slot asynchronously after 1-RTT reply.
+
+**Invariants to verify** (same as Raft-HT Phase 55.13):
+
+- **MCTypeInv**: Type correctness of all variables
+- **LinearizabilityInv** = RealTimeRespect ∧ StrongReadConsistency
+- **CausalConsistencyInv** = ReadsReturnValidValues ∧ MonotonicReads (version-based) ∧ ReadYourWrites ∧ MonotonicWrites ∧ WritesFollowReads
+- **HybridCompatibilityInv**: ≺_T/≺_P session order compatibility
+
+**Target model checking scale**: 3 replicas, 2 clients, 1 key, 2 values, MaxOps=2 (matching Raft-HT Phase 55.12/55.13). Exhaustive for MaxOps=1; 2-hour partial run for MaxOps=2.
+
+#### 56.1: TLA+ spec skeleton — constants, variables, Init
+
+- [ ] **56.1a** Create `tla/CurpHO.tla` with constants (Replicas, Clients, Keys, Values, MaxOps, Nil, InitLeader), variables:
+  - **Replica vars**: role, log, commitIndex, lastApplied, kvStore, keyVersion, nextIndex, matchIndex
+  - **Witness pool vars**: unsynced (per-replica, per-key: at most one UnsyncedEntry with {slot, isStrong, op, val, clientId, seqNum})
+  - **Client vars**: clientState, clientOp, clientCon, clientSeq, clientCache, clientInvEpoch, opsCompleted, clientWriteSet (tracks uncommitted weak writes for CausalDeps checking)
+  - **Network**: messages set
+  - **History**: history sequence, epoch counter
+  - **Bound replica**: boundReplica (per-client, fixed assignment for symmetry)
+  - Init: deterministic leader (InitLeader), empty logs, empty witness pools, each client bound to a replica
+
+#### 56.2: Model weak write path (1 RTT broadcast)
+
+- [ ] **56.2a** `ClientIssueCausalWrite(c)`: client broadcasts CausalPropose to ALL replicas, adds to clientWriteSet
+- [ ] **56.2b** `HandleCausalPropose(r)`: replica adds entry to unsynced[key], computes speculative result, sends CausalReply to client
+- [ ] **56.2c** `ClientHandleCausalReply(c)`: client completes on bound replica's reply (1 RTT), records history entry with retVer, does NOT remove from clientWriteSet (removed only on SyncReply)
+- [ ] **56.2d** Leader async slot assignment: leader takes unsynced entry, assigns log slot, starts replication (Accept → AcceptAck → Commit). On commit, clears unsynced entry.
+
+#### 56.3: Model strong write path (fast path + slow path)
+
+- [ ] **56.3a** `ClientIssueStrongWrite(c)`: client broadcasts Propose to all replicas
+- [ ] **56.3b** `HandleStrongPropose(r)`: non-leader checks key conflict in unsynced, replies with Ok/Nok + CausalDeps (same-session weak writes in pool). Leader appends to log, speculatively executes, starts replication.
+- [ ] **56.3c** `ClientHandleStrongWriteFastPath(c)`: client collects super-majority Ok + CausalDeps cover writeSet → complete on fast path
+- [ ] **56.3d** `ClientHandleStrongWriteSlowPath(c)`: client completes on majority AcceptAck or leader SyncReply
+
+#### 56.4: Model strong read path (fast path + ReadDep)
+
+- [ ] **56.4a** `ClientIssueStrongRead(c)`: client broadcasts Propose (read) to all replicas
+- [ ] **56.4b** `HandleStrongReadPropose(r)`: non-leader checks key conflict, also reports ReadDep (any weak write on same key in unsynced). Leader computes speculative result including unsynced weak writes.
+- [ ] **56.4c** `ClientHandleStrongReadFastPath(c)`: super-majority Ok + CausalDeps cover + ReadDep consistent (all nil or all same CmdId) → complete
+- [ ] **56.4d** `ClientHandleStrongReadSlowPath(c)`: complete on slow path
+
+#### 56.5: Model weak read path (1 RTT to bound replica)
+
+- [ ] **56.5a** `ClientIssueWeakRead(c)`: client sends WeakRead to bound replica
+- [ ] **56.5b** `HandleWeakRead(r)`: bound replica returns (val, ver) from committed kvStore + pending weak writes
+- [ ] **56.5c** `ClientHandleWeakReadReply(c)`: cache merge (max version wins), record history with retVer
+
+#### 56.6: Safety property invariants
+
+- [ ] **56.6a** Port LinearizabilityInv: RealTimeRespect (identical) + StrongReadConsistency (replay leader log — same structure since CURP-HO also uses single log with slot-ordered execution)
+- [ ] **56.6b** Port CausalConsistencyInv: ReadsReturnValidValues, MonotonicReads (retVer-based), ReadYourWrites, MonotonicWrites, WritesFollowReads — all identical since they only reference history entries
+- [ ] **56.6c** Port HybridCompatibilityInv: same session-order check on slotted ops
+- [ ] **56.6d** Define MCTypeInv for CURP-HO variables (including unsynced, clientWriteSet, boundReplica)
+
+#### 56.7: Model checking configuration
+
+- [ ] **56.7a** Create `tla/MC_CurpHO.tla` and `tla/MC_CurpHO.cfg`: 3 replicas, 2 clients, 1 key, 2 values, MaxOps=2, fixed leader, symmetry on followers/clients/values. State constraints: message limit, epoch limit, log length limit.
+
+#### 56.8: Verification runs
+
+- [ ] **56.8a** Sanity check: MaxOps=1, confirm exhaustive PASS
+- [ ] **56.8b** Full run: MaxOps=2, run for up to 2 hours. Record results.
+- [ ] **56.8c** Record results in todo.md, commit and push
+
+**Estimated complexity**: ~500-700 lines for CurpHO.tla (vs ~790 for RaftHT.tla). The main new complexity is the witness pool + fast/slow path + CausalDeps/ReadDep checking. Invariants are largely portable from RaftHT.tla.
+
 ---
 
 ## Legend
