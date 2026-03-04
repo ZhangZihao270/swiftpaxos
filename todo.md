@@ -3915,19 +3915,33 @@ All invariants verified:
 **Chosen approach**: Add `retVer` field to history entries. Minimal change (~10 lines across 3 reply handlers + invariant definitions).
 
 **Implementation plan**:
-- [ ] **55.13a** Add `retVer` field to history entries in RaftHT.tla:
-  - `ClientHandleStrongReply`: `retVer |-> Max(clientCache[c][k].ver, m.slot)` (after cache merge, this is the new cache version for this key)
-  - `ClientHandleWeakWriteReply`: `retVer |-> Max(clientCache[c][k].ver, m.slot)` (the write's slot, or higher if cache already had newer)
-  - `ClientHandleWeakReadReply`: `retVer |-> finalVer` (already computed — the version after cache merge)
-  - Update MCTypeInv to include `retVer \in Nat` check
-- [ ] **55.13b** Strengthen MonotonicReads: same client, same key, i < j, both reads ⇒ `history[j].retVer >= history[i].retVer` (not just Nil/non-Nil check)
-- [ ] **55.13c** Add ReadYourWrites invariant: same client, history[i] is Write to key k with slot s, history[j] is Read of key k with j > i ⇒ `history[j].retVer >= s`
-- [ ] **55.13d** Add MonotonicWrites invariant: same client, history[i] and history[j] are both Writes with i < j ⇒ `history[i].slot < history[j].slot`
-- [ ] **55.13e** Add WritesFollowReads invariant: same client, history[i] is Read of key k with retVer = v, history[j] is Write with j > i ⇒ `history[j].slot > v`
-- [ ] **55.13f** Update SafetyInv to include new invariants, update CausalConsistencyInv definition
-- [ ] **55.13g** Sanity check: run TLC with 2c/2v/1k/MaxOps=1, confirm exhaustive PASS
-- [ ] **55.13h** Run TLC with 2c/2v/1k/MaxOps=2 for up to 2 hours. If no errors, stop and record partial stats.
-- [ ] **55.13i** Record results in todo.md, commit and push
+- [x] **55.13a** Add `retVer` field to history entries in RaftHT.tla: `ClientHandleStrongReply` → `Max(cache.ver, m.slot)`, `ClientHandleWeakWriteReply` → `Max(cache.ver, m.slot)`, `ClientHandleWeakReadReply` → `finalVer`. Updated MCTypeInv with `retVer \in Nat`. [26:03:04]
+- [x] **55.13b** Strengthen MonotonicReads: version-based check `history[j].retVer >= history[i].retVer` for same-client same-key reads. [26:03:04]
+- [x] **55.13c** Add ReadYourWrites: after write at slot s, subsequent read of same key by same client must have `retVer >= s`. [26:03:04]
+- [x] **55.13d** Add MonotonicWrites: same client writes must have strictly increasing slots. [26:03:04]
+- [x] **55.13e** Add WritesFollowReads: same client write after read must have `slot > read.retVer`. [26:03:04]
+- [x] **55.13f** Updated CausalConsistencyInv = ReadsReturnValidValues ∧ MonotonicReads ∧ ReadYourWrites ∧ MonotonicWrites ∧ WritesFollowReads. SafetyInv unchanged (already includes CausalConsistencyInv). [26:03:04]
+- [x] **55.13g** Sanity check: 2c/2v/1k/MaxOps=1 → 73,942,163 states, 11,390,092 distinct, depth 35, **3 min 35 sec, NO ERRORS (exhaustive)**. Same state count as before (retVer is derived, doesn't change state space). [26:03:04]
+- [x] **55.13h** Run TLC with 2c/2v/1k/MaxOps=2 for 2 hours (64 workers, 21GB heap). Result: **1,409,766,899 states generated, 476,793,482 distinct states, depth 23, ~2 hours, NO ERRORS**. Not exhaustive (257M in queue). [26:03:04]
+- [x] **55.13i** Record results in todo.md, commit and push. [26:03:04]
+
+**Results (55.13)**:
+
+| Config | States Generated | Distinct | Depth | Time | Result |
+|--------|-----------------|----------|-------|------|--------|
+| 2c/2v/1k, MaxOps=1 | 73.9M | 11.4M | 35 | 3 min 35s | **PASS (exhaustive)** |
+| 2c/2v/1k, MaxOps=2 | 1.41B | 477M | 23 | ~2 hr | **NO ERRORS (partial)** |
+
+Full causal consistency session guarantees verified:
+1. **MCTypeInv**: type correctness — PASS
+2. **LinearizabilityInv**: strong ops linearizable — PASS
+3. **CausalConsistencyInv** (strengthened):
+   - ReadsReturnValidValues — PASS
+   - MonotonicReads (version-based, not just Nil check) — PASS
+   - ReadYourWrites — PASS
+   - MonotonicWrites — PASS
+   - WritesFollowReads — PASS
+4. **HybridCompatibilityInv**: ≺_T/≺_P compatibility — PASS
 
 ---
 

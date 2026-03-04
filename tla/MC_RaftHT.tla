@@ -69,5 +69,7 @@ MCTypeInv ==
         /\ clientState[c] \in {Idle, Waiting}
         /\ opsCompleted[c] \in 0..MaxOps
         /\ clientInvEpoch[c] \in Nat
+    /\ \A i \in 1..Len(history) :
+        /\ history[i].retVer \in Nat
 
 ====

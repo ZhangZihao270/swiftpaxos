@@ -469,7 +469,8 @@ ClientHandleStrongReply(c) ==
                  consistency |-> Strong,
                  invEpoch    |-> clientInvEpoch[c],
                  retEpoch    |-> epoch + 1,
-                 slot        |-> m.slot])
+                 slot        |-> m.slot,
+                 retVer      |-> Max(clientCache[c][k].ver, m.slot)])
         /\ messages' = messages \ {m}
         /\ UNCHANGED <<replicaVars, clientCon, clientSeq, clientInvEpoch>>
 
@@ -502,7 +503,8 @@ ClientHandleWeakWriteReply(c) ==
                  consistency |-> Weak,
                  invEpoch    |-> clientInvEpoch[c],
                  retEpoch    |-> epoch + 1,
-                 slot        |-> m.slot])
+                 slot        |-> m.slot,
+                 retVer      |-> Max(clientCache[c][k].ver, m.slot)])
         /\ messages' = messages \ {m}
         /\ UNCHANGED <<replicaVars, clientCon, clientSeq, clientInvEpoch>>
 
@@ -538,7 +540,8 @@ ClientHandleWeakReadReply(c) ==
                  consistency |-> Weak,
                  invEpoch    |-> clientInvEpoch[c],
                  retEpoch    |-> epoch + 1,
-                 slot        |-> 0])
+                 slot        |-> 0,
+                 retVer      |-> finalVer])
         /\ messages' = messages \ {m}
         /\ UNCHANGED <<replicaVars, clientCon, clientSeq, clientInvEpoch>>
 
@@ -675,9 +678,9 @@ ReadsReturnValidValues ==
                 /\ log[r][idx].cmd.val = history[i].retVal
 
 \* Monotonic reads: within a session, reads of the same key never go backwards.
-\* If client c reads key k and gets a non-Nil value, a later read by c of k
-\* must not return Nil (cannot "unsee" a write). This is guaranteed by the
-\* client cache merge (max version wins).
+\* The version (retVer = slot of the source write) must not decrease across
+\* same-client same-key reads. This is stronger than just checking Nil/non-Nil:
+\* it ensures the client always sees "at least as recent" a write.
 MonotonicReads ==
     \A i, j \in 1..Len(history) :
         /\ history[i].op = Read
@@ -685,10 +688,48 @@ MonotonicReads ==
         /\ history[i].client = history[j].client
         /\ history[i].key = history[j].key
         /\ i < j
-        /\ history[i].retVal # Nil
-        => history[j].retVal # Nil
+        => history[j].retVer >= history[i].retVer
 
-CausalConsistencyInv == ReadsReturnValidValues /\ MonotonicReads
+\* Read-your-writes: after client c writes key k at slot s, any subsequent
+\* read by c of key k must return a value from a write at slot >= s.
+\* This ensures the client always sees at least its own writes.
+ReadYourWrites ==
+    \A i, j \in 1..Len(history) :
+        /\ history[i].op = Write
+        /\ history[j].op = Read
+        /\ history[i].client = history[j].client
+        /\ history[i].key = history[j].key
+        /\ i < j
+        => history[j].retVer >= history[i].slot
+
+\* Monotonic writes: same client's writes must get increasing slots.
+\* Since the client is sequential and all writes go through the leader's log,
+\* later writes must appear at higher log positions.
+MonotonicWrites ==
+    \A i, j \in 1..Len(history) :
+        /\ history[i].op = Write
+        /\ history[j].op = Write
+        /\ history[i].client = history[j].client
+        /\ i < j
+        => history[i].slot < history[j].slot
+
+\* Writes-follow-reads: if client c reads a value from slot v (retVer = v),
+\* then c's next write must get a slot > v. This ensures writes are ordered
+\* after causally-preceding reads in the total order.
+WritesFollowReads ==
+    \A i, j \in 1..Len(history) :
+        /\ history[i].op = Read
+        /\ history[j].op = Write
+        /\ history[i].client = history[j].client
+        /\ i < j
+        => history[j].slot > history[i].retVer
+
+CausalConsistencyInv ==
+    /\ ReadsReturnValidValues
+    /\ MonotonicReads
+    /\ ReadYourWrites
+    /\ MonotonicWrites
+    /\ WritesFollowReads
 
 \* ============================================================================
 \* Task 55.9: Hybrid compatibility
