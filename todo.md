@@ -3682,6 +3682,85 @@ Scope: ~40 LOC in `main.go` + ~30 LOC interface stubs in `curp/client.go` (or `B
 
 ---
 
+### Phase 53: CURP Tail Latency Reduction (P99 < 1s at high concurrency) [HIGH PRIORITY]
+
+**Goal**: Reduce CURP S-P99 from 1.5-5.0 seconds to < 1 second at 96-288 total threads.
+
+**Problem Analysis**:
+
+Current CURP P99 at high concurrency (all strong-only, 3 clients × N threads/client):
+- 48t: S-P99 = 185ms (acceptable)
+- 96t: S-P99 = 1,480ms (1.5s — needs fixing)
+- 192t: S-P99 = 4,747ms (4.7s — very bad)
+- 288t: S-P99 = 5,007ms (5.0s — very bad)
+
+Meanwhile S-Med stays excellent: ~51ms at 192t, ~69ms at 288t. The issue is tail latency only.
+
+**Root Cause Analysis** (from code inspection of `curp/curp.go`):
+
+1. **Descriptor message channel buffer too small** (`desc.msgs = make(chan interface{}, 8)`, line 597).
+   At high concurrency, the event loop sends messages to per-descriptor channels via `desc.msgs <- msg` (line 586).
+   When the buffer is full, this **blocks the entire event loop**, stalling ALL other commands.
+   This is the most likely cause of cascading tail latency: one slow descriptor blocks hundreds of queued messages.
+
+2. **Sequential mode fallback when routineCount >= MaxDescRoutines** (line 601).
+   When goroutine count hits 10,000, new descriptors run in sequential mode (`desc.seq = true`),
+   meaning `handleMsg` runs synchronously in the event loop (line 584). This directly blocks
+   the event loop for the duration of message processing, causing head-of-line blocking.
+
+3. **Repeated `strconv.Itoa()` allocations** (~11 call sites in curp.go).
+   Every map lookup does `strconv.Itoa(slot)` creating a new string allocation.
+   At 30K ops/sec with ~5 calls per op = 150K allocations/sec, adding GC pressure.
+   CURP-HT caches `slotStr` in the descriptor (line 109-110 in curp-ht.go).
+
+4. **Delivery chain serialization** (`deliver()` at line 468-538).
+   Delivery checks `r.executed.Has(strconv.Itoa(slot-1))` — if predecessor not yet executed,
+   the command returns without executing. Delivery is retried only when `deliverChan <- nextSlot`
+   fires (line 500-501), creating a sequential chain. Under load, this chain can accumulate
+   latency if any link is delayed.
+
+**Why CURP-HO/HT have better P99**:
+- 50% of operations are weak (bypass event loop entirely) → halves event loop load
+- Not inherently better architecture — same event loop, same buffer size=8, same MaxDescRoutines
+
+**Approach**: Focus on the highest-impact fixes that don't restructure the protocol:
+- Enlarge descriptor channel buffer (8 → 128) to prevent event loop blocking
+- Cache slotStr to reduce GC pressure
+- Add non-blocking send with fallback to prevent event loop stalls
+
+**Tasks**:
+
+#### 53.1: Enlarge descriptor message channel buffer
+- [ ] **53.1a** Change `desc.msgs = make(chan interface{}, 8)` to `make(chan interface{}, 128)` in `curp/curp.go:597`. This prevents the event loop from blocking on `desc.msgs <- msg` when a descriptor is temporarily slow. (~2 LOC)
+- [ ] **53.1b** Add non-blocking send with overflow handling: if channel is full, process message synchronously instead of blocking the event loop. Replace `desc.msgs <- msg` (line 586) with a `select` with `default` that calls `handleMsg` directly. (~10 LOC)
+
+#### 53.2: Cache slotStr in commandDesc to eliminate repeated strconv.Itoa
+- [ ] **53.2a** Add `slotStr string` field to `commandDesc` struct in `curp/defs.go`. Set it once in `getCmdDescSeq` when `desc.cmdSlot` is assigned. (~5 LOC)
+- [ ] **53.2b** Replace all `strconv.Itoa(slot)` / `strconv.Itoa(desc.cmdSlot)` call sites in `curp/curp.go` with the cached `desc.slotStr` or local `slotStr` variable. Approximately 11 call sites. (~20 LOC)
+
+#### 53.3: Reduce sequential mode impact
+- [ ] **53.3a** In sequential mode (`desc.seq = true`), avoid calling `handleMsg` inline in the event loop when it involves `deliver()`. Instead, defer delivery to the `deliverChan` path. This prevents one slow delivery from blocking the entire event loop. (~15 LOC)
+
+#### 53.4: Test and validate
+- [ ] **53.4a** Run `go test ./curp/ -v` to verify no regressions in existing tests
+- [ ] **53.4b** Run `go test ./... -count=1` for full regression check
+- [ ] **53.4c** Re-run CURP benchmark sweep (reuse `scripts/run-phase52-curp-sweep.sh`) and verify S-P99 < 1 second at all thread counts up to 288
+
+#### 53.5: Document results
+- [ ] **53.5a** Update `evaluation/phase52-curp-results.md` or create `evaluation/phase53-curp-p99-fix.md` with before/after comparison
+- [ ] **53.5b** Update `orca/benchmark-2026-03-02.md` CURP section with new P99 numbers
+
+**Success Criteria**:
+1. `go test ./... -count=1` passes (no regressions)
+2. S-P99 < 1,000ms at 96 total threads (was 1,480ms)
+3. S-P99 < 2,000ms at 192 total threads (was 4,747ms)
+4. S-Med does not degrade (should remain ~51ms at low concurrency)
+5. Throughput does not decrease (should remain ≥ 31K at 288t)
+
+**Estimated changes**: ~50 LOC in `curp/curp.go`, ~5 LOC in `curp/defs.go`
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
