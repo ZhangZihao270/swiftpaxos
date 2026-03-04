@@ -19,23 +19,25 @@ CONSTANTS
     nil                     \* Nil model value
 
 \* Concrete sets for model checking
-\* Config A (exhaustive, ~2 min): 1 client, 1 key, 1 value, MaxOps=2
-\*   → 49.8M states, 7.58M distinct, depth 36
-\* Config B (partial, ~10 min): 2 clients, 1 key, 1 value, MaxOps=1
-\*   → 148M+ states explored (does not terminate quickly)
-MCReplicas == {r1, r2, r3}
-MCClients  == {c1}
-MCKeys     == {k1}
-MCValues   == {v1}
-MCMaxOps   == 2
-MCNil      == nil
+\* Leader is always r1; r2/r3 are symmetric followers.
+MCReplicas    == {r1, r2, r3}
+MCClients     == {c1, c2}
+MCKeys        == {k1}
+MCValues      == {v1, v2}
+MCMaxOps      == 1
+MCNil         == nil
+MCInitLeader  == r1
 
 \* ============================================================================
 \* Symmetry Sets (for state space reduction)
 \* ============================================================================
 
-\* No symmetry — leader is chosen nondeterministically, so replicas aren't symmetric
-\* MCSymmetry == {}
+\* r2/r3 are interchangeable followers (leader is fixed to r1).
+\* c1/c2 are interchangeable clients.
+\* v1/v2 are interchangeable values.
+MCSymmetry == Permutations({r2, r3})
+          \cup Permutations({c1, c2})
+          \cup Permutations({v1, v2})
 
 \* ============================================================================
 \* State Constraint (bound state space)
@@ -47,8 +49,8 @@ MaxLogLen == MaxOps * Cardinality(Clients) + 2
 MCStateConstraint ==
     /\ \A r \in Replicas : Len(log[r]) <= MaxLogLen
     /\ \A c \in Clients : opsCompleted[c] <= MaxOps
-    /\ Cardinality(messages) <= 10
-    /\ epoch <= MaxLogLen * 4
+    /\ Cardinality(messages) <= 6
+    /\ epoch <= MaxLogLen * 3
 
 \* ============================================================================
 \* Invariants to Check

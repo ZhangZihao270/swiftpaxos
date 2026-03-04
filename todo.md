@@ -3857,12 +3857,25 @@ which can block on `slot-1` execution dependency — stalling ALL other messages
 #### 55.11: Documentation
 - [x] **55.11b** Updated todo.md with completion timestamps. [26:03:03]
 
-**Results**:
+**Results (55.1–55.11)**:
 1. TLC exhaustively checks all reachable states: **PASS** (Config A: 49.8M states, 2 min)
 2. Linearizability of strong ops: **PASS**
 3. Causal consistency of all ops: **PASS**
 4. Hybrid compatibility: **PASS**
 5. No counterexamples found
+
+#### 55.12: Reasonable-model TLC run (2 clients, 2 values, MaxOps=2)
+
+**Motivation**: Previous exhaustive results used weak configs (1 client/1 value) that cannot test cross-client concurrency or distinguish writes. Need a model with 2 clients × 2 values × MaxOps=2 to cover meaningful scenarios (e.g., c1 weak write + c2 strong read, write→read within a session).
+
+**Config**: 3 replicas (r1 fixed leader, r2/r3 symmetric followers), 2 clients (symmetric), 1 key, 2 values (symmetric), MaxOps=2. Symmetry: Permutations({r2,r3}) ∪ Permutations({c1,c2}) ∪ Permutations({v1,v2}). State constraints: message limit=8, epoch limit=MaxLogLen×3 (MaxLogLen=6).
+
+**Known partial run**: 119M+ states in 10 min, no violations found but not exhaustive.
+
+- [ ] **55.12a** Sanity check — run TLC with 2c/2v/1k/MaxOps=1, confirm exhaustive PASS (~4 min, expect ~92M states)
+- [ ] **55.12b** Update `tla/MC_RaftHT.tla`: set MCMaxOps=2, message limit=8
+- [ ] **55.12c** Run TLC with 2c/2v/1k/MaxOps=2 for up to 2 hours (`java -XX:+UseParallelGC -cp tla2tools.jar tlc2.TLC MC_RaftHT -workers auto`). If exhaustive completion → record stats. If 2 hours with no errors → stop and record partial stats as evidence.
+- [ ] **55.12d** Record results in todo.md, commit and push
 
 ---
 

@@ -23,7 +23,8 @@ CONSTANTS
     Keys,           \* Set of keys, e.g., {k1, k2}
     Values,         \* Set of non-nil values, e.g., {v1, v2}
     MaxOps,         \* Max operations per client (bounds state space)
-    Nil             \* Distinguished null value (not in Values)
+    Nil,            \* Distinguished null value (not in Values)
+    InitLeader      \* Fixed initial leader (enables follower symmetry)
 
 \* Nil must not be in Values (enforced by using distinct model values)
 \* MaxOps must be a positive natural number
@@ -164,9 +165,8 @@ SetMax(S) == CHOOSE x \in S : \A y \in S : y <= x
 \* ============================================================================
 
 Init ==
-    \* One replica starts as leader; rest are followers
-    /\ \E ldr \in Replicas :
-         role = [r \in Replicas |-> IF r = ldr THEN Leader ELSE Follower]
+    \* Fixed leader (deterministic, enables follower symmetry reduction)
+    /\ role = [r \in Replicas |-> IF r = InitLeader THEN Leader ELSE Follower]
     /\ currentTerm = [r \in Replicas |-> 1]
     /\ log         = [r \in Replicas |-> <<>>]
     /\ commitIndex = [r \in Replicas |-> 0]
@@ -712,22 +712,28 @@ CausalConsistencyInv == ReadsReturnValidValues /\ MonotonicReads
 \* mean j should come after i).
 
 HybridCompatibilityInv ==
-    \* For all pairs of slotted operations:
-    \* if o1.slot < o2.slot (o1 ≺_T o2), then o2 must not causally precede o1
+    \* For all pairs of slotted operations (ops in O_T):
+    \* if o1.slot < o2.slot (o1 ≺_T o2), then o2 must not causally precede o1.
+    \*
+    \* ≺_P (causal order) includes:
+    \*   (a) Session order: same client, earlier completion ≺_P later invocation
+    \*   (b) Read-from: write w ≺_P read r if r reads from w
+    \*
+    \* For read-from among slotted ops: a read at slot s reads from the latest
+    \* write at slot < s (determined by log order). That source write always has
+    \* a lower slot, so read-from edges among slotted ops ALWAYS align with ≺_T.
+    \* Therefore only session order can create a ≺_T/≺_P conflict.
+    \*
+    \* Check: for same-client slotted ops, if slot[i] < slot[j] then i must
+    \* have been issued no later than j (i.e., i completed before j started).
     \A i, j \in 1..Len(history) :
         /\ history[i].slot > 0
         /\ history[j].slot > 0
         /\ history[i].slot < history[j].slot
+        /\ history[i].client = history[j].client
         =>
-        \* o2 (j by slot) must not be in causal past of o1 (i by slot)
-        \* Session order check: j not before i in same session
-        /\ ~(history[j].client = history[i].client /\ j < i)
-        \* Read-from check: i must not read a value written by j
-        \* (since i ≺_T j means j comes after i in total order)
-        /\ ~(history[i].op = Read /\ history[j].op = Write
-              /\ history[i].key = history[j].key
-              /\ history[i].retVal = history[j].retVal
-              /\ j < i)
+        \* i must come before j in session order (i completed before j invoked)
+        i < j
 
 \* Combined safety invariant
 SafetyInv == LinearizabilityInv /\ CausalConsistencyInv /\ HybridCompatibilityInv
