@@ -54,27 +54,31 @@ Phase 50.1-50.3 optimizations: RWMutex-based weak reads, batched weak writes, re
 |     192 |     32,501 | 156.10 | 157.70 |  256.59 |  22.35 |  14.65 |  141.67 |  182.90 |  128.94 |
 |     288 |     36,999 | 199.58 | 201.26 |  335.13 |  34.82 |  25.38 |  188.86 |  227.49 |  171.64 |
 
-## CURP (Vanilla) Results (Phase 52)
+## CURP (Vanilla) Results (Phase 52 + Phase 53 P99 fix)
 
 CURP runs with 100% strong operations (no weak consistency support, strong-only protocol).
 
-Phase 52.1-52.4 optimizations applied:
+Phase 52.1-52.4 optimizations + Phase 53.1-53.3 P99 tail latency fixes:
 - SHARD_COUNT 32768 → 512 (cache-friendly)
 - MaxDescRoutines 100 → 10000 (remove goroutine ceiling)
 - Configurable batch delay (150μs)
 - HybridBufferClient wiring for metric collection
+- Descriptor channel buffer 8 → 128 + non-blocking send (Phase 53.1)
+- Cached slotStr to eliminate strconv.Itoa allocations (Phase 53.2)
+- Sequential mode direct cleanup (Phase 53.3)
 
 | Threads | Throughput | S-Avg  | S-Med  | S-P99    |
 |--------:|-----------:|-------:|-------:|---------:|
-|       6 |      1,747 |  51.42 |  51.37 |    53.29 |
-|      12 |      3,497 |  51.39 |  51.30 |    53.72 |
-|      24 |      6,989 |  51.42 |  51.24 |    55.07 |
-|      48 |     13,361 |  53.90 |  50.87 |   185.08 |
-|      96 |     21,217 |  76.89 |  51.04 | 1,479.84 |
-|     192 |     30,324 | 125.79 |  51.60 | 4,747.18 |
-|     288 |     31,365 | 188.91 |  69.26 | 5,006.97 |
+|       6 |      1,746 |  51.44 |  51.39 |    53.33 |
+|      12 |      3,497 |  51.38 |  51.27 |    53.88 |
+|      24 |      6,999 |  51.36 |  51.19 |    54.79 |
+|      48 |     13,463 |  53.47 |  50.87 |   269.55 |
+|      96 |     21,091 |  77.69 |  51.00 | 1,211.36 |
+|     192 |     30,077 | 125.43 |  51.49 | 3,420.09 |
+|     288 |     30,563 | 190.33 |  68.34 | 3,512.45 |
 
 Note: Thread counts are total across 3 clients (e.g., 96 = 3 clients × 32 threads/client).
+Phase 53 reduced P99 by 18-30% at high concurrency (96-288t). See `evaluation/phase53-curp-p99-fix.md` for before/after details.
 
 ## Raft (Baseline) Results
 
@@ -103,25 +107,25 @@ Raft-HT numbers reflect Phase 50 post-fix results. All thread counts are total (
 
 | Threads |   Raft | Raft-HT | CURP-HO | CURP-HT |   CURP |
 |--------:|-------:|--------:|--------:|--------:|-------:|
-|       6 |  1,361 |   2,323 |   3,529 |   2,994 |  1,747 |
+|       6 |  1,361 |   2,323 |   3,529 |   2,994 |  1,746 |
 |      12 |  2,716 |   4,562 |   7,097 |   5,931 |  3,497 |
-|      24 |  5,418 |   9,163 |  14,118 |  11,837 |  6,989 |
-|      48 |  9,976 |  15,339 |  27,115 |  23,496 | 13,361 |
-|      96 | 17,781 |  24,123 |  38,292 |  41,789 | 21,217 |
-|     192 | 22,341 |  32,501 |  42,962 |  50,342 | 30,324 |
-|     288 |    N/A |  36,999 |  51,836 |  49,546 | 31,365 |
+|      24 |  5,418 |   9,163 |  14,118 |  11,837 |  6,999 |
+|      48 |  9,976 |  15,339 |  27,115 |  23,496 | 13,463 |
+|      96 | 17,781 |  24,123 |  38,292 |  41,789 | 21,091 |
+|     192 | 22,341 |  32,501 |  42,962 |  50,342 | 30,077 |
+|     288 |    N/A |  36,999 |  51,836 |  49,546 | 30,563 |
 
 ## 5-Protocol Comparison: Strong Latency S-Med (ms)
 
 | Threads |  Raft | Raft-HT | CURP-HO | CURP-HT |   CURP |
 |--------:|------:|--------:|--------:|--------:|-------:|
-|       6 | 68.40 |   85.12 |   51.27 |   51.21 |  51.37 |
-|      12 | 68.52 |   85.12 |   51.02 |   51.09 |  51.30 |
-|      24 | 68.63 |   85.20 |   50.96 |   51.00 |  51.24 |
+|       6 | 68.40 |   85.12 |   51.27 |   51.21 |  51.39 |
+|      12 | 68.52 |   85.12 |   51.02 |   51.09 |  51.27 |
+|      24 | 68.63 |   85.20 |   50.96 |   51.00 |  51.19 |
 |      48 | 71.39 |   92.34 |   50.85 |   50.86 |  50.87 |
-|      96 | 79.73 |  113.32 |   69.68 |   53.66 |  51.04 |
-|     192 |131.22 |  157.70 |   99.79 |   98.92 |  51.60 |
-|     288 |   N/A |  201.26 |   99.82 |  164.19 |  69.26 |
+|      96 | 79.73 |  113.32 |   69.68 |   53.66 |  51.00 |
+|     192 |131.22 |  157.70 |   99.79 |   98.92 |  51.49 |
+|     288 |   N/A |  201.26 |   99.82 |  164.19 |  68.34 |
 
 ## 3-Protocol Comparison: Weak Write WW-P99 (ms)
 
@@ -191,7 +195,7 @@ Phase 52 brought vanilla CURP (strong-only protocol) into the benchmark pipeline
 - **Conclusion**: All three protocols share the same 1-RTT fast path for strong operations, resulting in nearly identical S-Med (~51ms) at low load. At high concurrency, CURP maintains excellent S-Med up to 192 threads (51.60ms), better than CURP-HO (99.79ms @ 192t) and CURP-HT (98.92ms @ 192t).
 
 **Throughput**:
-- CURP peak: 31,365 ops/sec at 288 threads (all strong operations)
+- CURP peak: 30,563 ops/sec at 288 threads (all strong operations)
 - CURP-HO peak: 51,836 ops/sec at 288 threads (50% weak, 50% strong)
 - CURP-HT peak: 50,342 ops/sec at 192 threads (50% weak, 50% strong)
 - Raft peak: 22,341 ops/sec at 192 threads (all strong operations)
@@ -201,7 +205,7 @@ Phase 52 brought vanilla CURP (strong-only protocol) into the benchmark pipeline
 CURP shows monotonic throughput scaling from 6 to 288 threads (1.7K → 31K ops/sec), with no collapse or timeout failures. This validates the Phase 52 optimizations (SHARD_COUNT=512, MaxDescRoutines=10000, batch delay=150μs).
 
 **P99 Latency Degradation**:
-At high concurrency (192-288 threads), CURP exhibits significant P99 degradation (4.7-5.0 seconds) while maintaining good median latency (~51-69ms). This suggests tail latency issues under load, likely due to descriptor pool contention or event loop blocking. The hybrid protocols (CURP-HO/HT) show better P99 behavior at high concurrency, possibly due to weak operations reducing overall system load.
+At high concurrency (192-288 threads), CURP exhibits significant P99 degradation (~3.4-3.5 seconds after Phase 53 optimizations, reduced from 4.7-5.0s) while maintaining good median latency (~51-68ms). Phase 53 reduced P99 by 18-30% via enlarged channel buffers, non-blocking sends, cached string keys, and sequential mode cleanup. The remaining tail latency is caused by fundamental single-threaded event loop queueing delay. The hybrid protocols (CURP-HO/HT) show better P99 behavior because 50% weak operations bypass the event loop entirely.
 
 ### Key Takeaways
 
