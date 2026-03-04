@@ -3872,10 +3872,23 @@ which can block on `slot-1` execution dependency — stalling ALL other messages
 
 **Known partial run**: 119M+ states in 10 min, no violations found but not exhaustive.
 
-- [ ] **55.12a** Sanity check — run TLC with 2c/2v/1k/MaxOps=1, confirm exhaustive PASS (~4 min, expect ~92M states)
-- [ ] **55.12b** Update `tla/MC_RaftHT.tla`: set MCMaxOps=2, message limit=8
-- [ ] **55.12c** Run TLC with 2c/2v/1k/MaxOps=2 for up to 2 hours (`java -XX:+UseParallelGC -cp tla2tools.jar tlc2.TLC MC_RaftHT -workers auto`). If exhaustive completion → record stats. If 2 hours with no errors → stop and record partial stats as evidence.
-- [ ] **55.12d** Record results in todo.md, commit and push
+- [x] **55.12a** Sanity check — run TLC with 2c/2v/1k/MaxOps=1, confirm exhaustive PASS. Result: 73,942,163 states generated, 11,390,092 distinct states, depth 35, **3 min 36 sec, NO ERRORS**. [26:03:04]
+- [x] **55.12b** Update `tla/MC_RaftHT.tla`: set MCMaxOps=2, message limit=8. [26:03:04]
+- [x] **55.12c** Run TLC with 2c/2v/1k/MaxOps=2 for 2 hours (64 workers, 21GB heap). Result: **1,528,488,973 states generated, 514,310,855 distinct states, depth 23, 2 hours 3 min, NO ERRORS**. Not exhaustive (276M states still in queue), but 1.5 billion states explored with zero violations across MCTypeInv + LinearizabilityInv + CausalConsistencyInv + HybridCompatibilityInv. [26:03:04]
+- [x] **55.12d** Record results in todo.md, commit and push. [26:03:04]
+
+**Results (55.12)**:
+
+| Config | States Generated | Distinct | Depth | Time | Result |
+|--------|-----------------|----------|-------|------|--------|
+| 2c/2v/1k, MaxOps=1 | 73.9M | 11.4M | 35 | 3 min 36s | **PASS (exhaustive)** |
+| 2c/2v/1k, MaxOps=2 | 1.53B | 514M | 23 | 2 hr 3 min | **NO ERRORS (partial)** |
+
+All invariants verified:
+1. **MCTypeInv**: type correctness — PASS
+2. **LinearizabilityInv** (RealTimeRespect ∧ StrongReadConsistency): strong ops are linearizable — PASS
+3. **CausalConsistencyInv** (ReadsReturnValidValues ∧ MonotonicReads): all ops respect causal consistency — PASS
+4. **HybridCompatibilityInv**: ≺_T and ≺_P orderings are compatible — PASS
 
 ---
 

@@ -24,7 +24,7 @@ MCReplicas    == {r1, r2, r3}
 MCClients     == {c1, c2}
 MCKeys        == {k1}
 MCValues      == {v1, v2}
-MCMaxOps      == 1
+MCMaxOps      == 2
 MCNil         == nil
 MCInitLeader  == r1
 
@@ -49,7 +49,7 @@ MaxLogLen == MaxOps * Cardinality(Clients) + 2
 MCStateConstraint ==
     /\ \A r \in Replicas : Len(log[r]) <= MaxLogLen
     /\ \A c \in Clients : opsCompleted[c] <= MaxOps
-    /\ Cardinality(messages) <= 6
+    /\ Cardinality(messages) <= 8
     /\ epoch <= MaxLogLen * 3
 
 \* ============================================================================
