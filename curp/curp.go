@@ -58,6 +58,7 @@ type commandDesc struct {
 	cmd     state.Command
 	phase   int
 	cmdSlot int
+	slotStr string
 	propose *defs.GPropose
 	val     []byte
 
@@ -295,8 +296,7 @@ func (r *Replica) handleAccept(msg *MAccept, desc *commandDesc) {
 		return
 	}
 
-	slotStr := strconv.Itoa(msg.CmdSlot)
-	if r.delivered.Has(slotStr) {
+	if r.delivered.Has(desc.slotStr) {
 		return
 	}
 
@@ -376,8 +376,7 @@ func getAcksHandler(r *Replica, desc *commandDesc) replica.MsgSetHandler {
 }
 
 func (r *Replica) handleCommit(msg *MCommit, desc *commandDesc) {
-	slotStr := strconv.Itoa(msg.CmdSlot)
-	if r.delivered.Has(slotStr) {
+	if r.delivered.Has(desc.slotStr) {
 		return
 	}
 
@@ -388,7 +387,7 @@ func (r *Replica) handleCommit(msg *MCommit, desc *commandDesc) {
 
 		desc.phase = COMMIT
 		if r.isLeader {
-			r.committed.Set(strconv.Itoa(desc.cmdSlot), struct{}{})
+			r.committed.Set(desc.slotStr, struct{}{})
 		}
 
 		defer func() {
@@ -467,8 +466,7 @@ func (r *Replica) ok(cmd state.Command) uint8 {
 
 func (r *Replica) deliver(desc *commandDesc, slot int) {
 	desc.afterPayload.Call(func() {
-		slotStr := strconv.Itoa(slot)
-		if r.delivered.Has(slotStr) || !r.Exec {
+		if r.delivered.Has(desc.slotStr) || !r.Exec {
 			return
 		}
 
@@ -495,7 +493,7 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 
 		if desc.val == nil {
 			desc.val = desc.cmd.Execute(r.State)
-			r.executed.Set(slotStr, struct{}{})
+			r.executed.Set(desc.slotStr, struct{}{})
 			go func(nextSlot int) {
 				r.deliverChan <- nextSlot
 			}(slot + 1)
@@ -534,17 +532,21 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 					r.sender.SendToClient(desc.propose.ClientId, rep, r.cs.syncReplyRPC)
 				}
 			}
-			desc.msgs <- slot
-			r.delivered.Set(strconv.Itoa(slot), struct{}{})
+			r.delivered.Set(desc.slotStr, struct{}{})
 			if desc.seq {
-				for {
-					switch hSlot := (<-desc.msgs).(type) {
-					case int:
-						r.handleMsg(hSlot, desc, slot, desc.dep)
-						return
-					}
-				}
+				// In sequential mode, handle cleanup directly instead of
+				// blocking the event loop waiting on desc.msgs
+				desc.Call()
+				r.history[slot].cmdSlot = slot
+				r.history[slot].phase = desc.phase
+				r.history[slot].cmd = desc.cmd
+				desc.active = false
+				r.values.Set(desc.cmdId.String(), desc.val)
+				r.cmdDescs.Remove(desc.slotStr)
+				r.freeDesc(desc)
+				return
 			}
+			desc.msgs <- slot
 		}
 	})
 }
@@ -571,6 +573,7 @@ func (r *Replica) getCmdDescSeq(slot int, msg interface{}, dep int, seq bool) *c
 			desc = r.newDesc()
 			desc.seq = seq || desc.seq
 			desc.cmdSlot = slot
+			desc.slotStr = slotStr
 			if !desc.seq {
 				go r.handleDesc(desc, slot, dep)
 				r.routineCount++
@@ -583,7 +586,13 @@ func (r *Replica) getCmdDescSeq(slot int, msg interface{}, dep int, seq bool) *c
 		if desc.seq {
 			r.handleMsg(msg, desc, slot, dep)
 		} else {
-			desc.msgs <- msg
+			select {
+			case desc.msgs <- msg:
+				// sent to goroutine
+			default:
+				// channel full — process inline to avoid blocking event loop
+				r.handleMsg(msg, desc, slot, dep)
+			}
 		}
 	}
 
@@ -594,7 +603,7 @@ func (r *Replica) newDesc() *commandDesc {
 	desc := r.allocDesc()
 	desc.cmdSlot = -1
 	if desc.msgs == nil {
-		desc.msgs = make(chan interface{}, 8)
+		desc.msgs = make(chan interface{}, 128)
 	}
 	desc.active = true
 	desc.phase = START
@@ -643,8 +652,7 @@ func (r *Replica) IfPreviousAreReady(desc *commandDesc, f func()) {
 func (r *Replica) allocDesc() *commandDesc {
 	if r.poolLevel > 0 {
 		desc := r.descPool.Get().(*commandDesc)
-		slotStr := strconv.Itoa(desc.cmdSlot)
-		if r.delivered.Has(slotStr) && r.values.Has(desc.cmdId.String()) {
+		if r.delivered.Has(desc.slotStr) && r.values.Has(desc.cmdId.String()) {
 			return desc
 		}
 	}
@@ -698,9 +706,8 @@ func (r *Replica) handleMsg(m interface{}, desc *commandDesc, slot int, dep int)
 		r.history[msg].phase = desc.phase
 		r.history[msg].cmd = desc.cmd
 		desc.active = false
-		slotStr := strconv.Itoa(slot)
 		r.values.Set(desc.cmdId.String(), desc.val)
-		r.cmdDescs.Remove(slotStr)
+		r.cmdDescs.Remove(desc.slotStr)
 		r.freeDesc(desc)
 		return true
 	}

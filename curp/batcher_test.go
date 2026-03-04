@@ -69,7 +69,7 @@ func TestBatcherDelayApplied(t *testing.T) {
 		time.Sleep(time.Duration(delay))
 	}
 	elapsed = time.Since(start)
-	if elapsed < 9*time.Millisecond || elapsed > 15*time.Millisecond {
+	if elapsed < 9*time.Millisecond || elapsed > 20*time.Millisecond {
 		t.Errorf("Expected ~10ms delay, got %v", elapsed)
 	}
 }

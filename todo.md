@@ -3731,19 +3731,19 @@ Meanwhile S-Med stays excellent: ~51ms at 192t, ~69ms at 288t. The issue is tail
 **Tasks**:
 
 #### 53.1: Enlarge descriptor message channel buffer
-- [ ] **53.1a** Change `desc.msgs = make(chan interface{}, 8)` to `make(chan interface{}, 128)` in `curp/curp.go:597`. This prevents the event loop from blocking on `desc.msgs <- msg` when a descriptor is temporarily slow. (~2 LOC)
-- [ ] **53.1b** Add non-blocking send with overflow handling: if channel is full, process message synchronously instead of blocking the event loop. Replace `desc.msgs <- msg` (line 586) with a `select` with `default` that calls `handleMsg` directly. (~10 LOC)
+- [x] **53.1a** Change `desc.msgs = make(chan interface{}, 8)` to `make(chan interface{}, 128)` in `curp/curp.go:597`. This prevents the event loop from blocking on `desc.msgs <- msg` when a descriptor is temporarily slow. (~2 LOC) [26:03:03]
+- [x] **53.1b** Add non-blocking send with overflow handling: if channel is full, process message synchronously instead of blocking the event loop. Replace `desc.msgs <- msg` (line 586) with a `select` with `default` that calls `handleMsg` directly. (~10 LOC) [26:03:03]
 
 #### 53.2: Cache slotStr in commandDesc to eliminate repeated strconv.Itoa
-- [ ] **53.2a** Add `slotStr string` field to `commandDesc` struct in `curp/defs.go`. Set it once in `getCmdDescSeq` when `desc.cmdSlot` is assigned. (~5 LOC)
-- [ ] **53.2b** Replace all `strconv.Itoa(slot)` / `strconv.Itoa(desc.cmdSlot)` call sites in `curp/curp.go` with the cached `desc.slotStr` or local `slotStr` variable. Approximately 11 call sites. (~20 LOC)
+- [x] **53.2a** Add `slotStr string` field to `commandDesc` struct in `curp/curp.go`. Set it once in `getCmdDescSeq` when `desc.cmdSlot` is assigned. (~5 LOC) [26:03:03]
+- [x] **53.2b** Replace 8 of 11 `strconv.Itoa(slot)` / `strconv.Itoa(desc.cmdSlot)` call sites in `curp/curp.go` with cached `desc.slotStr`. Remaining 3 are for different slots (slot-1, desc.dep, initial getCmdDescSeq local). (~20 LOC) [26:03:03]
 
 #### 53.3: Reduce sequential mode impact
-- [ ] **53.3a** In sequential mode (`desc.seq = true`), avoid calling `handleMsg` inline in the event loop when it involves `deliver()`. Instead, defer delivery to the `deliverChan` path. This prevents one slow delivery from blocking the entire event loop. (~15 LOC)
+- [x] **53.3a** In sequential mode, perform descriptor cleanup directly in `deliver()` instead of blocking event loop waiting on `desc.msgs` for the int handoff message. Eliminated the `for { <-desc.msgs }` busy-wait loop. (~15 LOC) [26:03:03]
 
 #### 53.4: Test and validate
-- [ ] **53.4a** Run `go test ./curp/ -v` to verify no regressions in existing tests
-- [ ] **53.4b** Run `go test ./... -count=1` for full regression check
+- [x] **53.4a** Run `go test ./curp/ -v` — 14 tests pass (9 existing + 5 new) [26:03:03]
+- [x] **53.4b** Run `go test ./... -count=1` — all pass except pre-existing flaky `TestRaftClientResumesAfterFailover` (unrelated Raft failover timing test) [26:03:03]
 - [ ] **53.4c** Re-run CURP benchmark sweep (reuse `scripts/run-phase52-curp-sweep.sh`) and verify S-P99 < 1 second at all thread counts up to 288
 
 #### 53.5: Document results
