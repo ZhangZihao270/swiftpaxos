@@ -1010,8 +1010,89 @@ ClientHandleStrongReadSlowPath(c) ==
                        clientInvEpoch, boundReplica>>
 
 \* ============================================================================
-\* Placeholder: Weak reads (56.5) to be added
+\* Actions — Weak Read Path (Phase 56.5)
 \* ============================================================================
+
+\* (56.5a) Client issues a weak (causal) read.
+\* Sends WeakRead to bound replica only (1 RTT to nearest replica).
+ClientIssueWeakRead(c) ==
+    /\ clientState[c] = Idle
+    /\ opsCompleted[c] < MaxOps
+    /\ \E k \in Keys :
+        LET cmd == [op |-> Read, key |-> k, val |-> Nil]
+        IN
+        /\ epoch'          = epoch + 1
+        /\ clientState'    = [clientState EXCEPT ![c] = Waiting]
+        /\ clientOp'       = [clientOp EXCEPT ![c] = cmd]
+        /\ clientCon'      = [clientCon EXCEPT ![c] = Weak]
+        /\ clientInvEpoch' = [clientInvEpoch EXCEPT ![c] = epoch + 1]
+        /\ clientSeq'      = [clientSeq EXCEPT ![c] = @ + 1]
+        \* Send WeakRead to bound replica only
+        /\ messages' = messages \cup
+            {[type   |-> "WeakRead",
+              client |-> c,
+              seq    |-> clientSeq[c],
+              key    |-> k,
+              dest   |-> boundReplica[c]]}
+        /\ UNCHANGED <<replicaVars, unsyncedVars, clientCache, opsCompleted,
+                       clientWriteSet, boundReplica, fastPathResponses, history>>
+
+\* (56.5b) Bound replica handles WeakRead.
+\* Returns committed value + version (keyVersion) from kvStore.
+\* Uses committed state only (no speculative/unsynced values).
+HandleWeakRead(r) ==
+    \E m \in messages :
+        /\ m.type = "WeakRead"
+        /\ m.dest = r
+        /\ LET k == m.key
+           IN
+           /\ messages' = (messages \ {m}) \cup
+              {[type    |-> "WeakReadReply",
+                client  |-> m.client,
+                seq     |-> m.seq,
+                val     |-> kvStore[r][k],
+                ver     |-> keyVersion[r][k]]}
+        /\ UNCHANGED <<replicaVars, unsyncedVars, clientVars, historyVars>>
+
+\* (56.5c) Client handles WeakReadReply — cache merge (max version wins).
+\* The final value is max(cache version, replica version).
+ClientHandleWeakReadReply(c) ==
+    \E m \in messages :
+        /\ m.type = "WeakReadReply"
+        /\ m.client = c
+        /\ m.seq = clientSeq[c] - 1
+        /\ clientState[c] = Waiting
+        /\ clientCon[c] = Weak
+        /\ clientOp[c].op = Read
+        /\ LET k       == clientOp[c].key
+               cached  == clientCache[c][k]
+               \* Cache merge: higher version wins
+               useCache == cached.ver > m.ver
+               finalVal == IF useCache THEN cached.val ELSE m.val
+               finalVer == IF useCache THEN cached.ver ELSE m.ver
+           IN
+           /\ epoch'        = epoch + 1
+           /\ clientState'  = [clientState EXCEPT ![c] = Idle]
+           /\ clientOp'     = [clientOp EXCEPT ![c] = Nil]
+           /\ opsCompleted' = [opsCompleted EXCEPT ![c] = @ + 1]
+           /\ clientCache'  = [clientCache EXCEPT ![c][k] =
+                [val |-> finalVal, ver |-> finalVer]]
+           \* Record in history — slot=0 (weak reads have no slot)
+           /\ history' = Append(history,
+                [client      |-> c,
+                 op          |-> Read,
+                 key         |-> k,
+                 reqVal      |-> Nil,
+                 retVal      |-> finalVal,
+                 consistency |-> Weak,
+                 invEpoch    |-> clientInvEpoch[c],
+                 retEpoch    |-> epoch + 1,
+                 slot        |-> 0,
+                 retVer      |-> finalVer])
+        /\ messages' = messages \ {m}
+        /\ UNCHANGED <<replicaVars, unsyncedVars, clientCon, clientSeq,
+                       clientInvEpoch, clientWriteSet, boundReplica,
+                       fastPathResponses>>
 
 \* ============================================================================
 \* Next-State Relation
@@ -1038,6 +1119,11 @@ Next ==
     \* Replica actions — strong read
     \/ \E r \in Replicas : HandleStrongReadProposeFollower(r)
     \/ \E r \in Replicas : HandleStrongReadProposeLeader(r)
+    \* Client actions — weak read
+    \/ \E c \in Clients : ClientIssueWeakRead(c)
+    \/ \E c \in Clients : ClientHandleWeakReadReply(c)
+    \* Replica actions — weak read
+    \/ \E r \in Replicas : HandleWeakRead(r)
     \* Replica actions — replication
     \/ \E r \in Replicas : HandleAccept(r)
     \/ \E r \in Replicas : HandleAcceptAck(r)

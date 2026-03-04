@@ -3996,9 +3996,9 @@ Full causal consistency session guarantees verified:
 
 #### 56.5: Model weak read path (1 RTT to bound replica)
 
-- [ ] **56.5a** `ClientIssueWeakRead(c)`: client sends WeakRead to bound replica
-- [ ] **56.5b** `HandleWeakRead(r)`: bound replica returns (val, ver) from committed kvStore + pending weak writes
-- [ ] **56.5c** `ClientHandleWeakReadReply(c)`: cache merge (max version wins), record history with retVer
+- [x] **56.5a** `ClientIssueWeakRead(c)`: sends WeakRead to bound replica only (1 RTT). [26:03:04]
+- [x] **56.5b** `HandleWeakRead(r)`: returns committed (val, ver) from kvStore + keyVersion. Uses committed state only (no speculative/unsynced values), matching Go implementation. [26:03:04]
+- [x] **56.5c** `ClientHandleWeakReadReply(c)`: cache merge (max version wins: `cached.ver > m.ver`), records history with slot=0, retVer=finalVer. TLC verified: 21.7M+ states, MCTypeInv PASS, no errors. [26:03:04]
 
 #### 56.6: Safety property invariants
 
