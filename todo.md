@@ -3786,34 +3786,22 @@ which can block on `slot-1` execution dependency — stalling ALL other messages
 **Tasks**:
 
 #### 54.1: Revert inline fallback — match CURP-HT/HO strict goroutine routing
-- [ ] **54.1a** Remove the `select/default` inline fallback in `getCmdDescSeq`. For non-sequential
-  descriptors, always use `desc.msgs <- msg` (strict routing, same as CURP-HT/HO). Keep `desc.msgs`
-  buffer at 128 (larger than CURP-HT/HO's 8 — compensates for CURP having 100% strong ops vs 50%).
-  (~5 LOC change)
+- [x] **54.1a** Removed `select/default` inline fallback in `getCmdDescSeq`. Non-sequential descriptors now use strict `desc.msgs <- msg` (matching CURP-HT/HO). Buffer kept at 128. [26:03:03]
 
 #### 54.2: Enlarge batcher channel buffer 8→128
-- [ ] **54.2a** In `curp/curp.go`, change `NewBatcher(r, 8)` to `NewBatcher(r, 128)` to match
-  CURP-HT/HO. This prevents the event loop from blocking when sending batched Accept/AcceptAck
-  messages at high throughput. (~1 LOC)
+- [x] **54.2a** Changed `NewBatcher(r, 8)` to `NewBatcher(r, 128)` matching CURP-HT/HO. [26:03:03]
 
 #### 54.3: Add sync.Map string cache (port from CURP-HT/HO)
-- [ ] **54.3a** Add `stringCache sync.Map` field to Replica struct and `int32ToString(val int32) string`
-  method, ported from CURP-HT/HO. This provides wait-free cached reads for all int→string conversions
-  (not just slotStr). (~15 LOC)
-- [ ] **54.3b** Replace remaining `strconv.Itoa(slot-1)`, `strconv.Itoa(desc.dep)`, and any other
-  uncached `strconv.Itoa`/`strconv.FormatInt` calls with `r.int32ToString()`. (~10 LOC)
+- [x] **54.3a** Added `stringCache sync.Map` + `int32ToString(int32) string` method, ported from CURP-HT. [26:03:03]
+- [x] **54.3b** Replaced all remaining `strconv.Itoa`/`strconv.FormatInt` calls (7 sites) with `r.int32ToString()`. Zero raw strconv calls remain except in the cache method itself. [26:03:03]
 
 #### 54.4: Channel-based delivery notification (port from CURP-HT/HO)
-- [ ] **54.4a** Add `executeNotify map[int]chan struct{}` to Replica (or use `sync.Map` keyed by slot).
-  When slot N finishes execution, close `executeNotify[N]` to wake all waiters. (~20 LOC)
-- [ ] **54.4b** In `deliver()`, replace `r.executed.Has(strconv.Itoa(slot-1))` polling with
-  `<-r.getExecuteNotify(slot-1)` channel wait. This allows descriptor goroutines to sleep
-  instead of returning and relying on `deliverChan` retry, reducing CPU waste and latency variance.
-  (~15 LOC)
+- [x] **54.4a** Added `executeNotify sync.Map` (slot→chan) + `closedChan` pre-allocated closed channel + `getOrCreateExecuteNotify(slot)` and `notifyExecute(slot)` methods. Uses `sync.Map.LoadOrStore` for lock-free creation. [26:03:03]
+- [x] **54.4b** In `deliver()`, non-sequential descriptors now wait on `<-r.getOrCreateExecuteNotify(slot-1)` instead of polling `r.executed.Has()`. Sequential descriptors (event loop) still poll to avoid blocking. `notifyExecute(slot)` called after `r.executed.Set()`. [26:03:03]
 
 #### 54.5: Test and validate
-- [ ] **54.5a** Run `go test ./curp/ -v` to verify no regressions
-- [ ] **54.5b** Run `go test ./... -count=1` for full regression check
+- [x] **54.5a** `go test ./curp/ -v` — 19 tests pass (5 new: TestStrictGoroutineRouting, TestInt32ToStringCache, TestExecuteNotifyBasic, TestExecuteNotifyAlreadyExecuted, TestExecuteNotifyMultipleWaiters, TestBatcherBufferSize128) [26:03:03]
+- [x] **54.5b** `go test ./... -count=1` — all packages pass [26:03:03]
 - [ ] **54.5c** Re-run CURP benchmark sweep and verify:
   - S-P99 < 500ms at 96t (was 1,211ms)
   - S-P99 < 1,500ms at 288t (was 3,512ms)

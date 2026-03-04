@@ -50,6 +50,10 @@ type Replica struct {
 	descPool     sync.Pool
 	poolLevel    int
 	routineCount int
+
+	stringCache   sync.Map    // int32 → string cache, avoids repeated strconv allocations
+	executeNotify sync.Map    // int (slot) → chan struct{}, closed when slot is executed
+	closedChan    chan struct{} // pre-allocated closed channel for already-executed slots
 }
 
 type commandDesc struct {
@@ -123,9 +127,12 @@ func New(alias string, rid int, addrs []string, exec bool, pl, f int,
 		},
 	}
 
+	r.closedChan = make(chan struct{})
+	close(r.closedChan)
+
 	r.Q = replica.NewMajorityOf(r.N)
 	r.sender = replica.NewSender(r.Replica)
-	r.batcher = NewBatcher(r, 8)
+	r.batcher = NewBatcher(r, 128)
 
 	// Configure batch delay if specified (Phase 52.3)
 	if conf.BatchDelayUs > 0 {
@@ -408,7 +415,7 @@ func (r *Replica) sync(cmdId CommandId, cmd state.Command) {
 	if r.isLeader {
 		return
 	}
-	key := strconv.FormatInt(int64(cmd.K), 10)
+	key := r.int32ToString(int32(cmd.K))
 	r.unsynced.Upsert(key, nil,
 		func(exists bool, mapV, _ interface{}) interface{} {
 			if exists {
@@ -428,7 +435,7 @@ func (r *Replica) sync(cmdId CommandId, cmd state.Command) {
 }
 
 func (r *Replica) unsync(cmd state.Command) {
-	key := strconv.FormatInt(int64(cmd.K), 10)
+	key := r.int32ToString(int32(cmd.K))
 	r.unsynced.Upsert(key, nil,
 		func(exists bool, mapV, _ interface{}) interface{} {
 			if exists {
@@ -440,7 +447,7 @@ func (r *Replica) unsync(cmd state.Command) {
 
 func (r *Replica) leaderUnsync(cmd state.Command, slot int) int {
 	depSlot := -1
-	key := strconv.FormatInt(int64(cmd.K), 10)
+	key := r.int32ToString(int32(cmd.K))
 	r.unsynced.Upsert(key, nil,
 		func(exists bool, mapV, _ interface{}) interface{} {
 			if exists {
@@ -456,7 +463,7 @@ func (r *Replica) leaderUnsync(cmd state.Command, slot int) int {
 }
 
 func (r *Replica) ok(cmd state.Command) uint8 {
-	key := strconv.FormatInt(int64(cmd.K), 10)
+	key := r.int32ToString(int32(cmd.K))
 	v, exists := r.unsynced.Get(key)
 	if exists && v.(int) > 0 {
 		return FALSE
@@ -474,8 +481,16 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 			return
 		}
 
-		if slot > 0 && !r.executed.Has(strconv.Itoa(slot-1)) {
-			return
+		if slot > 0 {
+			if desc.seq {
+				// Sequential mode (event loop): poll, don't block
+				if !r.executed.Has(r.int32ToString(int32(slot - 1))) {
+					return
+				}
+			} else {
+				// Goroutine mode: wait on channel instead of polling
+				<-r.getOrCreateExecuteNotify(slot - 1)
+			}
 		}
 
 		p, exists := r.proposes.Get(desc.cmdId.String())
@@ -494,6 +509,7 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 		if desc.val == nil {
 			desc.val = desc.cmd.Execute(r.State)
 			r.executed.Set(desc.slotStr, struct{}{})
+			r.notifyExecute(slot)
 			go func(nextSlot int) {
 				r.deliverChan <- nextSlot
 			}(slot + 1)
@@ -506,7 +522,7 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 				CmdId:   desc.cmdId,
 				Rep:     desc.val,
 			}
-			if desc.dep != -1 && !r.committed.Has(strconv.Itoa(desc.dep)) {
+			if desc.dep != -1 && !r.committed.Has(r.int32ToString(int32(desc.dep))) {
 				rep.Ok = FALSE
 			} else {
 				rep.Ok = TRUE
@@ -556,7 +572,7 @@ func (r *Replica) getCmdDesc(slot int, msg interface{}, dep int) *commandDesc {
 }
 
 func (r *Replica) getCmdDescSeq(slot int, msg interface{}, dep int, seq bool) *commandDesc {
-	slotStr := strconv.Itoa(slot)
+	slotStr := r.int32ToString(int32(slot))
 	if r.delivered.Has(slotStr) {
 		return nil
 	}
@@ -586,13 +602,7 @@ func (r *Replica) getCmdDescSeq(slot int, msg interface{}, dep int, seq bool) *c
 		if desc.seq {
 			r.handleMsg(msg, desc, slot, dep)
 		} else {
-			select {
-			case desc.msgs <- msg:
-				// sent to goroutine
-			default:
-				// channel full — process inline to avoid blocking event loop
-				r.handleMsg(msg, desc, slot, dep)
-			}
+			desc.msgs <- msg
 		}
 	}
 
@@ -662,6 +672,40 @@ func (r *Replica) allocDesc() *commandDesc {
 func (r *Replica) freeDesc(desc *commandDesc) {
 	if r.poolLevel > 0 {
 		r.descPool.Put(desc)
+	}
+}
+
+// int32ToString converts an int32 to string using a cache to avoid repeated allocations.
+// Ported from CURP-HT (curp-ht/curp-ht.go:1048-1057).
+func (r *Replica) int32ToString(val int32) string {
+	if cached, ok := r.stringCache.Load(val); ok {
+		return cached.(string)
+	}
+	str := strconv.FormatInt(int64(val), 10)
+	r.stringCache.Store(val, str)
+	return str
+}
+
+// getOrCreateExecuteNotify returns a channel that is closed when the given slot finishes execution.
+// If the slot is already executed, returns a pre-closed channel (zero allocation).
+// Ported from CURP-HT (curp-ht/curp-ht.go:1111-1129).
+func (r *Replica) getOrCreateExecuteNotify(slot int) chan struct{} {
+	if r.executed.Has(r.int32ToString(int32(slot))) {
+		return r.closedChan
+	}
+	actual, _ := r.executeNotify.LoadOrStore(slot, make(chan struct{}))
+	// Double-check: slot may have been executed between our Has() check and LoadOrStore
+	if r.executed.Has(r.int32ToString(int32(slot))) {
+		return r.closedChan
+	}
+	return actual.(chan struct{})
+}
+
+// notifyExecute closes the notification channel for the given slot, waking all waiters.
+// Ported from CURP-HT (curp-ht/curp-ht.go:1131-1140).
+func (r *Replica) notifyExecute(slot int) {
+	if ch, ok := r.executeNotify.LoadAndDelete(slot); ok {
+		close(ch.(chan struct{}))
 	}
 }
 

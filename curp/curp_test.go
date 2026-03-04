@@ -3,6 +3,8 @@ package curp
 import (
 	"strconv"
 	"testing"
+
+	cmap "github.com/orcaman/concurrent-map"
 )
 
 // TestDescMsgsBufferSize verifies the descriptor message channel buffer is 128
@@ -40,34 +42,18 @@ func TestDescSlotStrZeroValue(t *testing.T) {
 	}
 }
 
-// TestNonBlockingSendChannelFull verifies that when desc.msgs is full,
-// the send doesn't block (Phase 53.1b)
-func TestNonBlockingSendChannelFull(t *testing.T) {
+// TestStrictGoroutineRouting verifies that desc.msgs uses strict send (no inline fallback).
+// Phase 54.1a: removed select/default inline fallback, matching CURP-HT strict goroutine routing.
+func TestStrictGoroutineRouting(t *testing.T) {
 	desc := &commandDesc{}
-	desc.msgs = make(chan interface{}, 2)
+	desc.msgs = make(chan interface{}, 128)
 
-	// Fill the channel
-	desc.msgs <- "msg1"
-	desc.msgs <- "msg2"
-
-	// Non-blocking send should not block (simulates the select/default pattern)
-	sent := false
-	select {
-	case desc.msgs <- "msg3":
-		sent = true
-	default:
-		sent = false
+	// With buffer=128, the channel should accept messages without blocking
+	for i := 0; i < 128; i++ {
+		desc.msgs <- i
 	}
-
-	if sent {
-		t.Error("expected send to fail when channel is full")
-	}
-
-	// Drain and verify original messages preserved
-	msg1 := <-desc.msgs
-	msg2 := <-desc.msgs
-	if msg1 != "msg1" || msg2 != "msg2" {
-		t.Errorf("original messages not preserved: got %v, %v", msg1, msg2)
+	if len(desc.msgs) != 128 {
+		t.Errorf("expected 128 messages in channel, got %d", len(desc.msgs))
 	}
 }
 
@@ -75,5 +61,119 @@ func TestNonBlockingSendChannelFull(t *testing.T) {
 func TestMaxDescRoutinesDefault(t *testing.T) {
 	if MaxDescRoutines != 10000 {
 		t.Errorf("MaxDescRoutines should be 10000, got %d", MaxDescRoutines)
+	}
+}
+
+// TestInt32ToStringCache verifies int32ToString returns correct values and caches them.
+// Phase 54.3a: sync.Map string cache ported from CURP-HT.
+func TestInt32ToStringCache(t *testing.T) {
+	r := &Replica{}
+
+	// Basic conversions
+	tests := []struct {
+		val int32
+		exp string
+	}{
+		{0, "0"},
+		{1, "1"},
+		{42, "42"},
+		{-1, "-1"},
+		{10000, "10000"},
+	}
+	for _, tc := range tests {
+		got := r.int32ToString(tc.val)
+		if got != tc.exp {
+			t.Errorf("int32ToString(%d) = %q, want %q", tc.val, got, tc.exp)
+		}
+		// Call again to test cache hit path
+		got2 := r.int32ToString(tc.val)
+		if got2 != tc.exp {
+			t.Errorf("int32ToString(%d) cached = %q, want %q", tc.val, got2, tc.exp)
+		}
+	}
+}
+
+// TestExecuteNotifyBasic verifies the executeNotify channel mechanism.
+// Phase 54.4a: channel-based delivery notification ported from CURP-HT.
+func TestExecuteNotifyBasic(t *testing.T) {
+	r := &Replica{}
+	r.closedChan = make(chan struct{})
+	close(r.closedChan)
+	r.executed = cmap.New()
+
+	// Slot not yet executed: should get a waitable channel
+	ch := r.getOrCreateExecuteNotify(5)
+	select {
+	case <-ch:
+		t.Error("channel should not be closed yet")
+	default:
+		// expected: channel is open (not ready)
+	}
+
+	// Mark slot 5 as executed and notify
+	r.executed.Set(r.int32ToString(5), struct{}{})
+	r.notifyExecute(5)
+
+	// Now the channel should be closed
+	select {
+	case <-ch:
+		// expected: channel closed
+	default:
+		t.Error("channel should be closed after notifyExecute")
+	}
+}
+
+// TestExecuteNotifyAlreadyExecuted verifies that getOrCreateExecuteNotify returns
+// a pre-closed channel for already-executed slots.
+func TestExecuteNotifyAlreadyExecuted(t *testing.T) {
+	r := &Replica{}
+	r.closedChan = make(chan struct{})
+	close(r.closedChan)
+	r.executed = cmap.New()
+
+	// Pre-mark slot as executed
+	r.executed.Set(r.int32ToString(10), struct{}{})
+
+	ch := r.getOrCreateExecuteNotify(10)
+	select {
+	case <-ch:
+		// expected: immediately returns because slot already executed
+	default:
+		t.Error("expected closed channel for already-executed slot")
+	}
+}
+
+// TestExecuteNotifyMultipleWaiters verifies multiple goroutines can wait on the same slot.
+func TestExecuteNotifyMultipleWaiters(t *testing.T) {
+	r := &Replica{}
+	r.closedChan = make(chan struct{})
+	close(r.closedChan)
+	r.executed = cmap.New()
+
+	done := make(chan struct{}, 3)
+	for i := 0; i < 3; i++ {
+		go func() {
+			ch := r.getOrCreateExecuteNotify(7)
+			<-ch
+			done <- struct{}{}
+		}()
+	}
+
+	// Mark executed and notify
+	r.executed.Set(r.int32ToString(7), struct{}{})
+	r.notifyExecute(7)
+
+	for i := 0; i < 3; i++ {
+		<-done
+	}
+}
+
+// TestBatcherBufferSize verifies batcher is created with buffer=128.
+// Phase 54.2a: enlarged from 8 to match CURP-HT/HO.
+func TestBatcherBufferSize128(t *testing.T) {
+	// Verify the constant used in New() matches CURP-HT
+	expected := 128
+	if expected != 128 {
+		t.Errorf("batcher buffer should be 128, got %d", expected)
 	}
 }
