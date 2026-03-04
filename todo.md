@@ -3981,10 +3981,11 @@ Full causal consistency session guarantees verified:
 
 #### 56.3: Model strong write path (fast path + slow path)
 
-- [ ] **56.3a** `ClientIssueStrongWrite(c)`: client broadcasts Propose to all replicas
-- [ ] **56.3b** `HandleStrongPropose(r)`: non-leader checks key conflict in unsynced, replies with Ok/Nok + CausalDeps (same-session weak writes in pool). Leader appends to log, speculatively executes, starts replication.
-- [ ] **56.3c** `ClientHandleStrongWriteFastPath(c)`: client collects super-majority Ok + CausalDeps cover writeSet → complete on fast path
-- [ ] **56.3d** `ClientHandleStrongWriteSlowPath(c)`: client completes on majority AcceptAck or leader SyncReply
+- [x] **56.3a** `ClientIssueStrongWrite(c)`: broadcasts StrongPropose (with dest field per replica) to ALL replicas, clears fastPathResponses. [26:03:04]
+- [x] **56.3b** `HandleStrongProposeFollower(r)` + `HandleStrongProposeLeader(r)`: Follower checks key conflict in unsynced (only against strong entries), computes CausalDeps, replies MRecordAck with ok/causalDeps/readDep=Nil. Leader appends to log, sends Accept + leader MRecordAck with slot. [26:03:04]
+- [x] **56.3c** `ClientHandleStrongWriteFastPath(c)`: accumulates MRecordAck responses. Fast path requires: 3/4 quorum ok + CausalDeps cover writeSet + have leader slot. On success: complete, record history with slot, clear writeSet. Otherwise: just accumulate. [26:03:04]
+- [x] **56.3d** `ClientHandleStrongWriteSlowPath(c)`: completes on SyncReply from leader (after commit+apply). Records history with slot, clears writeSet. [26:03:04]
+- MCTypeInv check with strong write + weak write (2c/2v/1k/MaxOps=1): **1.79B+ states in ~70 min, NO ERRORS** (stopped, not exhaustive — state space much larger than Raft-HT due to broadcast + dual-path + witness pool).
 
 #### 56.4: Model strong read path (fast path + ReadDep)
 
@@ -4001,10 +4002,17 @@ Full causal consistency session guarantees verified:
 
 #### 56.6: Safety property invariants
 
-- [ ] **56.6a** Port LinearizabilityInv: RealTimeRespect (identical) + StrongReadConsistency (replay leader log — same structure since CURP-HO also uses single log with slot-ordered execution)
-- [ ] **56.6b** Port CausalConsistencyInv: ReadsReturnValidValues, MonotonicReads (retVer-based), ReadYourWrites, MonotonicWrites, WritesFollowReads — all identical since they only reference history entries
-- [ ] **56.6c** Port HybridCompatibilityInv: same session-order check on slotted ops
-- [ ] **56.6d** Define MCTypeInv for CURP-HO variables (including unsynced, clientWriteSet, boundReplica)
+**Known issue — retVer version space mismatch**: In Raft-HT, retVer = log slot (all versions in same namespace). In CURP-HO, weak write completes before slot assignment → uses `clientSeq` as proxy version. But `clientSeq` and log slot are different namespaces. This means ReadYourWrites (`retVer >= slot`) and WritesFollowReads (`slot > retVer`) compare incompatible values. **Fix needed**: either (a) restrict MonotonicWrites/WritesFollowReads/ReadYourWrites to only check ops where both have real slots (slot > 0), or (b) use a unified version that maps proxy versions to eventual slots. Option (a) is simpler but weaker — it only validates strong ops ordering, not weak→strong causal chains. Option (b) requires backfilling history slots on commit, which is complex in TLA+. **Recommended**: use option (a) for now, plus verify that weak write cache versions are monotonic via a separate invariant that only uses retVer (not slot).
+
+- [ ] **56.6a** Port LinearizabilityInv: RealTimeRespect (identical — only checks strong ops which have real slots) + StrongReadConsistency (replay leader log — same structure since CURP-HO also uses single log with slot-ordered execution)
+- [ ] **56.6b** Port CausalConsistencyInv with adaptations:
+  - ReadsReturnValidValues: identical (checks log values)
+  - MonotonicReads: `retVer` non-decreasing for same-client same-key reads — works IF retVer is consistently computed (needs audit)
+  - ReadYourWrites: only check when write has slot > 0 (strong write), i.e., `history[i].slot > 0 => history[j].retVer >= history[i].slot`
+  - MonotonicWrites: only check when both writes have slot > 0, i.e., `history[i].slot > 0 /\ history[j].slot > 0 => slot[i] < slot[j]`
+  - WritesFollowReads: only check when write has slot > 0, i.e., `history[j].slot > 0 => history[j].slot > history[i].retVer`. **But** retVer for weak reads might use proxy version → need to ensure proxy version < any real slot, or skip this check when read's retVer is proxy-based.
+- [ ] **56.6c** Port HybridCompatibilityInv: same session-order check, already guards with slot > 0
+- [ ] **56.6d** Audit retVer computation across all reply handlers — ensure weak ops use a version that is compatible with slot-based comparisons (e.g., use 0 for "no real version" so all slot-based comparisons trivially pass)
 
 #### 56.7: Model checking configuration
 
@@ -4012,11 +4020,13 @@ Full causal consistency session guarantees verified:
 
 #### 56.8: Verification runs
 
-- [ ] **56.8a** Sanity check: MaxOps=1, confirm exhaustive PASS
-- [ ] **56.8b** Full run: MaxOps=2, run for up to 2 hours. Record results.
+**State space concern**: With only weak write + strong write (no reads), MaxOps=1 already has 1.79B+ states (vs Raft-HT's 73.9M). Adding strong read + weak read will further increase. May need to reduce to 1 client or tighten message limit for exhaustive checking. Consider: (a) 1c/2v/1k/MaxOps=2 for exhaustive, (b) 2c/2v/1k/MaxOps=1 for 2-hour partial run.
+
+- [ ] **56.8a** Determine feasible config: try 1c first for exhaustive, then 2c for partial
+- [ ] **56.8b** Run TLC with SafetyInv, record results
 - [ ] **56.8c** Record results in todo.md, commit and push
 
-**Estimated complexity**: ~500-700 lines for CurpHO.tla (vs ~790 for RaftHT.tla). The main new complexity is the witness pool + fast/slow path + CausalDeps/ReadDep checking. Invariants are largely portable from RaftHT.tla.
+**Estimated complexity**: ~500-700 lines for CurpHO.tla (vs ~790 for RaftHT.tla). The main new complexity is the witness pool + fast/slow path + CausalDeps/ReadDep checking. Invariants need adaptation for retVer version space mismatch.
 
 ---
 
