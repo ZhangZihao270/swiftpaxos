@@ -3761,6 +3761,80 @@ Meanwhile S-Med stays excellent: ~51ms at 192t, ~69ms at 288t. The issue is tail
 
 ---
 
+### Phase 54: Port CURP-HT/HO Engineering Optimizations to Vanilla CURP [HIGH PRIORITY]
+
+**Goal**: Reduce CURP S-P99 to < 500ms at 96t and < 1.5s at 288t by porting proven optimizations from CURP-HT/HO.
+
+**Background**: Phase 53 reduced P99 by 18-30% but didn't meet targets (96t: 1,211ms, 288t: 3,512ms).
+Detailed comparison of CURP vs CURP-HT/HO code reveals the P99 gap is NOT just from 50% weak ops bypassing
+the event loop — there are 4 structural engineering differences that independently improve strong operation P99:
+
+| Feature | CURP (current) | CURP-HT/HO | Impact on P99 |
+|---------|---------------|-------------|---------------|
+| Batcher channel buffer | **8** | **128** | CURP event loop blocks on Accept/Ack send to batcher |
+| Inline fallback | **select/default** (Phase 53.1b) | **None — strict goroutine routing** | CURP inline `handleMsg→deliver` blocks event loop; CURP-HT/HO never do |
+| String conversion | partial slotStr cache (Phase 53.2) | **sync.Map global cache** (`int32ToString`) | CURP still has 3 uncached sites + no global cache for non-slot keys |
+| Delivery notification | poll `r.executed.Has()` | **channel-based** `commitNotify`/`executeNotify` | CURP goroutines busy-wait; CURP-HT/HO sleep on channels |
+
+**Critical insight: The inline fallback from Phase 53.1b is actually a REGRESSION**.
+CURP-HT/HO NEVER process messages inline in the event loop for non-sequential descriptors.
+When `desc.msgs` is full, they let `desc.msgs <- msg` block briefly (channel drains fast with
+dedicated goroutine), keeping the event loop code simple and avoiding cascading deliver() blocking.
+Phase 53.1b's `select/default` inline fallback means the event loop calls `handleMsg → deliver()`
+which can block on `slot-1` execution dependency — stalling ALL other messages.
+
+**Tasks**:
+
+#### 54.1: Revert inline fallback — match CURP-HT/HO strict goroutine routing
+- [ ] **54.1a** Remove the `select/default` inline fallback in `getCmdDescSeq`. For non-sequential
+  descriptors, always use `desc.msgs <- msg` (strict routing, same as CURP-HT/HO). Keep `desc.msgs`
+  buffer at 128 (larger than CURP-HT/HO's 8 — compensates for CURP having 100% strong ops vs 50%).
+  (~5 LOC change)
+
+#### 54.2: Enlarge batcher channel buffer 8→128
+- [ ] **54.2a** In `curp/curp.go`, change `NewBatcher(r, 8)` to `NewBatcher(r, 128)` to match
+  CURP-HT/HO. This prevents the event loop from blocking when sending batched Accept/AcceptAck
+  messages at high throughput. (~1 LOC)
+
+#### 54.3: Add sync.Map string cache (port from CURP-HT/HO)
+- [ ] **54.3a** Add `stringCache sync.Map` field to Replica struct and `int32ToString(val int32) string`
+  method, ported from CURP-HT/HO. This provides wait-free cached reads for all int→string conversions
+  (not just slotStr). (~15 LOC)
+- [ ] **54.3b** Replace remaining `strconv.Itoa(slot-1)`, `strconv.Itoa(desc.dep)`, and any other
+  uncached `strconv.Itoa`/`strconv.FormatInt` calls with `r.int32ToString()`. (~10 LOC)
+
+#### 54.4: Channel-based delivery notification (port from CURP-HT/HO)
+- [ ] **54.4a** Add `executeNotify map[int]chan struct{}` to Replica (or use `sync.Map` keyed by slot).
+  When slot N finishes execution, close `executeNotify[N]` to wake all waiters. (~20 LOC)
+- [ ] **54.4b** In `deliver()`, replace `r.executed.Has(strconv.Itoa(slot-1))` polling with
+  `<-r.getExecuteNotify(slot-1)` channel wait. This allows descriptor goroutines to sleep
+  instead of returning and relying on `deliverChan` retry, reducing CPU waste and latency variance.
+  (~15 LOC)
+
+#### 54.5: Test and validate
+- [ ] **54.5a** Run `go test ./curp/ -v` to verify no regressions
+- [ ] **54.5b** Run `go test ./... -count=1` for full regression check
+- [ ] **54.5c** Re-run CURP benchmark sweep and verify:
+  - S-P99 < 500ms at 96t (was 1,211ms)
+  - S-P99 < 1,500ms at 288t (was 3,512ms)
+  - S-Med unchanged (~51ms at low concurrency)
+  - Throughput not decreased (≥ 30K at 288t)
+
+#### 54.6: Document results
+- [ ] **54.6a** Create `evaluation/phase54-curp-p99-port.md` with before/after comparison
+- [ ] **54.6b** Update `orca/benchmark-2026-03-02.md` CURP section and comparison tables
+
+**Success Criteria**:
+1. `go test ./... -count=1` passes (no regressions)
+2. S-P99 < 500ms at 96 total threads (current: 1,211ms, CURP-HO ref: 166ms)
+3. S-P99 < 1,500ms at 288 total threads (current: 3,512ms, CURP-HO ref: 301ms)
+4. S-Med does not degrade (~51ms at low concurrency)
+5. Throughput does not decrease (≥ 30K at 288t)
+
+**Estimated changes**: ~65 LOC in `curp/curp.go`, ~0 LOC in `curp/defs.go`
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
