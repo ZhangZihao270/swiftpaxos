@@ -3802,15 +3802,11 @@ which can block on `slot-1` execution dependency — stalling ALL other messages
 #### 54.5: Test and validate
 - [x] **54.5a** `go test ./curp/ -v` — 19 tests pass (5 new: TestStrictGoroutineRouting, TestInt32ToStringCache, TestExecuteNotifyBasic, TestExecuteNotifyAlreadyExecuted, TestExecuteNotifyMultipleWaiters, TestBatcherBufferSize128) [26:03:03]
 - [x] **54.5b** `go test ./... -count=1` — all packages pass [26:03:03]
-- [ ] **54.5c** Re-run CURP benchmark sweep and verify:
-  - S-P99 < 500ms at 96t (was 1,211ms)
-  - S-P99 < 1,500ms at 288t (was 3,512ms)
-  - S-Med unchanged (~51ms at low concurrency)
-  - Throughput not decreased (≥ 30K at 288t)
+- [x] **54.5c** Re-run CURP benchmark sweep. Results: 96t P99 1,211→964ms (-20.5%), 192t 3,420→2,146ms (-37.3%), 288t 3,512→1,172ms (-66.6%). S-Med preserved (~51ms). Throughput at 288t improved 30,563→32,455 (+6.2%). 288t target PASS (<1,500ms), 96t target PARTIAL (964ms vs 500ms goal). [26:03:03]
 
 #### 54.6: Document results
-- [ ] **54.6a** Create `evaluation/phase54-curp-p99-port.md` with before/after comparison
-- [ ] **54.6b** Update `orca/benchmark-2026-03-02.md` CURP section and comparison tables
+- [x] **54.6a** Created `evaluation/phase54-curp-p99-port.md` with full before/after comparison tables, validation criteria, and analysis [26:03:03]
+- [x] **54.6b** Updated `orca/benchmark-2026-03-02.md` CURP section with Phase 54 numbers, 5-protocol comparison tables, and analysis [26:03:03]
 
 **Success Criteria**:
 1. `go test ./... -count=1` passes (no regressions)

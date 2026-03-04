@@ -54,31 +54,35 @@ Phase 50.1-50.3 optimizations: RWMutex-based weak reads, batched weak writes, re
 |     192 |     32,501 | 156.10 | 157.70 |  256.59 |  22.35 |  14.65 |  141.67 |  182.90 |  128.94 |
 |     288 |     36,999 | 199.58 | 201.26 |  335.13 |  34.82 |  25.38 |  188.86 |  227.49 |  171.64 |
 
-## CURP (Vanilla) Results (Phase 52 + Phase 53 P99 fix)
+## CURP (Vanilla) Results (Phase 52 + Phase 53 + Phase 54)
 
 CURP runs with 100% strong operations (no weak consistency support, strong-only protocol).
 
-Phase 52.1-52.4 optimizations + Phase 53.1-53.3 P99 tail latency fixes:
+Phase 52.1-52.4 optimizations + Phase 53-54 P99 tail latency fixes:
 - SHARD_COUNT 32768 → 512 (cache-friendly)
 - MaxDescRoutines 100 → 10000 (remove goroutine ceiling)
 - Configurable batch delay (150μs)
 - HybridBufferClient wiring for metric collection
-- Descriptor channel buffer 8 → 128 + non-blocking send (Phase 53.1)
+- Descriptor channel buffer 8 → 128 (Phase 53.1)
 - Cached slotStr to eliminate strconv.Itoa allocations (Phase 53.2)
 - Sequential mode direct cleanup (Phase 53.3)
+- Strict goroutine routing — removed inline fallback (Phase 54.1)
+- Batcher buffer 8 → 128 (Phase 54.2)
+- sync.Map string cache — int32ToString (Phase 54.3)
+- Channel-based delivery notification — executeNotify (Phase 54.4)
 
 | Threads | Throughput | S-Avg  | S-Med  | S-P99    |
 |--------:|-----------:|-------:|-------:|---------:|
-|       6 |      1,746 |  51.44 |  51.39 |    53.33 |
-|      12 |      3,497 |  51.38 |  51.27 |    53.88 |
-|      24 |      6,999 |  51.36 |  51.19 |    54.79 |
-|      48 |     13,463 |  53.47 |  50.87 |   269.55 |
-|      96 |     21,091 |  77.69 |  51.00 | 1,211.36 |
-|     192 |     30,077 | 125.43 |  51.49 | 3,420.09 |
-|     288 |     30,563 | 190.33 |  68.34 | 3,512.45 |
+|       6 |      1,746 |  51.47 |  51.39 |    53.51 |
+|      12 |      3,486 |  51.54 |  51.33 |    58.10 |
+|      24 |      6,899 |  52.08 |  51.31 |    85.30 |
+|      48 |     12,857 |  56.03 |  51.19 |   237.69 |
+|      96 |     20,470 |  80.35 |  51.31 |   963.61 |
+|     192 |     29,340 | 126.64 |  51.38 | 2,146.07 |
+|     288 |     32,455 | 176.57 |  57.05 | 1,171.50 |
 
 Note: Thread counts are total across 3 clients (e.g., 96 = 3 clients × 32 threads/client).
-Phase 53 reduced P99 by 18-30% at high concurrency (96-288t). See `evaluation/phase53-curp-p99-fix.md` for before/after details.
+Phase 54 reduced P99 by 20-67% at high concurrency vs Phase 53: 96t 1,211→964ms (-20%), 192t 3,420→2,146ms (-37%), 288t 3,512→1,172ms (-67%). Throughput improved at 288t (+6.2%). See `evaluation/phase54-curp-p99-port.md` for details.
 
 ## Raft (Baseline) Results
 
@@ -108,24 +112,24 @@ Raft-HT numbers reflect Phase 50 post-fix results. All thread counts are total (
 | Threads |   Raft | Raft-HT | CURP-HO | CURP-HT |   CURP |
 |--------:|-------:|--------:|--------:|--------:|-------:|
 |       6 |  1,361 |   2,323 |   3,529 |   2,994 |  1,746 |
-|      12 |  2,716 |   4,562 |   7,097 |   5,931 |  3,497 |
-|      24 |  5,418 |   9,163 |  14,118 |  11,837 |  6,999 |
-|      48 |  9,976 |  15,339 |  27,115 |  23,496 | 13,463 |
-|      96 | 17,781 |  24,123 |  38,292 |  41,789 | 21,091 |
-|     192 | 22,341 |  32,501 |  42,962 |  50,342 | 30,077 |
-|     288 |    N/A |  36,999 |  51,836 |  49,546 | 30,563 |
+|      12 |  2,716 |   4,562 |   7,097 |   5,931 |  3,486 |
+|      24 |  5,418 |   9,163 |  14,118 |  11,837 |  6,899 |
+|      48 |  9,976 |  15,339 |  27,115 |  23,496 | 12,857 |
+|      96 | 17,781 |  24,123 |  38,292 |  41,789 | 20,470 |
+|     192 | 22,341 |  32,501 |  42,962 |  50,342 | 29,340 |
+|     288 |    N/A |  36,999 |  51,836 |  49,546 | 32,455 |
 
 ## 5-Protocol Comparison: Strong Latency S-Med (ms)
 
 | Threads |  Raft | Raft-HT | CURP-HO | CURP-HT |   CURP |
 |--------:|------:|--------:|--------:|--------:|-------:|
 |       6 | 68.40 |   85.12 |   51.27 |   51.21 |  51.39 |
-|      12 | 68.52 |   85.12 |   51.02 |   51.09 |  51.27 |
-|      24 | 68.63 |   85.20 |   50.96 |   51.00 |  51.19 |
-|      48 | 71.39 |   92.34 |   50.85 |   50.86 |  50.87 |
-|      96 | 79.73 |  113.32 |   69.68 |   53.66 |  51.00 |
-|     192 |131.22 |  157.70 |   99.79 |   98.92 |  51.49 |
-|     288 |   N/A |  201.26 |   99.82 |  164.19 |  68.34 |
+|      12 | 68.52 |   85.12 |   51.02 |   51.09 |  51.33 |
+|      24 | 68.63 |   85.20 |   50.96 |   51.00 |  51.31 |
+|      48 | 71.39 |   92.34 |   50.85 |   50.86 |  51.19 |
+|      96 | 79.73 |  113.32 |   69.68 |   53.66 |  51.31 |
+|     192 |131.22 |  157.70 |   99.79 |   98.92 |  51.38 |
+|     288 |   N/A |  201.26 |   99.82 |  164.19 |  57.05 |
 
 ## 3-Protocol Comparison: Weak Write WW-P99 (ms)
 
@@ -189,28 +193,34 @@ Raft-HT throughput is approximately 0.6-0.7x of CURP protocols at all concurrenc
 Phase 52 brought vanilla CURP (strong-only protocol) into the benchmark pipeline for comparison. Key observations:
 
 **Strong Latency (S-Med)**:
-- CURP S-Med: 51.24-51.60ms at 6-192 threads, 69.26ms at 288 threads
+- CURP S-Med: 51.19-51.39ms at 6-192 threads, 57.05ms at 288 threads
 - CURP-HO S-Med: 50.85-51.27ms at low concurrency, 69.68ms at 96 threads
 - CURP-HT S-Med: 50.86-51.21ms at low concurrency, 53.66ms at 96 threads
-- **Conclusion**: All three protocols share the same 1-RTT fast path for strong operations, resulting in nearly identical S-Med (~51ms) at low load. At high concurrency, CURP maintains excellent S-Med up to 192 threads (51.60ms), better than CURP-HO (99.79ms @ 192t) and CURP-HT (98.92ms @ 192t).
+- **Conclusion**: All three protocols share the same 1-RTT fast path for strong operations, resulting in nearly identical S-Med (~51ms) at low load. At high concurrency, CURP maintains excellent S-Med up to 192 threads (51.38ms), better than CURP-HO (99.79ms @ 192t) and CURP-HT (98.92ms @ 192t). At 288t, CURP S-Med (57.05ms) is dramatically better than CURP-HO (99.82ms) and CURP-HT (164.19ms).
 
 **Throughput**:
-- CURP peak: 30,563 ops/sec at 288 threads (all strong operations)
+- CURP peak: 32,455 ops/sec at 288 threads (all strong operations)
 - CURP-HO peak: 51,836 ops/sec at 288 threads (50% weak, 50% strong)
 - CURP-HT peak: 50,342 ops/sec at 192 threads (50% weak, 50% strong)
 - Raft peak: 22,341 ops/sec at 192 threads (all strong operations)
-- **Conclusion**: CURP throughput (21K ops/sec @ 96t) falls between Raft (18K @ 96t) and the hybrid protocols (38-42K @ 96t). The hybrid protocols achieve higher throughput by serving 50% of requests via fast weak paths (sub-ms weak reads, 1-RTT weak writes for CURP-HO).
+- **Conclusion**: CURP throughput (20.5K ops/sec @ 96t) falls between Raft (18K @ 96t) and the hybrid protocols (38-42K @ 96t). The hybrid protocols achieve higher throughput by serving 50% of requests via fast weak paths (sub-ms weak reads, 1-RTT weak writes for CURP-HO).
 
 **Scaling**:
-CURP shows monotonic throughput scaling from 6 to 288 threads (1.7K → 31K ops/sec), with no collapse or timeout failures. This validates the Phase 52 optimizations (SHARD_COUNT=512, MaxDescRoutines=10000, batch delay=150μs).
+CURP shows monotonic throughput scaling from 6 to 288 threads (1.7K → 32.5K ops/sec), with no collapse or timeout failures. This validates the Phase 52-54 optimizations.
 
-**P99 Latency Degradation**:
-At high concurrency (192-288 threads), CURP exhibits significant P99 degradation (~3.4-3.5 seconds after Phase 53 optimizations, reduced from 4.7-5.0s) while maintaining good median latency (~51-68ms). Phase 53 reduced P99 by 18-30% via enlarged channel buffers, non-blocking sends, cached string keys, and sequential mode cleanup. The remaining tail latency is caused by fundamental single-threaded event loop queueing delay. The hybrid protocols (CURP-HO/HT) show better P99 behavior because 50% weak operations bypass the event loop entirely.
+**P99 Latency Progression (Phase 52 → 53 → 54)**:
+Phase 54 delivered the largest P99 improvement by porting CURP-HT/HO engineering optimizations:
+- 96t: 1,480ms → 1,211ms → 964ms (Phase 52 → 53 → 54, total -35%)
+- 192t: 4,747ms → 3,420ms → 2,146ms (total -55%)
+- 288t: 5,007ms → 3,512ms → 1,172ms (total -77%)
+
+The channel-based delivery notification (Phase 54.4) was the highest-impact change — replacing `r.executed.Has()` polling with `<-r.getOrCreateExecuteNotify(slot-1)` channels eliminated goroutine busy-waiting that consumed CPU at high concurrency. Combined with strict goroutine routing (54.1) and batcher buffer enlargement (54.2), CURP now meets the 288t P99 target (< 1,500ms) and is within 2x of the 96t target (964ms vs 500ms goal). S-Med is preserved at ~51ms at all loads. The remaining tail latency at 96t is fundamental to the single-threaded event loop architecture.
 
 ### Key Takeaways
 
 1. Hybrid transparency improves throughput over baseline for both Raft and CURP
 2. The throughput ceiling is primarily determined by the strong path RTT count
 3. Weak read implementation matters at high concurrency: lock-based (Raft-HT) degrades, version-based (CURP-HT) does not
-4. CURP vanilla achieves ~1.19x throughput over Raft at 96 threads (21K vs 18K ops/sec) despite both being strong-only, due to CURP's 1-RTT fast path vs Raft's 2-RTT. At 192 threads: 1.36x (30K vs 22K)
-5. Weak operations provide 1.80x additional throughput over strong-only at 96 threads (CURP-HO 38K vs CURP 21K)
+4. CURP vanilla achieves ~1.15x throughput over Raft at 96 threads (20.5K vs 18K ops/sec) despite both being strong-only, due to CURP's 1-RTT fast path vs Raft's 2-RTT. At 192 threads: 1.31x (29K vs 22K). At 288t: 32.5K ops/sec
+5. Weak operations provide 1.87x additional throughput over strong-only at 96 threads (CURP-HO 38K vs CURP 20.5K)
+6. Engineering optimizations matter: porting CURP-HT/HO's strict goroutine routing, batcher buffering, string caching, and channel-based notifications to vanilla CURP reduced P99 by 67% at 288t without protocol changes
