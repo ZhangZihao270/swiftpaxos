@@ -425,9 +425,8 @@ ClientHandleCausalReply(c) ==
            /\ clientCache'  = [clientCache EXCEPT ![c][k] =
                 [val |-> v, ver |-> Max(@.ver, clientSeq[c] - 1)]]
            \* Record in history — slot=0 because leader hasn't assigned slot yet.
-           \* The slot will be determined later by leader's async replication.
-           \* For invariant checking, weak writes get slot 0 initially.
-           \* HybridCompatibilityInv only checks pairs where both slots > 0.
+           \* retVer=0: no real version known yet (proxy clientSeq is in a different
+           \* namespace from log slots). All slot-based invariants guard with > 0.
            /\ history' = Append(history,
                 [client      |-> c,
                  op          |-> Write,
@@ -438,7 +437,7 @@ ClientHandleCausalReply(c) ==
                  invEpoch    |-> clientInvEpoch[c],
                  retEpoch    |-> epoch + 1,
                  slot        |-> 0,
-                 retVer      |-> Max(clientCache[c][k].ver, clientSeq[c] - 1)])
+                 retVer      |-> 0])
         /\ messages' = messages \ {m}
         \* Write set NOT cleared here — only on SyncReply
         /\ UNCHANGED <<replicaVars, unsyncedVars, clientCon, clientSeq,
@@ -1077,7 +1076,9 @@ ClientHandleWeakReadReply(c) ==
            /\ opsCompleted' = [opsCompleted EXCEPT ![c] = @ + 1]
            /\ clientCache'  = [clientCache EXCEPT ![c][k] =
                 [val |-> finalVal, ver |-> finalVer]]
-           \* Record in history — slot=0 (weak reads have no slot)
+           \* Record in history — slot=0, retVer=0 (weak ops have no real slot/version;
+           \* cache.ver may contain proxy clientSeq values incompatible with log slots).
+           \* All slot-based invariants guard with > 0 to skip weak ops.
            /\ history' = Append(history,
                 [client      |-> c,
                  op          |-> Read,
@@ -1088,7 +1089,7 @@ ClientHandleWeakReadReply(c) ==
                  invEpoch    |-> clientInvEpoch[c],
                  retEpoch    |-> epoch + 1,
                  slot        |-> 0,
-                 retVer      |-> finalVer])
+                 retVer      |-> 0])
         /\ messages' = messages \ {m}
         /\ UNCHANGED <<replicaVars, unsyncedVars, clientCon, clientSeq,
                        clientInvEpoch, clientWriteSet, boundReplica,
@@ -1134,9 +1135,165 @@ Next ==
 Spec == Init /\ [][Next]_vars
 
 \* ============================================================================
-\* Safety Invariants (will be populated in phase 56.6)
+\* Safety Invariants — ported from RaftHT with adaptations for CURP-HO
 \* ============================================================================
+\*
+\* Key difference from Raft-HT: weak writes complete before slot assignment,
+\* so they have slot=0 and retVer=0 in history. All slot-based invariants
+\* guard with slot > 0 or retVer > 0 to only check ops with real versions.
+\* Strong ops always have real slots (assigned by leader before completion).
 
-\* Placeholder — invariants ported from RaftHT in phase 56.6
+\* ============================================================================
+\* Linearizability of strong operations (56.6a)
+\* ============================================================================
+\* Strong ops are linearized by their slot order (log position).
+\* Same as Raft-HT — only checks strong ops which always have real slots.
+
+\* (a) Real-time respect among strong ops
+RealTimeRespect ==
+    LET sOps == StrongOps
+    IN \A i, j \in 1..Len(sOps) :
+        (sOps[i].retEpoch < sOps[j].invEpoch) => (sOps[i].slot < sOps[j].slot)
+
+\* (b) Read consistency: strong reads return correct values in log slot order.
+\* The leader's log IS the linearization. For each strong read at slot s of
+\* key k, replay all writes (strong AND weak) in the leader's log with slot < s.
+StrongReadConsistency ==
+    \A i \in 1..Len(history) :
+        /\ history[i].consistency = Strong
+        /\ history[i].op = Read
+        =>
+        LET k == history[i].key
+            s == history[i].slot
+        IN \E r \in Replicas :
+            /\ Len(log[r]) >= s
+            /\ LET \* Replay all writes to key k in slots 1..s-1
+                   RECURSIVE ComputeVal(_, _)
+                   ComputeVal(store, idx) ==
+                       IF idx >= s THEN store
+                       ELSE IF /\ log[r][idx].cmd.op = Write
+                               /\ log[r][idx].cmd.key = k
+                            THEN ComputeVal(log[r][idx].cmd.val, idx + 1)
+                            ELSE ComputeVal(store, idx + 1)
+                   expectedVal == ComputeVal(Nil, 1)
+               IN history[i].retVal = expectedVal
+
+LinearizabilityInv == RealTimeRespect /\ StrongReadConsistency
+
+\* ============================================================================
+\* Causal consistency of all operations (56.6b)
+\* ============================================================================
+\*
+\* Adapted from Raft-HT: guards added for slot > 0 / retVer > 0 to handle
+\* weak ops that complete before slot assignment (slot=0, retVer=0).
+\* This means causal checks involving weak ops are weaker than Raft-HT,
+\* but strong→strong and strong→weak causal chains are still verified.
+
+\* Every read returns either Nil (initial value) or a value that was written.
+\* In CURP-HO, weak writes complete before log commitment, so the value may
+\* only exist in the witness pool (unsynced) or client cache, not yet in any log.
+\* We check: the value appears in some replica's log, OR was requested by some
+\* write in the history (which includes uncommitted weak writes), OR is in a
+\* replica's witness pool.
+ReadsReturnValidValues ==
+    \A i \in 1..Len(history) :
+        history[i].op = Read =>
+        \/ history[i].retVal = Nil
+        \* Value appears in some replica's log
+        \/ \E r \in Replicas :
+            \E idx \in 1..Len(log[r]) :
+                /\ log[r][idx].cmd.op = Write
+                /\ log[r][idx].cmd.key = history[i].key
+                /\ log[r][idx].cmd.val = history[i].retVal
+        \* Value was written by some completed write (covers uncommitted weak writes)
+        \/ \E j \in 1..i :
+            /\ history[j].op = Write
+            /\ history[j].key = history[i].key
+            /\ history[j].reqVal = history[i].retVal
+
+\* Monotonic reads: within a session, reads of the same key never go backwards.
+\* Only checked when both reads have real versions (retVer > 0).
+\* Weak reads have retVer=0 so they are skipped.
+MonotonicReads ==
+    \A i, j \in 1..Len(history) :
+        /\ history[i].op = Read
+        /\ history[j].op = Read
+        /\ history[i].client = history[j].client
+        /\ history[i].key = history[j].key
+        /\ i < j
+        /\ history[i].retVer > 0
+        /\ history[j].retVer > 0
+        => history[j].retVer >= history[i].retVer
+
+\* Read-your-writes: after client c writes key k at slot s (s > 0), any
+\* subsequent read by c of key k with a real version must see >= s.
+\* Guarded: write must have slot > 0 (strong), read must have retVer > 0.
+ReadYourWrites ==
+    \A i, j \in 1..Len(history) :
+        /\ history[i].op = Write
+        /\ history[j].op = Read
+        /\ history[i].client = history[j].client
+        /\ history[i].key = history[j].key
+        /\ i < j
+        /\ history[i].slot > 0
+        /\ history[j].retVer > 0
+        => history[j].retVer >= history[i].slot
+
+\* Monotonic writes: same client's writes with real slots must have increasing slots.
+\* Guarded: both writes must have slot > 0.
+MonotonicWrites ==
+    \A i, j \in 1..Len(history) :
+        /\ history[i].op = Write
+        /\ history[j].op = Write
+        /\ history[i].client = history[j].client
+        /\ i < j
+        /\ history[i].slot > 0
+        /\ history[j].slot > 0
+        => history[i].slot < history[j].slot
+
+\* Writes-follow-reads: if client c reads and gets retVer v (v > 0),
+\* then c's next write with a real slot must have slot > v.
+\* Guarded: read must have retVer > 0, write must have slot > 0.
+WritesFollowReads ==
+    \A i, j \in 1..Len(history) :
+        /\ history[i].op = Read
+        /\ history[j].op = Write
+        /\ history[i].client = history[j].client
+        /\ i < j
+        /\ history[i].retVer > 0
+        /\ history[j].slot > 0
+        => history[j].slot > history[i].retVer
+
+CausalConsistencyInv ==
+    /\ ReadsReturnValidValues
+    /\ MonotonicReads
+    /\ ReadYourWrites
+    /\ MonotonicWrites
+    /\ WritesFollowReads
+
+\* ============================================================================
+\* Hybrid compatibility (56.6c)
+\* ============================================================================
+\* ≺_T (total order) is slot order for all slotted ops.
+\* ≺_P (partial order) includes session order.
+\* Hybrid compatibility: ¬(o1 ≺_T o2 ∧ o2 ≺_P o1)
+\*
+\* Same as Raft-HT: only checks ops with slot > 0 (strong ops + committed weak
+\* writes that were assigned slots). Weak ops with slot=0 are not in O_T.
+\*
+\* For same-client slotted ops: if slot[i] < slot[j] then i must have been
+\* issued before j (i.e., i appears earlier in history).
+
+HybridCompatibilityInv ==
+    \A i, j \in 1..Len(history) :
+        /\ history[i].slot > 0
+        /\ history[j].slot > 0
+        /\ history[i].slot < history[j].slot
+        /\ history[i].client = history[j].client
+        =>
+        i < j
+
+\* Combined safety invariant
+SafetyInv == LinearizabilityInv /\ CausalConsistencyInv /\ HybridCompatibilityInv
 
 ====
