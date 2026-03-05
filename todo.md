@@ -4021,7 +4021,7 @@ Full causal consistency session guarantees verified:
 #### 56.8: Verification runs
 
 - [x] **56.8a** Exhaustive 1c/2v/1k/MaxOps=2: **778,933,881 states generated, 107,975,322 distinct, depth 41, 31 min 27 sec, NO ERRORS (exhaustive)**. [26:03:04]
-- [x] **56.8b** Partial 2c/2v/1k/MaxOps=1 (2-hour run): **~2,994M states generated, ~479M distinct, depth 28, ~2 hours, NO ERRORS (partial, 130M in queue)**. [26:03:04]
+- [x] **56.8b** Partial 2c/2v/1k/MaxOps=1 (2-hour run): **3,393,242,487 states generated, 537,105,109 distinct, depth 28, ~2 hr 14 min, NO ERRORS (partial, 140M in queue)**. [26:03:04]
 - [x] **56.8c** Record results in todo.md, commit and push. [26:03:04]
 
 **Results (Phase 56)**:
@@ -4029,7 +4029,7 @@ Full causal consistency session guarantees verified:
 | Config | States Generated | Distinct | Depth | Time | Result |
 |--------|-----------------|----------|-------|------|--------|
 | 1c/2v/1k, MaxOps=2 | 779M | 108M | 41 | 31 min | **PASS (exhaustive)** |
-| 2c/2v/1k, MaxOps=1 | ~2.99B | ~479M | 28 | ~2 hr | **NO ERRORS (partial)** |
+| 2c/2v/1k, MaxOps=1 | 3.39B | 537M | 28 | ~2 hr 14 min | **NO ERRORS (partial)** |
 
 **Key finding**: Initial ReadsReturnValidValues invariant from Raft-HT was too strict for CURP-HO — it only checked replica logs, but CURP-HO weak writes complete before log commitment. Fixed to also check history writes (values from uncommitted weak writes in client cache). After fix, all safety properties verified.
 
