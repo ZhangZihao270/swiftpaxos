@@ -1,30 +1,30 @@
 #!/bin/bash
 
-# Exp 3.2: T Property Verification — Weak Ratio Sweep
+# Exp 3.2: T Property Verification — Weak Ratio Sweep (Distributed)
 #
-# Sweeps weak proportion for 3 protocols at fixed concurrency, measuring
-# strong op throughput and latency stability.
+# Sweeps weak proportion for 3 protocols at fixed concurrency on distributed machines,
+# measuring strong op throughput and latency stability.
 # Workload: 50/50 read/write, sweep weakRatio (0-100%), zipfian keys.
 #
 # Expected: Raft-HT and CURP-HT show flat strong throughput (T satisfied).
 #           CURP-HO shows declining strong throughput (T violated).
 #
-# Usage: bash scripts/eval-exp3.2.sh [output-dir]
-# Output: results/eval-local-YYYYMMDD/exp3.2/
+# Usage: bash scripts/eval-exp3.2-dist.sh [output-dir]
+# Output: results/eval-dist-YYYYMMDD/exp3.2/
 
 WORK_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$WORK_DIR"
 
 DATE=$(date +%Y%m%d)
-BASE_DIR="${1:-results/eval-local-$DATE}"
+BASE_DIR="${1:-results/eval-dist-$DATE}"
 EXP_DIR="$BASE_DIR/exp3.2"
 FIXED_THREADS=8
 WEAK_RATIOS=(0 25 50 75 100)
 MAX_RETRIES=2
 
 # Use a temp copy of the config to avoid file-watcher interference
-CONFIG="/tmp/eval-exp3.2-$$.conf"
-cp eval-local.conf "$CONFIG"
+CONFIG="/tmp/eval-exp3.2-dist-$$.conf"
+cp multi-client.conf "$CONFIG"
 trap 'rm -f "$CONFIG"' EXIT
 
 # Protocols to test
@@ -45,18 +45,16 @@ apply_config() {
 }
 
 ensure_clean() {
-    pkill -9 -x swiftpaxos 2>/dev/null || true
-    for i in $(seq 1 30); do
-        pgrep -x swiftpaxos >/dev/null 2>&1 || break
-        sleep 0.2
+    for host in 130.245.173.101 130.245.173.103 130.245.173.104; do
+        ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$host" "pkill -9 -x swiftpaxos-dist" 2>/dev/null || true
     done
-    sleep 1
+    sleep 3
 }
 
 run_benchmark() {
     local out_dir="$1"
     mkdir -p "$out_dir"
-    timeout 300 ./run-local-multi.sh -c "$CONFIG" -t "$FIXED_THREADS" -o "$out_dir" \
+    timeout 300 ./run-multi-client.sh -d -c "$CONFIG" -t "$FIXED_THREADS" -o "$out_dir" \
         > "$out_dir/run-output.txt" 2>&1 || true
     ensure_clean
     if [[ -f "$out_dir/summary.txt" ]]; then
@@ -69,7 +67,7 @@ run_benchmark() {
     return 1
 }
 
-log "Exp 3.2: T Property Verification (Weak Ratio Sweep)"
+log "Exp 3.2 (Distributed): T Property Verification (Weak Ratio Sweep)"
 log "Protocols: ${PROTOCOLS[*]}"
 log "Weak ratios: ${WEAK_RATIOS[*]}"
 log "Fixed threads: $FIXED_THREADS"
@@ -77,8 +75,8 @@ log "Output: $EXP_DIR"
 echo ""
 
 # Build
-log "Building swiftpaxos..."
-go build -o swiftpaxos . 2>&1
+log "Building swiftpaxos-dist..."
+go build -o swiftpaxos-dist . 2>&1
 
 # Initial cleanup
 ensure_clean
@@ -95,7 +93,6 @@ for protocol in "${PROTOCOLS[@]}"; do
 
         log "  [$run_idx/$total_runs] weakRatio=$ratio -> $out_dir"
 
-        # Exp 3.2 uses 50/50 read/write (writes=50, weakWrites=50)
         apply_config "$CONFIG" "$protocol" "$ratio" "50" "50"
 
         # Run with retry
@@ -104,7 +101,6 @@ for protocol in "${PROTOCOLS[@]}"; do
             if [[ $attempt -gt 1 ]]; then
                 log "  Retry $attempt/$MAX_RETRIES..."
                 rm -rf "$out_dir"
-                mkdir -p "$out_dir"
                 sleep 5
             fi
             if run_benchmark "$out_dir"; then

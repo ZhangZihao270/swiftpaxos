@@ -13,7 +13,7 @@
 #   -c, --config FILE       Config file (default: local.conf)
 #   -k, --clones N          Clones per client process (deprecated, use -t)
 #   -t, --threads N         Threads per client process (overrides config clientThreads)
-#   -o, --output FILE       Output file for merged results
+#   -o, --output DIR        Output directory for results (default: auto-generated)
 #   -d, --distributed       Run in distributed mode (SSH to remote servers)
 #   --startup-delay N       Seconds to wait for replicas (default: 5)
 #   -h, --help              Show this help
@@ -36,7 +36,7 @@ THREADS=""  # Empty means use config value (preferred)
 OUTPUT=""
 DISTRIBUTED=false
 STARTUP_DELAY=10
-RESULTS_DIR="$(pwd)/results/benchmark-$(date +%Y%m%d-%H%M%S)"
+RESULTS_DIR=""
 SSH_USER="${SSH_USER:-$(whoami)}"
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10"
 WORK_DIR="$(pwd)"
@@ -47,7 +47,7 @@ while [[ $# -gt 0 ]]; do
         -c|--config) CONFIG="$2"; shift 2 ;;
         -k|--clones) CLONES="$2"; shift 2 ;;
         -t|--threads) THREADS="$2"; shift 2 ;;
-        -o|--output) OUTPUT="$2"; shift 2 ;;
+        -o|--output) RESULTS_DIR="$2"; shift 2 ;;
         -d|--distributed) DISTRIBUTED=true; shift ;;
         --startup-delay) STARTUP_DELAY="$2"; shift 2 ;;
         -h|--help)
@@ -56,6 +56,11 @@ while [[ $# -gt 0 ]]; do
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+# Default results directory if not specified
+if [[ -z "$RESULTS_DIR" ]]; then
+    RESULTS_DIR="$(pwd)/results/benchmark-$(date +%Y%m%d-%H%M%S)"
+fi
 
 # Determine thread count (prefer --threads, then config clientThreads, then config clones)
 if [[ -n "$THREADS" ]]; then
@@ -171,10 +176,18 @@ for i in "${!CLIENT_ALIASES[@]}"; do
 done
 echo ""
 
+# Use a distinct binary name in distributed mode to avoid interference
+# from other sessions that pkill -x swiftpaxos
+if $DISTRIBUTED; then
+    BINARY="swiftpaxos-dist"
+else
+    BINARY="swiftpaxos"
+fi
+
 # Build if needed
-if [[ ! -f ./swiftpaxos ]]; then
-    echo "Building swiftpaxos..."
-    go build -o swiftpaxos . || exit 1
+if [[ ! -f ./$BINARY ]]; then
+    echo "Building $BINARY..."
+    go build -o "$BINARY" . || exit 1
 fi
 
 # Cleanup function
@@ -183,21 +196,11 @@ cleanup() {
     echo "Cleaning up..."
 
     if $DISTRIBUTED; then
-        # Kill on master
-        ssh $SSH_OPTS "$SSH_USER@$MASTER_ADDR" "pkill -x swiftpaxos" 2>/dev/null || true
-
-        # Kill on replicas
-        for addr in "${REPLICA_ADDRS[@]}"; do
-            ssh $SSH_OPTS "$SSH_USER@$addr" "pkill -x swiftpaxos" 2>/dev/null || true
+        for host in "${ALL_HOSTS[@]}"; do
+            ssh $SSH_OPTS "$SSH_USER@$host" "pkill -9 -x $BINARY" 2>/dev/null || true
         done
-
-        # Kill on clients
-        for addr in "${CLIENT_ADDRS[@]}"; do
-            ssh $SSH_OPTS "$SSH_USER@$addr" "pkill -x swiftpaxos" 2>/dev/null || true
-        done
-
     else
-        pkill -x "swiftpaxos" 2>/dev/null || true
+        pkill -9 -x "$BINARY" 2>/dev/null || true
     fi
 
     echo "Results saved in: $RESULTS_DIR"
@@ -223,7 +226,7 @@ sync_to_remote() {
     local host="$1"
     echo "  Syncing to $host..."
     # Build list of files to sync
-    local files=(./swiftpaxos "$TEMP_CONFIG")
+    local files=("./$BINARY" "$TEMP_CONFIG")
     if [[ -n "$LATENCY_CONF" ]]; then
         files+=("$LATENCY_CONF")
     fi
@@ -243,11 +246,26 @@ run_remote() {
 
 run_remote_bg() {
     local host="$1"
-    local logfile="$2"
+    local logname="$2"
     shift 2
+    # Logs go to $WORK_DIR/logs/ on the remote machine (not $RESULTS_DIR which is local-only)
     # -f: fork SSH to background after auth; -n: redirect stdin from /dev/null
-    # Without these, SSH hangs waiting for the backgrounded process to exit
-    ssh -f -n $SSH_OPTS "$SSH_USER@$host" "cd $WORK_DIR && nohup $* </dev/null > $logfile 2>&1 &"
+    ssh -f -n $SSH_OPTS "$SSH_USER@$host" "mkdir -p $WORK_DIR/logs && cd $WORK_DIR && nohup $* </dev/null > $WORK_DIR/logs/$logname 2>&1 &"
+}
+
+# Collect remote logs to local RESULTS_DIR
+collect_remote_logs() {
+    echo "Collecting remote logs..."
+    # Only collect master and replica logs (not old logs in the directory)
+    local lognames=("master.log")
+    for alias in "${REPLICA_ALIASES[@]}"; do
+        lognames+=("${alias}.log")
+    done
+    for host in "${ALL_HOSTS[@]}"; do
+        for logname in "${lognames[@]}"; do
+            scp $SSH_OPTS "$SSH_USER@$host:$WORK_DIR/logs/$logname" "$RESULTS_DIR/" 2>/dev/null || true
+        done
+    done
 }
 
 # ========== START SERVERS ==========
@@ -260,39 +278,39 @@ if $DISTRIBUTED; then
     done
     echo ""
 
-    # Kill existing processes (use pkill -x to match exact binary name, not args)
+    # Kill existing processes (use pkill -9 -x to force-kill exact binary name)
     echo "Stopping existing processes..."
     for host in "${ALL_HOSTS[@]}"; do
-        ssh $SSH_OPTS "$SSH_USER@$host" "pkill -x swiftpaxos" 2>/dev/null || true
+        ssh $SSH_OPTS "$SSH_USER@$host" "pkill -9 -x $BINARY" 2>/dev/null || true
     done
-    sleep 2
+    sleep 3
 
     # Start master
     echo "Starting master on $MASTER_ADDR..."
-    run_remote_bg "$MASTER_ADDR" "$RESULTS_DIR/master.log" "./swiftpaxos -run master -config $(basename $TEMP_CONFIG) -alias master0"
+    run_remote_bg "$MASTER_ADDR" "master.log" "./$BINARY -run master -config $(basename $TEMP_CONFIG) -alias master0"
     sleep 2
 
     # Start replicas
     echo "Starting replicas..."
     for i in "${!REPLICA_ALIASES[@]}"; do
         echo "  ${REPLICA_ALIASES[$i]} on ${REPLICA_ADDRS[$i]}..."
-        run_remote_bg "${REPLICA_ADDRS[$i]}" "$RESULTS_DIR/${REPLICA_ALIASES[$i]}.log" "./swiftpaxos -run server -config $(basename $TEMP_CONFIG) -alias ${REPLICA_ALIASES[$i]} $LATENCY_FLAG"
+        run_remote_bg "${REPLICA_ADDRS[$i]}" "${REPLICA_ALIASES[$i]}.log" "./$BINARY -run server -config $(basename $TEMP_CONFIG) -alias ${REPLICA_ALIASES[$i]} $LATENCY_FLAG"
     done
 
 else
     # Local mode
     echo "Stopping existing processes..."
-    pkill -x "swiftpaxos" 2>/dev/null || true
+    pkill -x "$BINARY" 2>/dev/null || true
     sleep 1
 
     echo "Starting master..."
-    ./swiftpaxos -run master -config "$TEMP_CONFIG" -alias master0 > "$RESULTS_DIR/master.log" 2>&1 &
+    ./$BINARY -run master -config "$TEMP_CONFIG" -alias master0 > "$RESULTS_DIR/master.log" 2>&1 &
     sleep 1
 
     echo "Starting replicas..."
     for i in "${!REPLICA_ALIASES[@]}"; do
         echo "  ${REPLICA_ALIASES[$i]}..."
-        ./swiftpaxos -run server -config "$TEMP_CONFIG" -alias "${REPLICA_ALIASES[$i]}" $LATENCY_FLAG \
+        ./$BINARY -run server -config "$TEMP_CONFIG" -alias "${REPLICA_ALIASES[$i]}" $LATENCY_FLAG \
             > "$RESULTS_DIR/${REPLICA_ALIASES[$i]}.log" 2>&1 &
     done
 fi
@@ -315,12 +333,12 @@ for i in "${!CLIENT_ALIASES[@]}"; do
         echo "Starting $alias on $addr (remote)..."
         # No -latency flag for clients: clients are co-located with replicas
         ssh $SSH_OPTS "$SSH_USER@$addr" \
-            "cd $WORK_DIR && ./swiftpaxos -run client -config $(basename $TEMP_CONFIG) -alias $alias" \
+            "cd $WORK_DIR && ./$BINARY -run client -config $(basename $TEMP_CONFIG) -alias $alias" \
             > "$log_file" 2>&1 &
         CLIENT_PIDS+=($!)
     else
         echo "Starting $alias (local)..."
-        ./swiftpaxos -run client -config "$TEMP_CONFIG" -alias "$alias" \
+        ./$BINARY -run client -config "$TEMP_CONFIG" -alias "$alias" \
             > "$log_file" 2>&1 &
         CLIENT_PIDS+=($!)
     fi
@@ -336,6 +354,11 @@ done
 echo ""
 echo "========== All Clients Finished =========="
 echo ""
+
+# Collect remote server logs (master + replicas) to local results dir
+if $DISTRIBUTED; then
+    collect_remote_logs
+fi
 
 # ========== MERGE RESULTS ==========
 

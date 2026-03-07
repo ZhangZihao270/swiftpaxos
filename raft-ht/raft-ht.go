@@ -92,6 +92,12 @@ type Replica struct {
 	// Protected by stateMu: executeCommands holds write lock, weak reads hold read lock.
 	keyVersions map[int64]int32 // key → log index of last committed write
 
+	// Protects r.log, r.commitIndex, r.lastApplied, and r.pendingProposals
+	// for concurrent access between the event loop and executeCommands.
+	// Event loop holds Lock() when appending to log and advancing commitIndex.
+	// executeCommands holds Lock() when reading log/commitIndex and advancing lastApplied.
+	logMu sync.Mutex
+
 	// Protects r.State and r.keyVersions for concurrent access.
 	// executeCommands takes Lock() during command execution batches.
 	// Weak reads take RLock() to read committed state concurrently.
@@ -379,10 +385,11 @@ func (r *Replica) handlePropose(propose *defs.GPropose) {
 		proposals[i] = <-r.ProposeChan
 	}
 
-	// Append entries to log
+	// Append entries to log (under logMu for executeCommands safety)
 	entries := make([]state.Command, batchSize)
 	entryIds := make([]CommandId, batchSize)
 
+	r.logMu.Lock()
 	for i, p := range proposals {
 		cmdId := CommandId{ClientId: p.ClientId, SeqNum: p.CommandId}
 		entry := LogEntry{
@@ -401,9 +408,9 @@ func (r *Replica) handlePropose(propose *defs.GPropose) {
 		}
 		r.pendingProposals[logIdx] = p
 	}
-
-	// Update leader's own matchIndex
+	// Update leader's own matchIndex (while still holding logMu)
 	r.matchIndex[r.id] = int32(len(r.log) - 1)
+	r.logMu.Unlock()
 
 	// Broadcast AppendEntries to all followers
 	r.broadcastAppendEntries()
@@ -434,6 +441,8 @@ func (r *Replica) buildAppendEntries(peerId int32) *AppendEntries {
 		nextIdx = 0
 	}
 
+	// Snapshot log state under logMu (executeCommands reads concurrently).
+	r.logMu.Lock()
 	prevLogIndex := nextIdx - 1
 	prevLogTerm := int32(0)
 	if prevLogIndex >= 0 && prevLogIndex < int32(len(r.log)) {
@@ -452,13 +461,15 @@ func (r *Replica) buildAppendEntries(peerId int32) *AppendEntries {
 			entryIds[j] = r.log[nextIdx+j].CmdId
 		}
 	}
+	commitIdx := r.commitIndex
+	r.logMu.Unlock()
 
 	ae := r.appendEntriesCache.Get()
 	ae.LeaderId = r.id
 	ae.Term = r.currentTerm
 	ae.PrevLogIndex = prevLogIndex
 	ae.PrevLogTerm = prevLogTerm
-	ae.LeaderCommit = r.commitIndex
+	ae.LeaderCommit = commitIdx
 	ae.EntryCnt = int32(len(entries))
 	ae.Entries = entries
 	ae.EntryIds = entryIds
@@ -490,26 +501,32 @@ func (r *Replica) handleAppendEntries(msg *AppendEntries) {
 	}
 	r.knownLeader = msg.LeaderId
 
-	// Log consistency check: verify entry at PrevLogIndex has matching term
+	// Log consistency check, append, and commit under logMu for executeCommands safety.
+	r.logMu.Lock()
+
 	if msg.PrevLogIndex >= 0 {
 		if msg.PrevLogIndex >= int32(len(r.log)) {
 			// Log too short
+			matchIdx := int32(len(r.log) - 1)
+			r.logMu.Unlock()
 			reply := r.appendEntriesReplyCache.Get()
 			reply.FollowerId = r.id
 			reply.Term = r.currentTerm
 			reply.Success = 0
-			reply.MatchIndex = int32(len(r.log) - 1)
+			reply.MatchIndex = matchIdx
 			r.sender.SendTo(msg.LeaderId, reply, r.cs.appendEntriesReplyRPC)
 			return
 		}
 		if r.log[msg.PrevLogIndex].Term != msg.PrevLogTerm {
 			// Term mismatch: delete this entry and all that follow (§5.3)
 			r.log = r.log[:msg.PrevLogIndex]
+			matchIdx := int32(len(r.log) - 1)
+			r.logMu.Unlock()
 			reply := r.appendEntriesReplyCache.Get()
 			reply.FollowerId = r.id
 			reply.Term = r.currentTerm
 			reply.Success = 0
-			reply.MatchIndex = int32(len(r.log) - 1)
+			reply.MatchIndex = matchIdx
 			r.sender.SendTo(msg.LeaderId, reply, r.cs.appendEntriesReplyRPC)
 			return
 		}
@@ -547,9 +564,13 @@ func (r *Replica) handleAppendEntries(msg *AppendEntries) {
 		} else {
 			r.commitIndex = lastNewIndex
 		}
-		if r.commitIndex > oldCommitIndex {
-			r.notifyCommit()
-		}
+	}
+	advanced := r.commitIndex > oldCommitIndex
+	matchIdx := int32(len(r.log) - 1)
+	r.logMu.Unlock()
+
+	if advanced {
+		r.notifyCommit()
 	}
 
 	// Reply success
@@ -557,7 +578,7 @@ func (r *Replica) handleAppendEntries(msg *AppendEntries) {
 	reply.FollowerId = r.id
 	reply.Term = r.currentTerm
 	reply.Success = 1
-	reply.MatchIndex = int32(len(r.log) - 1)
+	reply.MatchIndex = matchIdx
 	r.sender.SendTo(msg.LeaderId, reply, r.cs.appendEntriesReplyRPC)
 }
 
@@ -598,6 +619,7 @@ func (r *Replica) handleAppendEntriesReply(msg *AppendEntriesReply) {
 // A log entry is committed when it has been replicated on a majority
 // of servers AND its term equals the current term (§5.4.2).
 func (r *Replica) advanceCommitIndex() {
+	r.logMu.Lock()
 	logLen := int32(len(r.log))
 	advanced := false
 
@@ -618,6 +640,7 @@ func (r *Replica) advanceCommitIndex() {
 			break
 		}
 	}
+	r.logMu.Unlock()
 
 	if advanced {
 		r.notifyCommit()
@@ -728,43 +751,54 @@ func (r *Replica) sendHeartbeats() {
 }
 
 // --- executeCommands: Apply committed entries, send reply for strong ops ---
-// Holds stateMu write lock during execution batches so weak reads can
+// Uses logMu to safely snapshot committed log entries from the event loop,
+// then holds stateMu write lock during execution so weak reads can
 // concurrently read committed state via stateMu read lock.
+
+type pendingEntry struct {
+	entry   LogEntry
+	idx     int32
+	propose *defs.GPropose
+}
 
 func (r *Replica) executeCommands() {
 	for !r.Shutdown {
-		r.stateMu.Lock()
+		// Snapshot committed entries under logMu (brief lock, no I/O).
+		r.logMu.Lock()
+		var batch []pendingEntry
 		for r.lastApplied < r.commitIndex {
 			r.lastApplied++
 			idx := r.lastApplied
-
 			if idx < 0 || idx >= int32(len(r.log)) {
+				r.lastApplied--
 				break
 			}
-
-			entry := r.log[idx]
-			val := entry.Command.Execute(r.State)
-
-			// Track per-key version for weak reads
-			if entry.Command.Op == state.PUT {
-				r.keyVersions[int64(entry.Command.K)] = idx
-			}
-
-			// If we're leader and have a pending proposal for this index, reply to client
-			var propose *defs.GPropose
+			pe := pendingEntry{entry: r.log[idx], idx: idx}
 			if idx < int32(len(r.pendingProposals)) {
-				propose = r.pendingProposals[idx]
-				r.pendingProposals[idx] = nil // release for GC
+				pe.propose = r.pendingProposals[idx]
+				r.pendingProposals[idx] = nil
 			}
-
-			if propose != nil {
-				reply := r.raftReplyCache.Get()
-				reply.CmdId = CommandId{ClientId: propose.ClientId, SeqNum: propose.CommandId}
-				reply.Value = val
-				r.sender.SendToClient(propose.ClientId, reply, r.cs.raftReplyRPC)
-			}
+			batch = append(batch, pe)
 		}
-		r.stateMu.Unlock()
+		r.logMu.Unlock()
+
+		// Execute batch under stateMu (protects r.State and r.keyVersions).
+		if len(batch) > 0 {
+			r.stateMu.Lock()
+			for _, pe := range batch {
+				val := pe.entry.Command.Execute(r.State)
+				if pe.entry.Command.Op == state.PUT {
+					r.keyVersions[int64(pe.entry.Command.K)] = pe.idx
+				}
+				if pe.propose != nil {
+					reply := r.raftReplyCache.Get()
+					reply.CmdId = CommandId{ClientId: pe.propose.ClientId, SeqNum: pe.propose.CommandId}
+					reply.Value = val
+					r.sender.SendToClient(pe.propose.ClientId, reply, r.cs.raftReplyRPC)
+				}
+			}
+			r.stateMu.Unlock()
+		}
 
 		// Block until commitIndex advances
 		<-r.commitNotify
@@ -851,8 +885,16 @@ func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
 		proposals[i] = m.(*MWeakPropose)
 	}
 
-	for _, wp := range proposals {
-		// Append to log (same log as strong ops — implicit ordering for C1-C3)
+	// Append all entries under logMu (executeCommands reads concurrently).
+	type weakEntry struct {
+		cmdId CommandId
+		idx   int32
+		wp    *MWeakPropose
+	}
+	batch := make([]weakEntry, len(proposals))
+
+	r.logMu.Lock()
+	for i, wp := range proposals {
 		entry := LogEntry{
 			Command: wp.Command,
 			Term:    r.currentTerm,
@@ -866,18 +908,21 @@ func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
 			r.pendingProposals = append(r.pendingProposals, nil)
 		}
 
-		// Reply IMMEDIATELY — don't wait for commit (1 WAN RTT)
+		batch[i] = weakEntry{cmdId: entry.CmdId, idx: idx, wp: wp}
+	}
+	r.matchIndex[r.id] = int32(len(r.log) - 1)
+	r.logMu.Unlock()
+
+	// Reply IMMEDIATELY — don't wait for commit (1 WAN RTT)
+	for _, we := range batch {
 		reply := &MWeakReply{
 			LeaderId: r.id,
 			Term:     r.currentTerm,
-			CmdId:    entry.CmdId,
-			Slot:     idx,
+			CmdId:    we.cmdId,
+			Slot:     we.idx,
 		}
-		r.sender.SendToClient(wp.ClientId, reply, r.cs.weakReplyRPC)
+		r.sender.SendToClient(we.wp.ClientId, reply, r.cs.weakReplyRPC)
 	}
-
-	// Update leader's own matchIndex (once, after all entries appended)
-	r.matchIndex[r.id] = int32(len(r.log) - 1)
 
 	// Broadcast AppendEntries once for the entire batch
 	r.broadcastAppendEntries()

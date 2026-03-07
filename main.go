@@ -89,6 +89,31 @@ func runMaster(c *config.Config) {
 }
 
 func runClient(c *config.Config, verbose bool) {
+	// Set protocol-specific config flags BEFORE spawning goroutines
+	// to avoid data races on shared *config.Config.
+	switch strings.ToLower(c.Protocol) {
+	case "curpho":
+		c.Fast = true
+	case "fastpaxos":
+		c.Fast = true
+		c.WaitClosest = true
+	case "n2paxos":
+		c.Fast = true
+		c.WaitClosest = true
+	case "epaxos":
+		c.Leaderless = true
+		c.Fast = false
+	case "paxos":
+		c.WaitClosest = false
+		c.Fast = false
+	case "raft":
+		c.WaitClosest = false
+		c.Fast = false
+	case "raftht":
+		c.WaitClosest = false
+		c.Fast = false
+	}
+
 	numThreads := c.GetNumClientThreads()
 
 	// Collect metrics and durations from all threads
@@ -136,34 +161,6 @@ func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads i
 		l = dlog.New(*logFile, verbose)
 	} else {
 		l = dlog.New("/dev/null", false)
-	}
-
-	switch strings.ToLower(c.Protocol) {
-	case "swiftpaxos":
-	case "curp":
-	case "curpht":
-		// CURP-HT uses config fast: setting (default true for 1-RTT strong fast path).
-		// Safe: no remoteSender goroutines, so no concurrent writer race (Phase 48.1a audit).
-	case "curpho":
-		c.Fast = true // CURP-HO restores fast path for 1-RTT strong commands; SendStrongWrite/Read bypass SendProposal with per-replica mutex protection
-	case "fastpaxos":
-		c.Fast = true
-		c.WaitClosest = true
-	case "n2paxos":
-		c.Fast = true
-		c.WaitClosest = true
-	case "epaxos":
-		c.Leaderless = true
-		c.Fast = false
-	case "paxos":
-		c.WaitClosest = false
-		c.Fast = false
-	case "raft":
-		c.WaitClosest = false
-		c.Fast = false
-	case "raftht":
-		c.WaitClosest = false
-		c.Fast = false
 	}
 
 	server := c.Proxy.ProxyOf(c.ClientAddrs[c.Alias])

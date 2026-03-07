@@ -1,31 +1,34 @@
 #!/bin/bash
 
-# Exp 1.1: Raft-HT vs Vanilla Raft — Throughput vs Latency
+# Exp 3.1: CURP-HO vs CURP-HT vs Vanilla CURP — Throughput vs Latency (Distributed)
 #
-# Sweeps thread count for 2 protocols, measuring throughput and latency.
-# Workload: 95/5 read/write, 50/50 strong/weak (0% weak for vanilla Raft), zipfian keys.
+# Sweeps thread count for 3 protocols on distributed machines.
+# Workload: 95/5 read/write, 50/50 strong/weak (0% weak for vanilla CURP), zipfian keys.
 #
-# Usage: bash scripts/eval-exp1.1.sh [output-dir]
-# Output: results/eval-local-YYYYMMDD/exp1.1/
+# Usage: bash scripts/eval-exp3.1-dist.sh [output-dir]
+# Output: results/eval-dist-YYYYMMDD/exp3.1/
 
 WORK_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$WORK_DIR"
 
 DATE=$(date +%Y%m%d)
-BASE_DIR="${1:-results/eval-local-$DATE}"
-EXP_DIR="$BASE_DIR/exp1.1"
+BASE_DIR="${1:-results/eval-dist-$DATE}"
+EXP_DIR="$BASE_DIR/exp3.1"
 THREAD_COUNTS=(1 2 4 8 16 32 64 96 128)
 MAX_RETRIES=2
 
 # Use a temp copy of the config to avoid file-watcher interference
-CONFIG="/tmp/eval-exp1.1-$$.conf"
-cp eval-local.conf "$CONFIG"
+CONFIG="/tmp/eval-exp3.1-dist-$$.conf"
+cp multi-client.conf "$CONFIG"
 trap 'rm -f "$CONFIG"' EXIT
 
 # Protocol configs: name, protocol-value, weakRatio, writes, weakWrites
+# Note: Vanilla CURP baseline uses curpht with weakRatio=0 (all ops strong,
+# same behavior as curp but uses the more robust HybridBufferClient path).
 declare -a PROTOCOLS=(
-    "raftht:raftht:50:5:5"
-    "raft:raft:0:5:5"
+    "curpho:curpho:50:5:5"
+    "curpht:curpht:50:5:5"
+    "curp-baseline:curpht:0:5:5"
 )
 
 mkdir -p "$EXP_DIR"
@@ -43,18 +46,16 @@ apply_config() {
 }
 
 ensure_clean() {
-    pkill -9 -x swiftpaxos 2>/dev/null || true
-    for i in $(seq 1 30); do
-        pgrep -x swiftpaxos >/dev/null 2>&1 || break
-        sleep 0.2
+    for host in 130.245.173.101 130.245.173.103 130.245.173.104; do
+        ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$host" "pkill -9 -x swiftpaxos-dist" 2>/dev/null || true
     done
-    sleep 1
+    sleep 3
 }
 
 run_benchmark() {
     local out_dir="$1" threads="$2"
     mkdir -p "$out_dir"
-    timeout 300 ./run-local-multi.sh -c "$CONFIG" -t "$threads" -o "$out_dir" \
+    timeout 300 ./run-multi-client.sh -d -c "$CONFIG" -t "$threads" -o "$out_dir" \
         > "$out_dir/run-output.txt" 2>&1 || true
     ensure_clean
     if [[ -f "$out_dir/summary.txt" ]]; then
@@ -67,14 +68,14 @@ run_benchmark() {
     return 1
 }
 
-log "Exp 1.1: Raft-HT Throughput vs Latency"
+log "Exp 3.1 (Distributed): CURP Throughput vs Latency"
 log "Thread counts: ${THREAD_COUNTS[*]}"
 log "Output: $EXP_DIR"
 echo ""
 
 # Build
-log "Building swiftpaxos..."
-go build -o swiftpaxos . 2>&1
+log "Building swiftpaxos-dist..."
+go build -o swiftpaxos-dist . 2>&1
 
 # Initial cleanup
 ensure_clean
@@ -93,7 +94,6 @@ for proto_spec in "${PROTOCOLS[@]}"; do
 
         log "  [$run_idx/$total_runs] threads=$threads -> $out_dir"
 
-        # Apply config
         apply_config "$CONFIG" "$protocol" "$weak_ratio" "$writes" "$weak_writes"
 
         # Run with retry
@@ -102,7 +102,6 @@ for proto_spec in "${PROTOCOLS[@]}"; do
             if [[ $attempt -gt 1 ]]; then
                 log "  Retry $attempt/$MAX_RETRIES..."
                 rm -rf "$out_dir"
-                mkdir -p "$out_dir"
                 sleep 5
             fi
             if run_benchmark "$out_dir" "$threads"; then
@@ -130,7 +129,7 @@ done
 
 # Collect results to CSV
 log "Collecting results..."
-bash scripts/collect-results.sh throughput "$EXP_DIR" "$BASE_DIR/summary-exp1.1.csv"
+bash scripts/collect-results.sh throughput "$EXP_DIR" "$BASE_DIR/summary-exp3.1.csv"
 
 log ""
-log "Exp 1.1 complete! Results: $BASE_DIR/summary-exp1.1.csv"
+log "Exp 3.1 complete! Results: $BASE_DIR/summary-exp3.1.csv"

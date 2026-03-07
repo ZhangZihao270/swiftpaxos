@@ -1,6 +1,7 @@
 package master
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/imdea-software/swiftpaxos/dlog"
@@ -61,7 +63,14 @@ func (master *Master) Run() {
 
 	rpc.Register(master)
 	rpc.HandleHTTP()
-	l, err := net.Listen("tcp", fmt.Sprintf(":%d", master.port))
+	lc := net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			return c.Control(func(fd uintptr) {
+				syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+			})
+		},
+	}
+	l, err := lc.Listen(context.Background(), "tcp", fmt.Sprintf(":%d", master.port))
 	if err != nil {
 		master.Fatal("master listen error:", err)
 	}

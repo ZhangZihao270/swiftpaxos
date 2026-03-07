@@ -2,6 +2,7 @@ package replica
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/imdea-software/swiftpaxos/config"
@@ -452,9 +454,17 @@ func (r *Replica) waitForPeerConnections(done chan bool) {
 	var b [4]byte
 	bs := b[:4]
 
-	// Bind to specific IP to allow multiple replicas on same machine
+	// Bind to specific IP to allow multiple replicas on same machine.
+	// Use SO_REUSEADDR to avoid TIME_WAIT conflicts between consecutive benchmark runs.
 	addr := r.PeerAddrList[r.Id]
-	l, err := net.Listen("tcp", addr)
+	lc := net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			return c.Control(func(fd uintptr) {
+				syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+			})
+		},
+	}
+	l, err := lc.Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		r.Fatal(r.PeerAddrList[r.Id], err)
 	}

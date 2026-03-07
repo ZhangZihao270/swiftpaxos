@@ -1,5 +1,8 @@
 # Binaries
 swiftpaxos
+swiftpaxos-dist
+swiftpaxos-norace
+swiftpaxos-race
 *.exe
 *.out
 bin/

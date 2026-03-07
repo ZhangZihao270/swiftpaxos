@@ -2,6 +2,7 @@ package raft
 
 import (
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/imdea-software/swiftpaxos/config"
@@ -46,10 +47,11 @@ type Replica struct {
 	matchIndex []int32 // for each server, highest log entry known to be replicated
 
 	// Pending client proposals awaiting commit (log index → proposal).
-	// Lock-free: event loop writes at append-time indices, executeCommands
-	// reads+nils at committed indices. Non-overlapping due to happens-before
-	// via commitNotify channel.
 	pendingProposals []*defs.GPropose
+
+	// Protects r.log, r.commitIndex, r.lastApplied, and r.pendingProposals
+	// for concurrent access between the event loop and executeCommands.
+	logMu sync.Mutex
 
 	// Election state
 	votesReceived int
@@ -355,10 +357,11 @@ func (r *Replica) handlePropose(propose *defs.GPropose) {
 		proposals[i] = <-r.ProposeChan
 	}
 
-	// Append entries to log
+	// Append entries to log (under logMu for executeCommands safety)
 	entries := make([]state.Command, batchSize)
 	entryIds := make([]CommandId, batchSize)
 
+	r.logMu.Lock()
 	for i, p := range proposals {
 		cmdId := CommandId{ClientId: p.ClientId, SeqNum: p.CommandId}
 		entry := LogEntry{
@@ -371,18 +374,15 @@ func (r *Replica) handlePropose(propose *defs.GPropose) {
 		entryIds[i] = cmdId
 
 		// Store pending proposal for reply on commit.
-		// Ensure pendingProposals is indexed by log position.
-		// After leader election, pendingProposals may be shorter than log
-		// (pre-election entries have no pending proposals on the new leader).
 		logIdx := int32(len(r.log) - 1)
 		for int32(len(r.pendingProposals)) <= logIdx {
 			r.pendingProposals = append(r.pendingProposals, nil)
 		}
 		r.pendingProposals[logIdx] = p
 	}
-
-	// Update leader's own matchIndex
+	// Update leader's own matchIndex (while holding logMu)
 	r.matchIndex[r.id] = int32(len(r.log) - 1)
+	r.logMu.Unlock()
 
 	// Broadcast AppendEntries to all followers
 	r.broadcastAppendEntries()
@@ -416,6 +416,8 @@ func (r *Replica) buildAppendEntries(peerId int32) *AppendEntries {
 		nextIdx = 0
 	}
 
+	// Snapshot log state under logMu (executeCommands reads concurrently).
+	r.logMu.Lock()
 	prevLogIndex := nextIdx - 1
 	prevLogTerm := int32(0)
 	if prevLogIndex >= 0 && prevLogIndex < int32(len(r.log)) {
@@ -434,13 +436,15 @@ func (r *Replica) buildAppendEntries(peerId int32) *AppendEntries {
 			entryIds[j] = r.log[nextIdx+j].CmdId
 		}
 	}
+	commitIdx := r.commitIndex
+	r.logMu.Unlock()
 
 	ae := r.appendEntriesCache.Get()
 	ae.LeaderId = r.id
 	ae.Term = r.currentTerm
 	ae.PrevLogIndex = prevLogIndex
 	ae.PrevLogTerm = prevLogTerm
-	ae.LeaderCommit = r.commitIndex
+	ae.LeaderCommit = commitIdx
 	ae.EntryCnt = int32(len(entries))
 	ae.Entries = entries
 	ae.EntryIds = entryIds
@@ -471,26 +475,32 @@ func (r *Replica) handleAppendEntries(msg *AppendEntries) {
 		r.votesReceived = 0
 	}
 
-	// Log consistency check: verify entry at PrevLogIndex has matching term
+	// Log consistency check, append, and commit under logMu for executeCommands safety.
+	r.logMu.Lock()
+
 	if msg.PrevLogIndex >= 0 {
 		if msg.PrevLogIndex >= int32(len(r.log)) {
 			// Log too short
+			matchIdx := int32(len(r.log) - 1)
+			r.logMu.Unlock()
 			reply := r.appendEntriesReplyCache.Get()
 			reply.FollowerId = r.id
 			reply.Term = r.currentTerm
 			reply.Success = 0
-			reply.MatchIndex = int32(len(r.log) - 1)
+			reply.MatchIndex = matchIdx
 			r.sender.SendTo(msg.LeaderId, reply, r.cs.appendEntriesReplyRPC)
 			return
 		}
 		if r.log[msg.PrevLogIndex].Term != msg.PrevLogTerm {
 			// Term mismatch: delete this entry and all that follow (§5.3)
 			r.log = r.log[:msg.PrevLogIndex]
+			matchIdx := int32(len(r.log) - 1)
+			r.logMu.Unlock()
 			reply := r.appendEntriesReplyCache.Get()
 			reply.FollowerId = r.id
 			reply.Term = r.currentTerm
 			reply.Success = 0
-			reply.MatchIndex = int32(len(r.log) - 1)
+			reply.MatchIndex = matchIdx
 			r.sender.SendTo(msg.LeaderId, reply, r.cs.appendEntriesReplyRPC)
 			return
 		}
@@ -528,9 +538,13 @@ func (r *Replica) handleAppendEntries(msg *AppendEntries) {
 		} else {
 			r.commitIndex = lastNewIndex
 		}
-		if r.commitIndex > oldCommitIndex {
-			r.notifyCommit()
-		}
+	}
+	advanced := r.commitIndex > oldCommitIndex
+	matchIdx := int32(len(r.log) - 1)
+	r.logMu.Unlock()
+
+	if advanced {
+		r.notifyCommit()
 	}
 
 	// Reply success
@@ -538,7 +552,7 @@ func (r *Replica) handleAppendEntries(msg *AppendEntries) {
 	reply.FollowerId = r.id
 	reply.Term = r.currentTerm
 	reply.Success = 1
-	reply.MatchIndex = int32(len(r.log) - 1)
+	reply.MatchIndex = matchIdx
 	r.sender.SendTo(msg.LeaderId, reply, r.cs.appendEntriesReplyRPC)
 }
 
@@ -580,6 +594,7 @@ func (r *Replica) handleAppendEntriesReply(msg *AppendEntriesReply) {
 // of servers AND its term equals the current term (§5.4.2).
 // Zero-allocation: counts replicas instead of sorting matchIndex.
 func (r *Replica) advanceCommitIndex() {
+	r.logMu.Lock()
 	logLen := int32(len(r.log))
 	advanced := false
 
@@ -600,6 +615,7 @@ func (r *Replica) advanceCommitIndex() {
 			break
 		}
 	}
+	r.logMu.Unlock()
 
 	if advanced {
 		r.notifyCommit()
@@ -710,39 +726,49 @@ func (r *Replica) sendHeartbeats() {
 }
 
 // --- executeCommands: Apply committed entries, send RaftReply ---
+// Uses logMu to safely snapshot committed log entries from the event loop.
+
+type pendingEntry struct {
+	entry   LogEntry
+	propose *defs.GPropose
+}
 
 func (r *Replica) executeCommands() {
 	for !r.Shutdown {
+		// Snapshot committed entries under logMu (brief lock, no I/O).
+		r.logMu.Lock()
+		var batch []pendingEntry
 		for r.lastApplied < r.commitIndex {
 			r.lastApplied++
 			idx := r.lastApplied
-
 			if idx < 0 || idx >= int32(len(r.log)) {
+				r.lastApplied--
 				break
 			}
-
-			entry := r.log[idx]
-			val := entry.Command.Execute(r.State)
-
-			// If we're leader and have a pending proposal for this index, reply to client
-			var propose *defs.GPropose
+			pe := pendingEntry{entry: r.log[idx]}
 			if idx < int32(len(r.pendingProposals)) {
-				propose = r.pendingProposals[idx]
-				r.pendingProposals[idx] = nil // release for GC
+				pe.propose = r.pendingProposals[idx]
+				r.pendingProposals[idx] = nil
 			}
+			batch = append(batch, pe)
+		}
+		r.logMu.Unlock()
 
-			if propose != nil {
+		// Execute batch outside lock.
+		for _, pe := range batch {
+			val := pe.entry.Command.Execute(r.State)
+			if pe.propose != nil {
 				propreply := &defs.ProposeReplyTS{
 					OK:        defs.TRUE,
-					CommandId: propose.CommandId,
+					CommandId: pe.propose.CommandId,
 					Value:     val,
-					Timestamp: propose.Timestamp,
+					Timestamp: pe.propose.Timestamp,
 				}
-				r.ReplyProposeTS(propreply, propose.Reply, propose.Mutex)
+				r.ReplyProposeTS(propreply, pe.propose.Reply, pe.propose.Mutex)
 			}
 		}
 
-		// Block until commitIndex advances instead of polling
+		// Block until commitIndex advances
 		<-r.commitNotify
 	}
 }

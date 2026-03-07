@@ -269,6 +269,9 @@ func (c *Client) GetReplyFrom(rid int) (*defs.ProposeReplyTS, error) {
 
 func (c *Client) RegisterRPCTable(t *fastrpc.Table) {
 	for i, reader := range c.readers {
+		if reader == nil {
+			continue
+		}
 		go func(i int, reader *bufio.Reader) {
 			for {
 				var (

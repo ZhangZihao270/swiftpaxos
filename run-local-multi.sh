@@ -20,7 +20,7 @@ set -e
 CONFIG="eval-local.conf"
 THREADS=""
 OUTPUT_DIR=""
-STARTUP_DELAY=5
+STARTUP_DELAY=15
 WORK_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$WORK_DIR"
 
@@ -132,15 +132,24 @@ fi
 cleanup() {
     echo ""
     echo "Cleaning up..."
-    pkill -x "swiftpaxos" 2>/dev/null || true
+    pkill -9 -x "swiftpaxos" 2>/dev/null || true
+    # Wait until all swiftpaxos processes are actually gone
+    for i in $(seq 1 30); do
+        pgrep -x "swiftpaxos" >/dev/null 2>&1 || break
+        sleep 0.2
+    done
     # Clean up latency config
     rm -f "$WORK_DIR/benchmark-latency.conf"
     echo "Results saved in: $OUTPUT_DIR"
 }
 trap cleanup EXIT INT TERM
 
-# Kill existing processes
-pkill -x "swiftpaxos" 2>/dev/null || true
+# Kill existing processes and wait for them to actually exit
+pkill -9 -x "swiftpaxos" 2>/dev/null || true
+for i in $(seq 1 30); do
+    pgrep -x "swiftpaxos" >/dev/null 2>&1 || break
+    sleep 0.2
+done
 sleep 1
 
 # Start master
