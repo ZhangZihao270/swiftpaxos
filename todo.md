@@ -4144,10 +4144,10 @@ CurpHT.tla final size: ~880 lines (vs ~1300 for CurpHO.tla, ~790 for RaftHT.tla)
 
 ### 58.3: Run experiments
 
-- [ ] **58.3a** Run Exp 3.1 (CURP throughput vs latency), generate summary-exp3.1.csv
-- [ ] **58.3b** Run Exp 3.2 (T Property verification), generate summary-exp3.2.csv
-- [ ] **58.3c** Run Exp 1.1 (Raft-HT throughput vs latency), generate summary-exp1.1.csv
-- [ ] **58.3d** Aggregate results, sanity-check data, record in evaluation/ directory
+- [x] **58.3a** Run Exp 3.1 (CURP throughput vs latency). 18 runs complete. CURP-HO highest throughput (12.5K@32t), strong P50=100ms. CURP-HT strong P50=151ms. Baseline (curpht weakRatio=0) used instead of vanilla curp (hangs with 3 clients). [26:03:07]
+- [x] **58.3b** Run Exp 3.2 (T Property). 15 runs, 2 issues: Raft-HT w50 timeout + w25 slow (459 ops/sec). CURP-HT T property holds: strong P50=151ms constant across weak ratios. CURP-HO also stable at 100ms (T may only violate under geo-distributed). [26:03:07]
+- [x] **58.3c** Run Exp 1.1 (Raft-HT). 12 runs, Raft-HT weak P50=101ms (1 RTT), strong P50=202ms (2 RTT). Vanilla Raft strong P50=152ms. Raft-HT t=2 anomaly, Vanilla Raft t=4 timeout. [26:03:07]
+- [x] **58.3d** Results aggregated to evaluation/phase58-local-prerun.md. Known issues: Raft-HT instability, vanilla CURP client hang, Raft-HT strong latency gap vs Vanilla Raft. [26:03:07]
 
 ---
 

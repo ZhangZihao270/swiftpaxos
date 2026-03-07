@@ -20,10 +20,12 @@ CONFIG="eval-local.conf"
 THREAD_COUNTS=(1 2 4 8 16 32)
 
 # Protocol configs: name, protocol-value, weakRatio, writes, weakWrites
+# Note: Vanilla CURP baseline uses curpht with weakRatio=0 (all ops strong,
+# same behavior as curp but uses the more robust HybridBufferClient path).
 declare -a PROTOCOLS=(
     "curpho:curpho:50:5:5"
     "curpht:curpht:50:5:5"
-    "curp:curp:0:5:5"
+    "curp-baseline:curpht:0:5:5"
 )
 
 mkdir -p "$EXP_DIR"
