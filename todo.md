@@ -4183,6 +4183,70 @@ Bug fixes discovered during Phase 58 local pre-run experiments. All issues cause
 
 ---
 
+## Phase 60: Commit Raft Bug Fixes + Re-run Phase 58 Experiments (with Peak Throughput) [HIGH PRIORITY]
+
+**Goal**: Commit the Phase 59 bug fixes, then re-run all three Phase 58 experiments with the fixes applied. Additionally, extend the thread sweep to find peak throughput (previous runs only went up to 32 threads/client = 96 total, which was nowhere near saturation).
+
+**Phase 58 known issues to verify fixed**:
+1. Raft-HT w50 timeout → fixed by 59.3 (weak propose rejection)
+2. Raft-HT w25 low throughput (459 ops/sec) → fixed by 59.3
+3. Raft-HT t=2 anomaly (162 ops/sec) → fixed by 59.2 (startup election storm)
+4. Vanilla Raft t=4 timeout → fixed by 59.2
+5. Raft-HT strong P50=202ms (should be ~152ms like Vanilla Raft) → fixed by 59.4 (co-located client delay injection)
+
+**Throughput analysis**: Phase 58 peaked at 12.5K (CURP-HO, 32 threads/client, 96 total). With RTT=100ms and pendings=15, per-thread capacity is ~150 ops/sec. At 96 threads, theoretical max is ~14.4K. Need higher thread counts (64, 96, 128) to find the actual peak, which should be 30K-50K+ given the distributed benchmarks showed 70K+ at RTT=50ms.
+
+---
+
+### Phase 60.1: Commit Phase 59 Bug Fixes
+
+- [x] **60.1a** Run `go test ./...` — all pass (cached, commit 179d6ce) [26:03:07]
+- [x] **60.1b** Run `go vet ./...` — clean [26:03:07]
+- [x] **60.1c** Phase 59 already committed as 179d6ce [26:03:07]
+- [x] **60.1d** Already pushed [26:03:07]
+
+---
+
+### Phase 60.2: Update Experiment Scripts for Peak Throughput
+
+- [x] **60.2a** Update `scripts/eval-exp3.1.sh`: extend `THREAD_COUNTS` from `(1 2 4 8 16 32)` to `(1 2 4 8 16 32 64 96 128)` [26:03:07]
+- [x] **60.2b** Update `scripts/eval-exp1.1.sh`: extend `THREAD_COUNTS` from `(1 2 4 8 16 32)` to `(1 2 4 8 16 32 64 96 128)` [26:03:07]
+- [x] **60.2c** `scripts/eval-exp3.2.sh`: no change needed — `FIXED_THREADS=8` is appropriate for T property verification [26:03:07]
+
+---
+
+### Phase 60.3: Re-run Experiments
+
+- [ ] **60.3a** Rebuild binary: `go build -o swiftpaxos .`
+- [ ] **60.3b** Run Exp 1.1 (Raft-HT vs Vanilla Raft): verify all thread counts complete without timeout. Check:
+  - Raft-HT strong P50 should drop from 202ms to ~152ms (co-located delay fix)
+  - Raft-HT t=2 should no longer be anomalous
+  - Vanilla Raft t=4 should no longer timeout
+  - Peak throughput at 64-128 threads
+- [ ] **60.3c** Run Exp 3.1 (CURP throughput vs latency): verify stable scaling up to 128 threads. Check:
+  - CURP-HO/HT/baseline all scale beyond 32 threads
+  - Record peak throughput for each protocol
+- [ ] **60.3d** Run Exp 3.2 (T property): verify Raft-HT stability. Check:
+  - Raft-HT w25 throughput > 1500 (was 459)
+  - Raft-HT w50 completes (was TIMEOUT)
+  - T property still holds for CURP-HT and CURP-HO
+
+---
+
+### Phase 60.4: Record Results
+
+- [ ] **60.4a** Update `evaluation/phase58-local-prerun.md` or create `evaluation/phase60-rerun.md` with corrected results
+- [ ] **60.4b** Add comparison table: Phase 58 (before fixes) vs Phase 60 (after fixes) for each known issue
+- [ ] **60.4c** Record peak throughput for all protocols:
+  - CURP-HO peak: expected 25K-50K at 64-128 threads
+  - CURP-HT peak: expected 20K-40K at 64-128 threads
+  - Raft-HT peak: expected 15K-30K at 64-128 threads
+  - Vanilla Raft peak: expected 15K-30K at 64-128 threads
+  - Baseline (CURP-HT w0) peak: expected 18K-35K at 64-128 threads
+- [ ] **60.4d** Commit results and updated scripts, push
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task

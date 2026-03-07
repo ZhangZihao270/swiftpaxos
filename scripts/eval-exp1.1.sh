@@ -17,7 +17,7 @@ DATE=$(date +%Y%m%d)
 BASE_DIR="${1:-results/eval-local-$DATE}"
 EXP_DIR="$BASE_DIR/exp1.1"
 CONFIG="eval-local.conf"
-THREAD_COUNTS=(1 2 4 8 16 32)
+THREAD_COUNTS=(1 2 4 8 16 32 64 96 128)
 
 # Protocol configs: name, protocol-value, weakRatio, writes, weakWrites
 declare -a PROTOCOLS=(
