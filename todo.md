@@ -4071,65 +4071,50 @@ CurpHO.tla final size: ~1300 lines (vs ~790 for RaftHT.tla). The additional comp
 
 **Approach**: Fork from CurpHO.tla and simplify: remove broadcast for weak writes, remove CausalDeps/ReadDep (not needed since non-leaders don't track weak ops), add consensus wait for weak writes. The spec should be simpler than CurpHO.tla.
 
-#### 57.1: TLA+ spec skeleton — fork from CurpHO
+#### 57.1-57.7: Full spec + invariants + config (implemented as single batch)
 
-- [ ] **57.1a** Create `tla/CurpHT.tla` by forking `tla/CurpHO.tla`. Remove: CausalDeps, ReadDep, clientWriteSet (not needed — weak writes are fully committed before next op). Remove unsyncedVars from non-leaders for weak ops. Keep: fastPathResponses (strong ops still use fast path), clientCache, boundReplica.
-- [ ] **57.1b** Create `tla/MC_CurpHT.tla` + `tla/MC_CurpHT.cfg`. Same constants as MC_CurpHO (3 replicas, clients, keys, values, MaxOps). Symmetry sets. `CHECK_DEADLOCK FALSE`.
-- [ ] **57.1c** Verify TLC parses successfully with Init + Next==FALSE stub.
-
-#### 57.2: Model weak write path (2 RTT, leader only)
-
-- [ ] **57.2a** `ClientIssueWeakWrite(c)`: sends WeakPropose to leader only (not broadcast). No clientWriteSet tracking needed.
-- [ ] **57.2b** `HandleWeakPropose(r)`: leader-only action. Assigns slot, appends to log, sends Accept to followers, does NOT reply yet (waits for commit+apply).
-- [ ] **57.2c** Reuse Accept/AcceptAck/Commit/Apply chain from CurpHO (identical Raft-based replication).
-- [ ] **57.2d** `ApplyEntry` for weak write: after commit+apply, leader sends WeakWriteReply with slot number. Client completes, updates cache with (val, slot).
-- [ ] **57.2e** TLC sanity check: 1c/2v/1k/MaxOps=2, MCTypeInv PASS.
-
-#### 57.3: Model strong write path (fast path + slow path)
-
-- [ ] **57.3a** `ClientIssueStrongWrite(c)`: broadcasts StrongPropose to ALL replicas (same as CurpHO).
-- [ ] **57.3b** `HandleStrongProposeFollower(r)`: check per-key conflict in unsynced (strong entries only — no weak entries exist at non-leaders). Reply MRecordAck with ok. No CausalDeps needed (transparency — non-leaders don't track weak ops).
-- [ ] **57.3c** `HandleStrongProposeLeader(r)`: append to log, send Accept, reply MRecordAck with slot.
-- [ ] **57.3d** `ClientHandleStrongWriteFastPath(c)`: 3/4 quorum ok + have leader slot → complete. No CausalDeps/writeSet check needed (transparency). Record history with retVer=slot.
-- [ ] **57.3e** `ClientHandleStrongWriteSlowPath(c)`: complete on SyncReply. Record history with retVer=slot.
-- [ ] **57.3f** TLC sanity check with strong+weak write paths.
-
-#### 57.4: Model strong read path (fast path + slow path)
-
-- [ ] **57.4a** `ClientIssueStrongRead(c)`: broadcasts StrongReadPropose to ALL replicas.
-- [ ] **57.4b** `HandleStrongReadProposeFollower(r)`: check per-key conflict (strong entries only). No ReadDep needed (non-leaders don't see weak writes). Reply MRecordAck with ok.
-- [ ] **57.4c** `HandleStrongReadProposeLeader(r)`: append read to log, compute speculative result from committed state (no unsynced weak writes to consider — they're already committed before reply). Send Accept + MRecordAck with slot+val.
-- [ ] **57.4d** `ClientHandleStrongReadFastPath(c)`: 3/4 quorum ok → complete with leader's speculative value. No ReadDep consistency check needed.
-- [ ] **57.4e** `ClientHandleStrongReadSlowPath(c)`: complete on SyncReply.
-- [ ] **57.4f** TLC sanity check with all write+read paths.
-
-#### 57.5: Model weak read path (1 RTT to bound replica)
-
-- [ ] **57.5a** `ClientIssueWeakRead(c)`: sends WeakRead to bound replica (same as CurpHO).
-- [ ] **57.5b** `HandleWeakRead(r)`: returns committed (val, ver) from kvStore (same as CurpHO).
-- [ ] **57.5c** `ClientHandleWeakReadReply(c)`: cache merge (max version wins), record history. Since all versions are real slots (no proxy), retVer = finalVer (no version space mismatch).
-- [ ] **57.5d** TLC sanity check with all 4 op types.
-
-#### 57.6: Safety property invariants
-
-- [ ] **57.6a** Port invariants from CurpHO.tla. Key simplification: all ops have real slot/retVer (no proxy versions), so no `> 0` guards needed for weak ops. All causal invariants apply to all ops uniformly (same as Raft-HT).
-- [ ] **57.6b** LinearizabilityInv: RealTimeRespect + StrongReadConsistency (identical to Raft-HT/CurpHO).
-- [ ] **57.6c** CausalConsistencyInv: ReadsReturnValidValues (can use simpler Raft-HT version — all writes have slots, check replica logs), MonotonicReads, ReadYourWrites, MonotonicWrites, WritesFollowReads. No `> 0` guards needed.
-- [ ] **57.6d** HybridCompatibilityInv (identical).
-- [ ] **57.6e** SafetyInv = LinearizabilityInv + CausalConsistencyInv + HybridCompatibilityInv.
-
-#### 57.7: Model checking configuration
-
-- [ ] **57.7a** MC_CurpHT.tla: MCSafetyInv, MCTypeInv with retVer/slot Nat checks. MC_CurpHT.cfg: CHECK_DEADLOCK FALSE, INVARIANT MCSafetyInv. Symmetry sets.
+- [x] **57.1a** Created `tla/CurpHT.tla` (~880 lines) by forking CurpHO.tla. Removed: CausalDeps, ReadDep, clientWriteSet, CausalDepsFor, UnsyncedWeakWriteCmdId. Simplified UnsyncedEntryType (no isStrong field — only strong commands enter witness pool). Simplified MRecordAck (no causalDeps/readDep fields). [26:03:06]
+- [x] **57.1b** Created `tla/MC_CurpHT.tla` + `tla/MC_CurpHT.cfg`. 3 replicas, 1 client, 1 key, 2 values, MaxOps=2. Symmetry: Permutations({r2,r3}) ∪ Permutations({v1,v2}). CHECK_DEADLOCK FALSE. [26:03:06]
+- [x] **57.2** Weak write path: `ClientIssueWeakWrite` (leader only, no broadcast), `HandleWeakPropose` (leader assigns slot, sends Accept, no reply), `ClientHandleWeakWriteReply` (completes after commit+apply, real slot). Replication via Accept/AcceptAck/SendCommit/HandleCommit/ApplyEntry (forked from CurpHO). ApplyEntry extended: leader sends WeakWriteReply for weak writes (2 RTT) and SyncReply for strong ops (slow path). [26:03:06]
+- [x] **57.3** Strong write path: `ClientIssueStrongWrite` (broadcast), `HandleStrongProposeFollower` (conflict check, no CausalDeps), `HandleStrongProposeLeader` (append+Accept+leaderAck), `ClientHandleStrongWriteFastPath` (3/4 quorum ok + leader slot, no CausalDeps check), `ClientHandleStrongWriteSlowPath` (SyncReply). [26:03:06]
+- [x] **57.4** Strong read path: `ClientIssueStrongRead` (broadcast), `HandleStrongReadProposeFollower` (conflict check, no ReadDep), `HandleStrongReadProposeLeader` (log scan via `SpeculativeVal` helper for speculative result), `ClientHandleStrongReadFastPath` (3/4 quorum ok + leader val), `ClientHandleStrongReadSlowPath` (SyncReply). **Key finding**: initial version used `kvStore[r][k]` for speculative reads, which failed because leader may have unapplied log entries. Fixed by adding `SpeculativeVal(r,k)` that scans leader's full log for latest write. [26:03:06]
+- [x] **57.5** Weak read path: `ClientIssueWeakRead` (bound replica), `HandleWeakRead` (committed state), `ClientHandleWeakReadReply` (cache merge, real slot-based retVer). [26:03:06]
+- [x] **57.6** Safety invariants ported from CurpHO with simplifications. All writes have real slots (no proxy versions), so MonotonicWrites applies to all writes without guards. Weak reads have slot=0 but retVer is real (from cache/replica). MonotonicReads/ReadYourWrites/WritesFollowReads guard retVer > 0 (only to skip reads of initial state with ver=0). ReadsReturnValidValues checks replica logs + history writes. [26:03:06]
+- [x] **57.7** MC_CurpHT.tla: MCTypeInv (retVer/slot ∈ Nat), MCSafetyInv = SafetyInv. MC_CurpHT.cfg: CHECK_DEADLOCK FALSE, INVARIANT MCTypeInv + MCSafetyInv. [26:03:06]
 
 #### 57.8: Verification runs
 
-- [ ] **57.8a** Exhaustive small model: 1c/2v/1k/MaxOps=2. Expect faster than CurpHO (simpler weak write path, no broadcast, no CausalDeps). Target: exhaustive PASS.
+- [x] **57.8a** Exhaustive 1c/2v/1k/MaxOps=2: **570,321,922 states generated, 80,310,792 distinct, depth 41, 24 min 15 sec, NO ERRORS (exhaustive)**. Smaller and faster than CurpHO (779M states, 31 min) as expected. [26:03:06]
 - [ ] **57.8b** Reasonable model: 2c/2v/1k/MaxOps=1, exhaustive PASS.
 - [ ] **57.8c** Large model: 2c/2v/1k/MaxOps=2, 2-hour partial run. Target: NO ERRORS.
 - [ ] **57.8d** Record results in todo.md, commit and push.
 
-**Expected state space**: Smaller than CurpHO (no broadcast for weak writes, no CausalDeps/ReadDep, simpler fast path checks), comparable to or slightly larger than Raft-HT (fast path adds complexity over vanilla Raft).
+**Interim results (57.8a)**:
+
+| Config | States Generated | Distinct | Depth | Time | Result |
+|--------|-----------------|----------|-------|------|--------|
+| 1c/2v/1k, MaxOps=2 | 570M | 80M | 41 | 24 min 15s | **PASS (exhaustive)** |
+
+Full safety invariant suite verified for CURP-HT:
+1. **MCTypeInv**: type correctness — PASS
+2. **LinearizabilityInv** (RealTimeRespect + StrongReadConsistency): strong ops are linearizable — PASS
+3. **CausalConsistencyInv**:
+   - ReadsReturnValidValues — PASS
+   - MonotonicReads — PASS
+   - ReadYourWrites — PASS
+   - MonotonicWrites — PASS
+   - WritesFollowReads — PASS
+4. **HybridCompatibilityInv**: ≺_T/≺_P compatibility — PASS
+
+CurpHT.tla final size: ~880 lines (vs ~1300 for CurpHO.tla, ~790 for RaftHT.tla). Simpler than CurpHO due to: no broadcast for weak writes, no CausalDeps/ReadDep, no clientWriteSet, simplified MRecordAck messages.
+
+**Comparison across protocols**:
+
+| Protocol | 1c/MaxOps=2 States | Distinct | Time | Spec Lines |
+|----------|-------------------|----------|------|------------|
+| Raft-HT  | 50M | 7.6M | 2 min | ~790 |
+| CURP-HT  | 570M | 80M | 24 min | ~880 |
+| CURP-HO  | 779M | 108M | 31 min | ~1300 |
 
 ---
 
