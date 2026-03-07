@@ -4122,6 +4122,48 @@ CurpHT.tla final size: ~880 lines (vs ~1300 for CurpHO.tla, ~790 for RaftHT.tla)
 
 ---
 
+## Phase 58: Local Pre-Run Evaluation (SOSP Experiments)
+
+**Goal**: Pre-run all feasible experiments (excluding EPaxos-HO) on local cluster to validate scripts, pipeline, and result format.
+**Plan**: [docs/local-prerun-plan.md](docs/local-prerun-plan.md)
+**Eval plan**: [docs/evaluation.md](docs/evaluation.md)
+
+**Environment**: 3 replicas + 3 clients (localhost), networkDelay=50ms (one-way), RTT=100ms
+
+### 58.1: Prerequisites
+
+- [ ] **58.1a** Create `eval-local.conf`: 3 replicas (127.0.0.1-3) + 3 clients (127.0.0.4-6), networkDelay=50, keySpace=1000000, zipfSkew=0.99, pipeline=true, pendings=15, batchDelayUs=150
+- [ ] **58.1b** Create `run-local-multi.sh`: start master + 3 replicas + 3 clients (local), wait for all clients to finish, merge results (reuse Python merge logic from run-multi-client.sh). Args: -c config -t threads
+- [ ] **58.1c** Create `scripts/collect-results.sh`: extract throughput/P50/P99 from summary.txt into CSV. Format: protocol,threads,throughput,s_p50,s_p99,w_p50,w_p99
+
+### 58.2: Experiment scripts
+
+- [ ] **58.2a** Create `scripts/eval-exp3.1.sh` — CURP throughput vs latency (P0)
+  - Protocols: curpho, curpht, curp (weakRatio=0)
+  - Sweep: THREADS=(1 2 4 8 16 32), writes=5, weakWrites=5, zipfSkew=0.99
+  - Use sed to dynamically modify eval-local.conf protocol/weakRatio/clientThreads
+  - Output: results/eval-local-YYYYMMDD/exp3.1/{protocol}/t{threads}/
+  - Total: 18 runs
+- [ ] **58.2b** Create `scripts/eval-exp3.2.sh` — T Property verification (P0, key experiment)
+  - Protocols: raftht, curpht, curpho
+  - Sweep: WEAK_RATIOS=(0 25 50 75 100), fixed threads=8, writes=50, weakWrites=50
+  - Output: results/eval-local-YYYYMMDD/exp3.2/{protocol}/w{ratio}/
+  - Total: 15 runs
+- [ ] **58.2c** Create `scripts/eval-exp1.1.sh` — Raft-HT throughput vs latency
+  - Protocols: raftht (weakRatio=50), raft (weakRatio=0)
+  - Sweep: THREADS=(1 2 4 8 16 32), writes=5, weakWrites=5
+  - Output: results/eval-local-YYYYMMDD/exp1.1/{protocol}/t{threads}/
+  - Total: 12 runs
+
+### 58.3: Run experiments
+
+- [ ] **58.3a** Run Exp 3.1 (CURP throughput vs latency), generate summary-exp3.1.csv
+- [ ] **58.3b** Run Exp 3.2 (T Property verification), generate summary-exp3.2.csv
+- [ ] **58.3c** Run Exp 1.1 (Raft-HT throughput vs latency), generate summary-exp1.1.csv
+- [ ] **58.3d** Aggregate results, sanity-check data, record in evaluation/ directory
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
