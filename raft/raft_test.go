@@ -2106,3 +2106,60 @@ func TestExecuteCommands_WakesOnNotify(t *testing.T) {
 		t.Fatal("executeCommands goroutine did not wake up within 1 second")
 	}
 }
+
+// ============================================================================
+// Phase 59: Timer Management Tests (Raft)
+// ============================================================================
+
+// TestBecomeLeader_TimerManagement verifies heartbeat timer starts on leader transition
+func TestBecomeLeader_TimerManagement(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.electionTimer = time.NewTimer(time.Hour)
+	r.heartbeatTimer = time.NewTimer(time.Hour)
+	r.heartbeatTimer.Stop()
+	r.heartbeatTimeout = 100 * time.Millisecond
+
+	r.becomeLeader()
+
+	// Heartbeat timer should fire within heartbeatTimeout
+	select {
+	case <-r.heartbeatTimer.C:
+		// Good
+	case <-time.After(200 * time.Millisecond):
+		t.Error("heartbeat timer did not fire after becomeLeader")
+	}
+}
+
+// TestBecomeFollower_TimerManagement verifies election timer starts on follower transition
+func TestBecomeFollower_TimerManagement(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.role = LEADER
+	r.electionTimer = time.NewTimer(time.Hour)
+	r.electionTimer.Stop()
+	r.heartbeatTimer = time.NewTimer(time.Hour)
+
+	r.becomeFollower(5)
+
+	if r.role != FOLLOWER {
+		t.Errorf("role = %d, want FOLLOWER", r.role)
+	}
+
+	// Election timer should fire within 500ms (max normal timeout)
+	select {
+	case <-r.electionTimer.C:
+		// Good
+	case <-time.After(600 * time.Millisecond):
+		t.Error("election timer did not fire after becomeFollower")
+	}
+}
+
+// TestBecomeFollower_NilTimers verifies no panic when timers are nil (during init)
+func TestBecomeFollower_NilTimers(t *testing.T) {
+	r := newTestReplica(1, 3)
+	// timers are nil by default — should not panic
+	r.becomeFollower(3)
+
+	if r.role != FOLLOWER {
+		t.Errorf("role = %d, want FOLLOWER", r.role)
+	}
+}

@@ -4151,6 +4151,38 @@ CurpHT.tla final size: ~880 lines (vs ~1300 for CurpHO.tla, ~790 for RaftHT.tla)
 
 ---
 
+## Phase 59: Raft / Raft-HT Bug Fixes
+
+Bug fixes discovered during Phase 58 local pre-run experiments. All issues caused experiment timeouts or incorrect results.
+
+### 59.1: Raft-HT election storm fix
+
+- [x] **59.1a** Fix timer management in `becomeLeader()`/`becomeFollower()`: move `electionTimer`/`heartbeatTimer` from local variables in `run()` to struct fields. `becomeLeader()` stops election timer and restarts heartbeat; `becomeFollower()` stops heartbeat and restarts election timer. Without this, winning an election never started heartbeats → constant re-elections. [26:03:07]
+- [x] **59.1b** Apply same timer management fix to vanilla Raft (`raft/raft.go`). [26:03:07]
+
+### 59.2: Startup election storm fix
+
+- [x] **59.2a** Use 3s initial election timeout (instead of 300-500ms) for followers. `ConnectToPeers()` takes different time per replica, causing followers to start elections before designated leader can send first heartbeat. [26:03:07]
+- [x] **59.2b** Leader sends immediate `sendHeartbeats()` after timer setup in `run()`, before entering event loop. [26:03:07]
+
+### 59.3: Weak propose rejection fix
+
+- [x] **59.3a** `handleWeakPropose()` now sends `MWeakReply{Slot: -1, LeaderId: knownLeader}` when `role != LEADER` instead of silently dropping. Clients were hanging forever on non-leader weak proposals. [26:03:07]
+- [x] **59.3b** Add `knownLeader` field to Raft-HT, updated in `becomeLeader()`, `BeTheLeader()`, and `handleAppendEntries()`. [26:03:07]
+- [x] **59.3c** Client-side: `handleWeakReply()` detects `Slot < 0` rejection, extracts pending key/value, and resends `MWeakPropose` to updated leader. [26:03:07]
+
+### 59.4: Reply-path latency injection fix
+
+- [x] **59.4a** Add `ClientDelay` map to `replica.Replica` — pre-computes per-client delay at registration time. `SendClientMsg()` uses pre-computed delay instead of recomputing `WaitDuration(caddr)` on every reply. [26:03:07]
+- [x] **59.4b** `clientListener()` detects proxy-local clients via `r.Config.Proxy.IsLocal()` and sets `clientDelay=0` for local clients. Ensures symmetric delay application. [26:03:07]
+
+### 59.5: Tests
+
+- [x] **59.5a** Add Raft-HT tests: `TestBecomeLeader_SetsKnownLeader`, `TestBecomeLeader_TimerManagement`, `TestBecomeFollower_TimerManagement`, `TestBecomeFollower_NilTimers`, `TestKnownLeader_UpdatedByAppendEntries`, `TestKnownLeader_ChangesOnNewLeader`, `TestHandleWeakPropose_NonLeaderDoesNotAppend`, `TestBeTheLeader_SetsKnownLeader`. [26:03:07]
+- [x] **59.5b** Add Raft tests: `TestBecomeLeader_TimerManagement`, `TestBecomeFollower_TimerManagement`, `TestBecomeFollower_NilTimers`. [26:03:07]
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task

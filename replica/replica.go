@@ -42,6 +42,7 @@ type Replica struct {
 	ClientMu           map[int32]*sync.Mutex
 	ClientFastChan     map[int32]chan clientSendArg
 	ClientAddrs        map[int32]string
+	ClientDelay        map[int32]time.Duration
 	Config             *config.Config
 	Alive              []bool
 	PreferredPeerOrder []int32
@@ -86,6 +87,7 @@ func New(alias string, id, f int, addrs []string, thrifty, exec, lread bool, con
 		ClientMu:           make(map[int32]*sync.Mutex),
 		ClientFastChan:     make(map[int32]chan clientSendArg),
 		ClientAddrs:        make(map[int32]string),
+		ClientDelay:        make(map[int32]time.Duration),
 		Config:             config,
 		Alive:              make([]bool, n),
 		PreferredPeerOrder: make([]int32, n),
@@ -241,7 +243,7 @@ func (r *Replica) SendClientMsg(id int32, code uint8, msg fastrpc.Serializable) 
 	r.M.Lock()
 	w := r.ClientWriters[id]
 	mu := r.ClientMu[id]
-	caddr := r.ClientAddrs[id]
+	d := r.ClientDelay[id]
 	r.M.Unlock()
 
 	if w == nil || mu == nil {
@@ -249,19 +251,18 @@ func (r *Replica) SendClientMsg(id int32, code uint8, msg fastrpc.Serializable) 
 		return
 	}
 	// Inject latency for replica→client direction (non-co-located clients).
+	// clientDelay is pre-computed at registration: 0 for proxy-local clients.
 	// Use a goroutine so we don't block the Sender goroutine.
-	if caddr != "" {
-		if d := r.Dt.WaitDuration(caddr); d > 0 {
-			go func() {
-				time.Sleep(d)
-				mu.Lock()
-				defer mu.Unlock()
-				w.WriteByte(code)
-				msg.Marshal(w)
-				w.Flush()
-			}()
-			return
-		}
+	if d > 0 {
+		go func() {
+			time.Sleep(d)
+			mu.Lock()
+			defer mu.Unlock()
+			w.WriteByte(code)
+			msg.Marshal(w)
+			w.Flush()
+		}()
+		return
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -551,13 +552,18 @@ func (r *Replica) clientListener(conn net.Conn) {
 
 	addr := strings.Split(conn.RemoteAddr().String(), ":")[0]
 	isProxy := r.Config.Proxy.IsProxy(r.Alias, addr)
+	isLocal := r.Config.Proxy.IsLocal(r.Alias, addr)
 
 	mutex := &sync.Mutex{}
 
 	// Delay for client messages (simulates geo latency for remote clients).
+	// Skip for proxy-local clients: they are co-located with this replica.
 	// Uses simple goroutine+sleep instead of DelayProposeChan, which requires
 	// consecutive CommandIds and breaks with hybrid weak/strong protocols.
-	clientDelay := r.Dt.WaitDuration(addr)
+	clientDelay := time.Duration(0)
+	if !isLocal {
+		clientDelay = r.Dt.WaitDuration(addr)
+	}
 
 	for !r.Shutdown && err == nil {
 		if msgType, err = reader.ReadByte(); err != nil {
@@ -570,7 +576,7 @@ func (r *Replica) clientListener(conn net.Conn) {
 			if err = propose.Unmarshal(reader); err != nil {
 				break
 			}
-			r.registerClient(propose.ClientId, writer, addr, mutex)
+			r.registerClient(propose.ClientId, writer, addr, mutex, clientDelay)
 			op := propose.Command.Op
 			if r.LRead && (op == state.GET || op == state.SCAN) {
 				r.ReplyProposeTS(&defs.ProposeReplyTS{
@@ -632,10 +638,10 @@ func (r *Replica) clientListener(conn net.Conn) {
 				// This ensures ClientWriters/ClientFastChan are initialized even when
 				// the first message from a client is not a PROPOSE (e.g., MCausalPropose).
 				if cm, ok := obj.(interface{ GetClientId() int32 }); ok {
-					r.registerClient(cm.GetClientId(), writer, addr, mutex)
+					r.registerClient(cm.GetClientId(), writer, addr, mutex, clientDelay)
 				}
 				go func(obj fastrpc.Serializable) {
-					time.Sleep(r.Dt.WaitDuration(addr))
+					time.Sleep(clientDelay)
 					p.Chan <- obj
 				}(obj)
 			} else {
@@ -653,10 +659,12 @@ func (r *Replica) clientListener(conn net.Conn) {
 // registerClient initializes per-client send infrastructure (writer, mutex,
 // fast channel) if not already set up. Called on every client message to ensure
 // the infrastructure exists regardless of which message type arrives first.
-func (r *Replica) registerClient(clientId int32, writer *bufio.Writer, addr string, mutex *sync.Mutex) {
+// clientDelay is the pre-computed latency for this client (0 for co-located).
+func (r *Replica) registerClient(clientId int32, writer *bufio.Writer, addr string, mutex *sync.Mutex, clientDelay time.Duration) {
 	r.M.Lock()
 	r.ClientWriters[clientId] = writer
 	r.ClientAddrs[clientId] = addr
+	r.ClientDelay[clientId] = clientDelay
 	if r.ClientMu[clientId] == nil {
 		r.ClientMu[clientId] = &sync.Mutex{}
 	}

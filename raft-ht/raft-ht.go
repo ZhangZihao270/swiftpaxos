@@ -45,6 +45,7 @@ type Replica struct {
 	commitIndex int32 // highest log entry known to be committed
 	lastApplied int32 // highest log entry applied to state machine
 	role        int   // FOLLOWER, CANDIDATE, or LEADER
+	knownLeader int32 // best-known leader ID (from AppendEntries or self)
 
 	// Volatile state (on leaders, reinitialized after election)
 	nextIndex  []int32 // for each server, index of the next log entry to send
@@ -67,6 +68,8 @@ type Replica struct {
 	// Timers
 	electionTimeout  time.Duration
 	heartbeatTimeout time.Duration
+	electionTimer    *time.Timer
+	heartbeatTimer   *time.Timer
 
 	// Replica identity and cluster size
 	id int32
@@ -112,6 +115,7 @@ func New(alias string, id int, addrs []string, isLeader bool, f int,
 		commitIndex: -1,
 		lastApplied: -1,
 		role:        FOLLOWER,
+		knownLeader: -1,
 
 		id:         int32(id),
 		n:          n,
@@ -171,6 +175,7 @@ func New(alias string, id int, addrs []string, isLeader bool, f int,
 func (r *Replica) BeTheLeader(args *defs.BeTheLeaderArgs, reply *defs.BeTheLeaderReply) error {
 	r.role = LEADER
 	r.votedFor = r.id
+	r.knownLeader = r.id
 
 	// Initialize nextIndex and matchIndex for all peers
 	lastLogIndex := int32(len(r.log) - 1)
@@ -214,15 +219,22 @@ func (r *Replica) run() {
 		}()
 	}
 
-	// Set up election and heartbeat timers
-	electionTimer := time.NewTimer(r.electionTimeout)
-	heartbeatTimer := time.NewTimer(r.heartbeatTimeout)
+	// Set up election and heartbeat timers.
+	// Followers use a longer initial timeout (3s) to allow the designated leader
+	// to finish ConnectToPeers and send its first heartbeat before any follower
+	// starts an election. After the first heartbeat, normal timeouts apply.
+	initialElectionTimeout := 3 * time.Second
+	r.electionTimer = time.NewTimer(initialElectionTimeout)
+	r.heartbeatTimer = time.NewTimer(r.heartbeatTimeout)
 
-	// Leader doesn't need election timer; followers don't need heartbeat timer
+	// Leader doesn't need election timer; followers don't need heartbeat timer.
+	// Send immediate heartbeat after peer connections are established to prevent
+	// followers from starting elections during the startup window.
 	if r.role == LEADER {
-		electionTimer.Stop()
+		r.electionTimer.Stop()
+		r.sendHeartbeats()
 	} else {
-		heartbeatTimer.Stop()
+		r.heartbeatTimer.Stop()
 	}
 
 	onOffProposeChan := r.ProposeChan
@@ -245,7 +257,7 @@ func (r *Replica) run() {
 			r.handleAppendEntries(ae)
 			// Reset election timer on valid AppendEntries (leader is alive)
 			if ae.Term >= r.currentTerm {
-				r.resetElectionTimer(electionTimer)
+				r.resetElectionTimer()
 			}
 
 		case m := <-r.cs.appendEntriesReplyChan:
@@ -265,16 +277,16 @@ func (r *Replica) run() {
 			wp := m.(*MWeakPropose)
 			r.handleWeakPropose(wp)
 
-		case <-electionTimer.C:
+		case <-r.electionTimer.C:
 			if r.role != LEADER {
 				r.startElection()
-				r.resetElectionTimer(electionTimer)
+				r.resetElectionTimer()
 			}
 
-		case <-heartbeatTimer.C:
+		case <-r.heartbeatTimer.C:
 			if r.role == LEADER {
 				r.sendHeartbeats()
-				heartbeatTimer.Reset(r.heartbeatTimeout)
+				r.heartbeatTimer.Reset(r.heartbeatTimeout)
 			}
 		}
 	}
@@ -288,9 +300,9 @@ func (r *Replica) println(v ...interface{}) {
 }
 
 // resetElectionTimer resets the election timer with a randomized timeout.
-func (r *Replica) resetElectionTimer(t *time.Timer) {
+func (r *Replica) resetElectionTimer() {
 	timeout := time.Duration(300+rand.Intn(200)) * time.Millisecond
-	t.Reset(timeout)
+	r.electionTimer.Reset(timeout)
 }
 
 // becomeFollower transitions to follower state for a new term.
@@ -299,11 +311,19 @@ func (r *Replica) becomeFollower(term int32) {
 	r.role = FOLLOWER
 	r.votedFor = -1
 	r.votesReceived = 0
+	// Stop heartbeat timer (no longer leader) and start election timer
+	if r.heartbeatTimer != nil {
+		r.heartbeatTimer.Stop()
+	}
+	if r.electionTimer != nil {
+		r.resetElectionTimer()
+	}
 }
 
 // becomeLeader transitions to leader state after winning an election.
 func (r *Replica) becomeLeader() {
 	r.role = LEADER
+	r.knownLeader = r.id
 	r.println("Became Raft-HT leader at term", r.currentTerm)
 
 	lastLogIndex := int32(len(r.log) - 1)
@@ -312,6 +332,14 @@ func (r *Replica) becomeLeader() {
 		r.matchIndex[i] = -1
 	}
 	r.matchIndex[r.id] = lastLogIndex
+
+	// Stop election timer (now leader) and start heartbeat timer
+	if r.electionTimer != nil {
+		r.electionTimer.Stop()
+	}
+	if r.heartbeatTimer != nil {
+		r.heartbeatTimer.Reset(r.heartbeatTimeout)
+	}
 
 	// Send immediate heartbeat to assert authority
 	if r.Replica != nil {
@@ -460,6 +488,7 @@ func (r *Replica) handleAppendEntries(msg *AppendEntries) {
 		r.role = FOLLOWER
 		r.votesReceived = 0
 	}
+	r.knownLeader = msg.LeaderId
 
 	// Log consistency check: verify entry at PrevLogIndex has matching term
 	if msg.PrevLogIndex >= 0 {
@@ -796,6 +825,16 @@ func (r *Replica) notifyCommit() {
 // replies immediately to each client, then broadcasts AppendEntries once.
 func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
 	if r.role != LEADER {
+		// Reject: send a WeakReply with the real leader ID so the client
+		// can redirect future weak writes. Without this, weak proposals sent
+		// to a stale leader are silently dropped and the client hangs.
+		reply := &MWeakReply{
+			LeaderId: r.knownLeader,
+			Term:     r.currentTerm,
+			CmdId:    CommandId{ClientId: propose.ClientId, SeqNum: propose.CommandId},
+			Slot:     -1,
+		}
+		r.sender.SendToClient(propose.ClientId, reply, r.cs.weakReplyRPC)
 		return
 	}
 

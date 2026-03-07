@@ -119,13 +119,36 @@ func (c *Client) handleRaftReply(rep *RaftReply) {
 // handleWeakReply handles weak write reply from leader (immediate, before commit)
 func (c *Client) handleWeakReply(rep *MWeakReply) {
 	c.mu.Lock()
+
+	// Update leader hint (even on rejection, so we redirect to the right node)
+	if rep.LeaderId >= 0 {
+		c.leader = rep.LeaderId
+	}
+
+	// Slot == -1 means rejection (non-leader received the proposal).
+	// Resend to the updated leader.
+	if rep.Slot < 0 {
+		leader := c.leader
+		c.mu.Unlock()
+		p := &MWeakPropose{
+			CommandId: rep.CmdId.SeqNum,
+			ClientId:  rep.CmdId.ClientId,
+		}
+		if key, hasKey := c.weakPendingKeys[rep.CmdId.SeqNum]; hasKey {
+			p.Command.Op = state.PUT
+			p.Command.K = state.Key(key)
+			if val, hasVal := c.weakPendingValues[rep.CmdId.SeqNum]; hasVal {
+				p.Command.V = val
+			}
+		}
+		c.SendMsg(leader, c.cs.weakProposeRPC, p)
+		return
+	}
+
 	if _, exists := c.delivered[rep.CmdId.SeqNum]; exists {
 		c.mu.Unlock()
 		return
 	}
-
-	// Update leader
-	c.leader = rep.LeaderId
 
 	// Update local cache with the write value + slot
 	if key, hasKey := c.weakPendingKeys[rep.CmdId.SeqNum]; hasKey {

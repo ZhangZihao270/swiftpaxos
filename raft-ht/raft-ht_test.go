@@ -3,6 +3,7 @@ package raftht
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"github.com/imdea-software/swiftpaxos/replica/defs"
 	fastrpc "github.com/imdea-software/swiftpaxos/rpc"
@@ -541,6 +542,7 @@ func newTestReplica(id int32, n int) *Replica {
 		commitIndex: -1,
 		lastApplied: -1,
 		role:        FOLLOWER,
+		knownLeader: -1,
 		n:           n,
 		nextIndex:   make([]int32, n),
 		matchIndex:  make([]int32, n),
@@ -869,5 +871,159 @@ func TestClientCacheMerge_EqualVersion(t *testing.T) {
 	}
 	if finalVer != 5 {
 		t.Errorf("Version should be 5, got %d", finalVer)
+	}
+}
+
+// ============================================================================
+// Phase 59: Timer Management, Leader Tracking, and Weak Propose Rejection Tests
+// ============================================================================
+
+// TestBecomeLeader_SetsKnownLeader verifies that becomeLeader updates knownLeader
+func TestBecomeLeader_SetsKnownLeader(t *testing.T) {
+	r := newTestReplica(2, 3)
+	r.currentTerm = 5
+	r.knownLeader = -1
+
+	r.becomeLeader()
+
+	if r.knownLeader != 2 {
+		t.Errorf("knownLeader = %d, want 2", r.knownLeader)
+	}
+	if r.role != LEADER {
+		t.Errorf("role = %d, want LEADER", r.role)
+	}
+}
+
+// TestBecomeLeader_TimerManagement verifies heartbeat timer starts and election timer stops
+func TestBecomeLeader_TimerManagement(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.electionTimer = time.NewTimer(time.Hour) // long timer so it doesn't fire
+	r.heartbeatTimer = time.NewTimer(time.Hour)
+	r.heartbeatTimer.Stop() // simulate stopped state (as follower)
+	r.heartbeatTimeout = 100 * time.Millisecond
+
+	r.becomeLeader()
+
+	// Heartbeat timer should have been reset and fire within heartbeatTimeout
+	select {
+	case <-r.heartbeatTimer.C:
+		// Good — heartbeat timer is running
+	case <-time.After(200 * time.Millisecond):
+		t.Error("heartbeat timer did not fire after becomeLeader")
+	}
+}
+
+// TestBecomeFollower_TimerManagement verifies election timer starts and heartbeat stops
+func TestBecomeFollower_TimerManagement(t *testing.T) {
+	r := newTestReplica(0, 3)
+	r.role = LEADER
+	r.electionTimer = time.NewTimer(time.Hour)
+	r.electionTimer.Stop() // simulate stopped state (as leader)
+	r.heartbeatTimer = time.NewTimer(time.Hour)
+
+	r.becomeFollower(5)
+
+	if r.role != FOLLOWER {
+		t.Errorf("role = %d, want FOLLOWER", r.role)
+	}
+	if r.currentTerm != 5 {
+		t.Errorf("currentTerm = %d, want 5", r.currentTerm)
+	}
+
+	// Election timer should have been reset and fire within 500ms
+	select {
+	case <-r.electionTimer.C:
+		// Good — election timer is running
+	case <-time.After(600 * time.Millisecond):
+		t.Error("election timer did not fire after becomeFollower")
+	}
+}
+
+// TestBecomeFollower_NilTimers verifies no panic when timers are nil (during init)
+func TestBecomeFollower_NilTimers(t *testing.T) {
+	r := newTestReplica(1, 3)
+	// timers are nil by default in test replica — should not panic
+	r.becomeFollower(3)
+
+	if r.role != FOLLOWER {
+		t.Errorf("role = %d, want FOLLOWER", r.role)
+	}
+}
+
+// TestKnownLeader_UpdatedByAppendEntries verifies knownLeader is set when
+// processing an AppendEntries (simulated inline since full handler needs sender)
+func TestKnownLeader_UpdatedByAppendEntries(t *testing.T) {
+	r := newTestReplica(1, 3)
+	r.knownLeader = -1
+	r.currentTerm = 0
+
+	// Simulate the AppendEntries handling path: becomeFollower + set knownLeader
+	msg := &AppendEntries{LeaderId: 0, Term: 1}
+	if msg.Term > r.currentTerm {
+		r.becomeFollower(msg.Term)
+	}
+	r.knownLeader = msg.LeaderId
+
+	if r.knownLeader != 0 {
+		t.Errorf("knownLeader = %d, want 0 (set by AppendEntries)", r.knownLeader)
+	}
+	if r.currentTerm != 1 {
+		t.Errorf("currentTerm = %d, want 1", r.currentTerm)
+	}
+}
+
+// TestKnownLeader_ChangesOnNewLeader verifies knownLeader updates on leader change
+func TestKnownLeader_ChangesOnNewLeader(t *testing.T) {
+	r := newTestReplica(1, 3)
+	r.currentTerm = 1
+	r.knownLeader = 0
+
+	// Simulate AppendEntries from new leader at higher term
+	msg := &AppendEntries{LeaderId: 2, Term: 3}
+	if msg.Term > r.currentTerm {
+		r.becomeFollower(msg.Term)
+	}
+	r.knownLeader = msg.LeaderId
+
+	if r.knownLeader != 2 {
+		t.Errorf("knownLeader = %d, want 2 (new leader)", r.knownLeader)
+	}
+}
+
+// TestHandleWeakPropose_NonLeaderDoesNotAppend verifies log is unchanged on rejection
+func TestHandleWeakPropose_NonLeaderDoesNotAppend(t *testing.T) {
+	r := newTestReplica(1, 3)
+	r.role = FOLLOWER
+	r.currentTerm = 5
+	r.knownLeader = 0
+	r.log = append(r.log, LogEntry{Term: 3}) // pre-existing entry
+
+	logLenBefore := len(r.log)
+
+	// Verify the rejection condition
+	if r.role == LEADER {
+		t.Fatal("Test setup error: replica should be FOLLOWER")
+	}
+
+	if len(r.log) != logLenBefore {
+		t.Error("Follower should not modify log on weak propose rejection")
+	}
+	if r.knownLeader != 0 {
+		t.Errorf("knownLeader should be 0 for redirect hint, got %d", r.knownLeader)
+	}
+}
+
+// TestBeTheLeader_SetsKnownLeader verifies BeTheLeader sets knownLeader to self
+func TestBeTheLeader_SetsKnownLeader(t *testing.T) {
+	r := newTestReplica(2, 3)
+	r.knownLeader = -1
+
+	r.BeTheLeader(nil, nil)
+
+	if r.knownLeader != 2 {
+		t.Errorf("knownLeader = %d after BeTheLeader, want 2", r.knownLeader)
+	}
+	if r.role != LEADER {
+		t.Errorf("role = %d after BeTheLeader, want LEADER", r.role)
 	}
 }

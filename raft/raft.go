@@ -62,6 +62,8 @@ type Replica struct {
 	// Timers
 	electionTimeout  time.Duration
 	heartbeatTimeout time.Duration
+	electionTimer    *time.Timer
+	heartbeatTimer   *time.Timer
 
 	// Replica identity and cluster size
 	id int32
@@ -195,15 +197,22 @@ func (r *Replica) run() {
 		}()
 	}
 
-	// Set up election and heartbeat timers
-	electionTimer := time.NewTimer(r.electionTimeout)
-	heartbeatTimer := time.NewTimer(r.heartbeatTimeout)
+	// Set up election and heartbeat timers.
+	// Followers use a longer initial timeout (3s) to allow the designated leader
+	// to finish ConnectToPeers and send its first heartbeat before any follower
+	// starts an election. After the first heartbeat, normal timeouts apply.
+	initialElectionTimeout := 3 * time.Second
+	r.electionTimer = time.NewTimer(initialElectionTimeout)
+	r.heartbeatTimer = time.NewTimer(r.heartbeatTimeout)
 
-	// Leader doesn't need election timer; followers don't need heartbeat timer
+	// Leader doesn't need election timer; followers don't need heartbeat timer.
+	// Send immediate heartbeat after peer connections are established to prevent
+	// followers from starting elections during the startup window.
 	if r.role == LEADER {
-		electionTimer.Stop()
+		r.electionTimer.Stop()
+		r.sendHeartbeats()
 	} else {
-		heartbeatTimer.Stop()
+		r.heartbeatTimer.Stop()
 	}
 
 	onOffProposeChan := r.ProposeChan
@@ -226,7 +235,7 @@ func (r *Replica) run() {
 			r.handleAppendEntries(ae)
 			// Reset election timer on valid AppendEntries (leader is alive)
 			if ae.Term >= r.currentTerm {
-				r.resetElectionTimer(electionTimer)
+				r.resetElectionTimer()
 			}
 
 		case m := <-r.cs.appendEntriesReplyChan:
@@ -241,16 +250,16 @@ func (r *Replica) run() {
 			rvr := m.(*RequestVoteReply)
 			r.handleRequestVoteReply(rvr)
 
-		case <-electionTimer.C:
+		case <-r.electionTimer.C:
 			if r.role != LEADER {
 				r.startElection()
-				r.resetElectionTimer(electionTimer)
+				r.resetElectionTimer()
 			}
 
-		case <-heartbeatTimer.C:
+		case <-r.heartbeatTimer.C:
 			if r.role == LEADER {
 				r.sendHeartbeats()
-				heartbeatTimer.Reset(r.heartbeatTimeout)
+				r.heartbeatTimer.Reset(r.heartbeatTimeout)
 			}
 		}
 	}
@@ -264,9 +273,9 @@ func (r *Replica) println(v ...interface{}) {
 }
 
 // resetElectionTimer resets the election timer with a randomized timeout.
-func (r *Replica) resetElectionTimer(t *time.Timer) {
+func (r *Replica) resetElectionTimer() {
 	timeout := time.Duration(300+rand.Intn(200)) * time.Millisecond
-	t.Reset(timeout)
+	r.electionTimer.Reset(timeout)
 }
 
 // becomeFollower transitions to follower state for a new term.
@@ -275,6 +284,13 @@ func (r *Replica) becomeFollower(term int32) {
 	r.role = FOLLOWER
 	r.votedFor = -1
 	r.votesReceived = 0
+	// Stop heartbeat timer (no longer leader) and start election timer
+	if r.heartbeatTimer != nil {
+		r.heartbeatTimer.Stop()
+	}
+	if r.electionTimer != nil {
+		r.resetElectionTimer()
+	}
 }
 
 // becomeLeader transitions to leader state after winning an election.
@@ -288,6 +304,14 @@ func (r *Replica) becomeLeader() {
 		r.matchIndex[i] = -1
 	}
 	r.matchIndex[r.id] = lastLogIndex
+
+	// Stop election timer (now leader) and start heartbeat timer
+	if r.electionTimer != nil {
+		r.electionTimer.Stop()
+	}
+	if r.heartbeatTimer != nil {
+		r.heartbeatTimer.Reset(r.heartbeatTimeout)
+	}
 
 	// Send immediate heartbeat to assert authority
 	if r.Replica != nil {
