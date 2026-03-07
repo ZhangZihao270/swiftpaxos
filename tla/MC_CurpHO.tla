@@ -16,10 +16,10 @@ CONSTANTS
 
 \* Leader is always r1; r2/r3 are symmetric followers.
 MCReplicas    == {r1, r2, r3}
-MCClients     == {c1, c2}
+MCClients     == {c1}
 MCKeys        == {k1}
 MCValues      == {v1, v2}
-MCMaxOps      == 1
+MCMaxOps      == 2
 MCNil         == nil
 MCInitLeader  == r1
 
@@ -31,7 +31,6 @@ MCInitLeader  == r1
 \* c1/c2 are interchangeable clients.
 \* v1/v2 are interchangeable values.
 MCSymmetry == Permutations({r2, r3})
-          \cup Permutations({c1, c2})
           \cup Permutations({v1, v2})
 
 \* ============================================================================

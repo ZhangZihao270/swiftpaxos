@@ -721,7 +721,7 @@ ClientHandleStrongWriteFastPath(c) ==
                      invEpoch    |-> clientInvEpoch[c],
                      retEpoch    |-> epoch + 1,
                      slot        |-> slot,
-                     retVer      |-> Max(clientCache[c][k].ver, slot)])
+                     retVer      |-> slot)])
                /\ messages' = messages \ {m}
                /\ UNCHANGED <<replicaVars, unsyncedVars, clientCon, clientSeq,
                               clientInvEpoch, boundReplica>>
@@ -769,7 +769,7 @@ ClientHandleStrongWriteSlowPath(c) ==
                  invEpoch    |-> clientInvEpoch[c],
                  retEpoch    |-> epoch + 1,
                  slot        |-> slot,
-                 retVer      |-> Max(clientCache[c][k].ver, slot)])
+                 retVer      |-> slot)])
         /\ messages' = messages \ {m}
         /\ UNCHANGED <<replicaVars, unsyncedVars, clientCon, clientSeq,
                        clientInvEpoch, boundReplica>>
@@ -956,7 +956,7 @@ ClientHandleStrongReadFastPath(c) ==
                      invEpoch    |-> clientInvEpoch[c],
                      retEpoch    |-> epoch + 1,
                      slot        |-> slot,
-                     retVer      |-> Max(clientCache[c][k].ver, slot)])
+                     retVer      |-> slot)])
                /\ messages' = messages \ {m}
                /\ UNCHANGED <<replicaVars, unsyncedVars, clientCon, clientSeq,
                               clientInvEpoch, boundReplica>>
@@ -1003,7 +1003,7 @@ ClientHandleStrongReadSlowPath(c) ==
                  invEpoch    |-> clientInvEpoch[c],
                  retEpoch    |-> epoch + 1,
                  slot        |-> slot,
-                 retVer      |-> Max(clientCache[c][k].ver, slot)])
+                 retVer      |-> slot)])
         /\ messages' = messages \ {m}
         /\ UNCHANGED <<replicaVars, unsyncedVars, clientCon, clientSeq,
                        clientInvEpoch, boundReplica>>
