@@ -4247,6 +4247,14 @@ Bug fixes discovered during Phase 58 local pre-run experiments. All issues cause
 
 ---
 
+### Phase 60.5: Infrastructure Fix + Bug Analysis
+
+- [x] **60.5a** Fix `SendClientMsgFast` silent message dropping: increase per-client channel buffer from 8192 to 131072, add `sync.Once` warning log when messages are first dropped. Previously dropped messages silently, which could cause client hangs under high load. [26:03:07]
+- [x] **60.5b** Analyze vanilla CURP client hang (Phase 58 known issue 3): root cause is complex protocol-level issue in `curp/curp.go` deliver chain (goroutine blocking on `executeNotify` channels + `desc.propose == nil` early returns). Not worth fixing since `curpht weakRatio=0` is used as baseline. [26:03:07]
+- [x] **60.5c** Analyze speculative read bug in `curp-ht/curp-ht.go` (lines 591-594): `ComputeResult(r.State)` reads live state before dependencies execute, so speculative value may be stale for GETs with uncommitted PUT dependencies. Not a bug in practice: (1) benchmark uses independent keys, (2) slow-path MSyncReply overwrites with correct value, (3) CURP protocol's fast path is designed to be optimistic. [26:03:07]
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task

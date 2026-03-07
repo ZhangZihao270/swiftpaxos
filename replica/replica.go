@@ -66,7 +66,8 @@ type Replica struct {
 	Ewma      []float64
 	Latencies []int64
 
-	Dt *defs.LatencyTable
+	Dt             *defs.LatencyTable
+	clientDropOnce sync.Once
 }
 
 func New(alias string, id, f int, addrs []string, thrifty, exec, lread bool, config *config.Config, l *dlog.Logger) *Replica {
@@ -286,8 +287,10 @@ func (r *Replica) SendClientMsgFast(id int32, code uint8, msg fastrpc.Serializab
 	select {
 	case ch <- clientSendArg{code: code, msg: msg}:
 	default:
-		// Channel full — drop message to avoid blocking the caller.
-		// Client-side MSync retry recovers dropped strong replies.
+		// Channel full — drop message. Log warning once per replica to aid debugging.
+		r.clientDropOnce.Do(func() {
+			r.Printf("WARNING: per-client channel full for client %d, dropping messages (buffer=%d)", id, cap(ch))
+		})
 	}
 }
 
@@ -669,7 +672,7 @@ func (r *Replica) registerClient(clientId int32, writer *bufio.Writer, addr stri
 		r.ClientMu[clientId] = &sync.Mutex{}
 	}
 	if r.ClientFastChan[clientId] == nil {
-		ch := make(chan clientSendArg, 8192)
+		ch := make(chan clientSendArg, 131072)
 		r.ClientFastChan[clientId] = ch
 		cid := clientId
 		go func() {
