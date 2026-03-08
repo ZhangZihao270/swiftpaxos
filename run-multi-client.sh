@@ -35,7 +35,7 @@ CLONES=""  # Empty means use config value (deprecated)
 THREADS=""  # Empty means use config value (preferred)
 OUTPUT=""
 DISTRIBUTED=false
-STARTUP_DELAY=10
+STARTUP_DELAY=15
 RESULTS_DIR=""
 SSH_USER="${SSH_USER:-$(whoami)}"
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10"
