@@ -4693,6 +4693,104 @@ co-located replicas still experience simulated 50ms RTT, so results remain valid
 
 ---
 
+### Phase 72: Full 5-Replica Evaluation — Exp 1.1, 3.1, 3.2
+
+**Goal**: Run complete Exp 1.1, 3.1, 3.2 on the 5-replica setup (2-1-2 layout on .101/.103/.104) with latency data export for CDF plots. Phase 71 only ran Exp 3.1; this phase adds Exp 1.1 and 3.2, and ensures all three experiments have consistent 5-replica results.
+
+**Machine layout (2-1-2)**:
+```
+.101: replica0 (7070), replica1 (7071), client0, client1
+.103: replica2 (7072), client2
+.104: replica3 (7073), replica4 (7074), client3, client4
+```
+
+**Config**: `benchmark-5r.conf` (5 replicas, 5 clients, `networkDelay: 25`)
+
+---
+
+#### Phase 72.1: Create 5-Replica Experiment Scripts
+
+Adapt existing 3-replica `eval-*-dist.sh` scripts to use `benchmark-5r.conf`.
+
+- [x] **72.1a** Create `scripts/eval-exp1.1-5r-dist.sh` — Raft-HT vs Vanilla Raft ✅ (2026-03-08)
+  - Protocols: `raftht` (weakRatio=50), `raft` (weakRatio=0)
+  - Thread sweep: 1, 2, 4, 8, 16, 32, 64, 96, 128
+  - Config: `writes: 5`, `weakWrites: 5` (95/5 read/write)
+  - Based on `eval-exp1.1-dist.sh`, change `cp multi-client.conf` → `cp benchmark-5r.conf`
+  - Output: `results/eval-5r-YYYYMMDD/exp1.1/`
+  - Total: 2 protocols × 9 thread counts = **18 runs**
+
+- [x] **72.1b** Create `scripts/eval-exp3.2-5r-dist.sh` — T Property Verification ✅ (2026-03-08)
+  - Protocols: `raftht`, `curpht`, `curpho`
+  - Weak ratio sweep: 0, 25, 50, 75, 100 (at fixed t=8)
+  - Config: `writes: 5`, `weakWrites: 5` (95/5 read/write, matches Phase 65)
+  - Based on `eval-exp3.2-dist.sh`, change config source to `benchmark-5r.conf`
+  - Output: `results/eval-5r-YYYYMMDD/exp3.2/`
+  - Total: 3 protocols × 5 weak ratios = **15 runs**
+
+- [x] **72.1c** Verify `eval-exp3.1-5r-dist.sh` (already exists) — Phase 71 results satisfactory (CURP-HO 91K, CURP-HT 47K, Baseline 28K). No changes needed. ✅ (2026-03-08)
+
+---
+
+#### Phase 72.2: Run Experiments
+
+All experiments use distributed mode (`-d` flag), `networkDelay: 25` (50ms RTT), latency export enabled.
+
+- [x] **72.2a** Build and sync binary to all 3 machines ✅ (2026-03-08)
+  ```bash
+  go build -o swiftpaxos . && rsync swiftpaxos 130.245.173.{101,103,104}:~/swiftpaxos/
+  ```
+
+- [x] **72.2b** Run Exp 3.1 — **Skipped**: Phase 71 results usable (27/27 data points, CURP-HO 91K peak) ✅ (2026-03-08)
+  - 3 protocols × 9 threads = 27 runs, ~30 min
+  ```bash
+  bash scripts/eval-exp3.1-5r-dist.sh results/eval-5r-$(date +%Y%m%d)
+  ```
+
+- [x] **72.2c** Run Exp 1.1 — Raft-HT peak 45.5K at t=64, Raft peak 18K at t=32 (17/18 runs OK, raft t128 saturated) ✅ (2026-03-08)
+  - 2 protocols × 9 threads = 18 runs, ~20 min
+  ```bash
+  bash scripts/eval-exp1.1-5r-dist.sh results/eval-5r-$(date +%Y%m%d)
+  ```
+
+- [x] **72.2d** Run Exp 3.2 — 15/15 runs OK. T property confirmed: CURP-HT strong P50 stable 51ms, Raft-HT stable 84ms, CURP-HO +11% degradation ✅ (2026-03-08)
+  - 3 protocols × 5 weak ratios = 15 runs, ~15 min
+  ```bash
+  bash scripts/eval-exp3.2-5r-dist.sh results/eval-5r-$(date +%Y%m%d)
+  ```
+
+Total: ~60 runs, ~60-90 min (including startup/cooldown).
+
+---
+
+#### Phase 72.3: Collect Results and Generate Figures
+
+- [x] **72.3a** CSV summaries already in `results/eval-5r-20260308/` ✅ (2026-03-08)
+- [x] **72.3b** Created `plot-exp1.1-5r.py`, `plot-exp3.1-5r.py` → 4 figures (P50/P99 each) ✅ (2026-03-08)
+- [x] **72.3c** Created `plot-exp3.2-5r.py` → 2 figures (latency + throughput) ✅ (2026-03-08)
+- [x] **72.3d** Created `plot-cdf-5r.py` → 4 figures (combined CDF, strong CDF, weak breakdown, T-property CDF) ✅ (2026-03-08)
+- [x] **72.3e** Created `gen-latex-tables-5r.py` → `tables-5r.tex` + `cdf-5r-summary.csv` ✅ (2026-03-08)
+
+---
+
+#### Phase 72.4: Commit and Push
+
+- [ ] **72.4a** Commit scripts, results, and figures
+- [ ] **72.4b** Push
+
+---
+
+**Expected run matrix**:
+
+| Experiment | Protocols | Sweep | Runs |
+|------------|-----------|-------|------|
+| Exp 1.1 | Raft-HT, Raft | 9 thread counts | 18 |
+| Exp 3.1 | CURP-HO, CURP-HT, CURP baseline | 9 thread counts | 27 |
+| Exp 3.2 | Raft-HT, CURP-HT, CURP-HO | 5 weak ratios | 15 |
+| **Total** | | | **60** |
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
