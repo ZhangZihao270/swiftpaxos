@@ -4,6 +4,8 @@ Generate LaTeX tables from experiment CSV data for paper inclusion.
 Outputs to plots/tables.tex (and prints to stdout).
 """
 
+import csv
+import json
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -141,6 +143,153 @@ def table_latency_at_saturation(exp11_rows, exp31_rows):
     lines.append(r'\end{table}')
     return '\n'.join(lines)
 
+def load_cdf_latencies(base):
+    """Load per-protocol CDF latency data from eval-dist-cdf."""
+    cdf_dir = os.path.join(base, 'results', 'eval-dist-cdf')
+    data = {}
+    for proto, exp in [
+        ('curpho', 'exp3.1'), ('curpht', 'exp3.1'), ('curp-baseline', 'exp3.1'),
+        ('raftht', 'exp1.1'), ('raft', 'exp1.1'),
+    ]:
+        path = os.path.join(cdf_dir, exp, proto, 't32', 'latencies.json')
+        if os.path.exists(path):
+            with open(path) as f:
+                data[proto] = json.load(f)
+    return data
+
+
+def percentile(vals, p):
+    """Get percentile from a sorted array."""
+    if not vals:
+        return None
+    idx = min(int(len(vals) * p / 100), len(vals) - 1)
+    return vals[idx]
+
+
+def table_cdf_percentiles(cdf_data):
+    """Table 4: Full percentile breakdown from CDF data at t=32."""
+    if not cdf_data:
+        return ''
+    lines = []
+    lines.append(r'\begin{table}[t]')
+    lines.append(r'\centering')
+    lines.append(r'\caption{Latency percentiles at moderate load ($t$=32, RTT = 50\,ms, 95/5 R/W, 50\% weak).}')
+    lines.append(r'\label{tab:cdf-percentiles}')
+    lines.append(r'\begin{tabular}{llrrrrrr}')
+    lines.append(r'\toprule')
+    lines.append(r'Protocol & Type & P1 & P25 & P50 & P75 & P99 & P99.9 \\')
+    lines.append(r'\midrule')
+
+    protocols = [
+        ('CURP-HO', 'curpho'), ('CURP-HT', 'curpht'),
+        ('Raft-HT', 'raftht'), ('CURP (baseline)', 'curp-baseline'),
+        ('Raft', 'raft'),
+    ]
+
+    for label, proto in protocols:
+        if proto not in cdf_data:
+            continue
+        lat = cdf_data[proto]
+        # Strong combined
+        s_vals = sorted(lat.get('strong_write', []) + lat.get('strong_read', []))
+        if s_vals:
+            ps = [percentile(s_vals, p) for p in [1, 25, 50, 75, 99, 99.9]]
+            ps_str = ' & '.join(fmt_ms(v) for v in ps)
+            lines.append(f'{label} & Strong & {ps_str} \\\\')
+
+        # Weak combined
+        w_vals = sorted(lat.get('weak_write', []) + lat.get('weak_read', []))
+        if w_vals:
+            ps = [percentile(w_vals, p) for p in [1, 25, 50, 75, 99, 99.9]]
+            ps_str = ' & '.join(fmt_ms(v) for v in ps)
+            lines.append(f' & Weak & {ps_str} \\\\')
+
+        lines.append(r'\midrule' if proto != 'raft' else r'\bottomrule')
+
+    # Remove the last midrule and replace with bottomrule
+    if lines[-1] == r'\midrule':
+        lines[-1] = r'\bottomrule'
+
+    lines.append(r'\end{tabular}')
+    lines.append(r'\end{table}')
+    return '\n'.join(lines)
+
+
+def table_op_type_breakdown(cdf_data):
+    """Table 5: Per-operation-type latency breakdown at t=32."""
+    if not cdf_data:
+        return ''
+    lines = []
+    lines.append(r'\begin{table}[t]')
+    lines.append(r'\centering')
+    lines.append(r'\caption{Per-operation-type P50 latency ($t$=32, RTT = 50\,ms, 95/5 R/W, 50\% weak).}')
+    lines.append(r'\label{tab:op-type-breakdown}')
+    lines.append(r'\begin{tabular}{lrrrr}')
+    lines.append(r'\toprule')
+    lines.append(r'Protocol & Strong Read & Strong Write & Weak Read & Weak Write \\')
+    lines.append(r'\midrule')
+
+    protocols = [
+        ('CURP-HO', 'curpho'), ('CURP-HT', 'curpht'),
+        ('Raft-HT', 'raftht'), ('CURP (baseline)', 'curp-baseline'),
+        ('Raft', 'raft'),
+    ]
+
+    for label, proto in protocols:
+        if proto not in cdf_data:
+            continue
+        lat = cdf_data[proto]
+        vals = {}
+        for key in ['strong_read', 'strong_write', 'weak_read', 'weak_write']:
+            v = lat.get(key, [])
+            vals[key] = percentile(v, 50) if v else None
+
+        sr = fmt_ms(vals['strong_read'])
+        sw = fmt_ms(vals['strong_write'])
+        wr = fmt_ms(vals['weak_read'])
+        ww = fmt_ms(vals['weak_write'])
+        lines.append(f'{label} & {sr}\\,ms & {sw}\\,ms & {wr}\\,ms & {ww}\\,ms \\\\')
+
+    lines.append(r'\bottomrule')
+    lines.append(r'\end{tabular}')
+    lines.append(r'\end{table}')
+    return '\n'.join(lines)
+
+
+def export_cdf_summary_csv(cdf_data, out_path):
+    """Export CDF summary statistics to CSV for easy paper reference."""
+    if not cdf_data:
+        return
+    rows = []
+    protocols = [
+        ('curpho', 'CURP-HO'), ('curpht', 'CURP-HT'),
+        ('raftht', 'Raft-HT'), ('curp-baseline', 'CURP (baseline)'),
+        ('raft', 'Raft'),
+    ]
+    pcts = [1, 5, 10, 25, 50, 75, 90, 95, 99, 99.9]
+
+    for proto, label in protocols:
+        if proto not in cdf_data:
+            continue
+        lat = cdf_data[proto]
+        for op_type in ['strong_read', 'strong_write', 'weak_read', 'weak_write']:
+            vals = lat.get(op_type, [])
+            if not vals:
+                continue
+            row = {'protocol': label, 'op_type': op_type, 'count': len(vals)}
+            for p in pcts:
+                row[f'p{p}'] = f'{percentile(vals, p):.2f}'
+            rows.append(row)
+
+    if rows:
+        fieldnames = ['protocol', 'op_type', 'count'] + [f'p{p}' for p in pcts]
+        with open(out_path, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+        print(f'Saved: {out_path}')
+
+
 def main():
     base = base_dir()
     exp11_csv = os.path.join(base, 'results', 'eval-dist-20260307', 'summary-exp1.1.csv')
@@ -152,6 +301,11 @@ def main():
     exp31_rows = load_csv(exp31_csv)
     exp32_rows = load_csv(exp32_csv)
 
+    # Load CDF data
+    cdf_data = load_cdf_latencies(base)
+    if cdf_data:
+        print(f'CDF data loaded: {", ".join(cdf_data.keys())}')
+
     tables = []
     tables.append('% Auto-generated LaTeX tables for SwiftPaxos evaluation')
     tables.append('% Generated from distributed experiment data (RTT = 50ms)')
@@ -161,6 +315,13 @@ def main():
     tables.append(table_t_property(exp32_rows))
     tables.append('')
     tables.append(table_latency_at_saturation(exp11_rows, exp31_rows))
+
+    if cdf_data:
+        tables.append('')
+        tables.append(table_cdf_percentiles(cdf_data))
+        tables.append('')
+        tables.append(table_op_type_breakdown(cdf_data))
+
     tables.append('')
 
     output = '\n'.join(tables)
@@ -170,6 +331,11 @@ def main():
     with open(out_path, 'w') as f:
         f.write(output)
     print(f'\nSaved: {out_path}')
+
+    # Export CDF summary CSV
+    if cdf_data:
+        csv_path = os.path.join(out_dir, 'cdf-summary.csv')
+        export_cdf_summary_csv(cdf_data, csv_path)
 
 if __name__ == '__main__':
     main()

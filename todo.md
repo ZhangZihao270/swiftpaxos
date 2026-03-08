@@ -4530,6 +4530,26 @@ showing how the full strong latency distribution remains stable as weak ratio in
 
 ---
 
+## Phase 68: CDF-Derived LaTeX Tables + Summary CSV
+
+**Goal**: Generate LaTeX tables from CDF data for paper inclusion — full percentile breakdowns
+and per-operation-type latency analysis. Also export CDF summary statistics as CSV.
+
+- [x] **68a** Add Table 4: full percentile breakdown (P1/P25/P50/P75/P99/P99.9) for strong+weak [26:03:07]
+  - Shows distribution spread: CURP-HT strong P1=51ms, P99=106ms (tight)
+  - vs Raft-HT strong P1=55ms, P99=218ms (wide spread)
+  - Weak: CURP-HO P50=0.42ms, Raft-HT P50=0.94ms
+- [x] **68b** Add Table 5: per-operation-type P50 breakdown (SR/SW/WR/WW) [26:03:07]
+  - Key insight: CURP-HT weak write P50=102ms (2 RTT), weak read P50=0.32ms (local)
+  - CURP-HO weak write P50=0.28ms — writes also local (witness path)
+  - Strong read ≈ strong write for all protocols (same commit path)
+- [x] **68c** Export CDF summary CSV (`plots/cdf-summary.csv`) [26:03:07]
+  - 17 rows × 13 percentile columns per operation type per protocol
+  - Precise values for paper text: "CURP-HT achieves P99 strong latency of 106ms..."
+- [x] **68d** Regenerate `plots/tables.tex` with all 5 tables [26:03:07]
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
