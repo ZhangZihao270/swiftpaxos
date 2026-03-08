@@ -61,7 +61,7 @@ def main():
     base = base_dir()
     dist_csv = os.path.join(base, 'results', 'eval-dist-20260307-w5', 'summary-exp3.2.csv')
     local_csv = os.path.join(base, 'results', 'eval-local-20260307-final3', 'summary-exp3.2.csv')
-    out_dir = os.path.join(base, 'plots')
+    out_dir = os.path.join(base, 'evaluation', 'plots')
 
     setup_style()
     dist_rows = load_csv(dist_csv)

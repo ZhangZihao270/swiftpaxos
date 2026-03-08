@@ -4602,6 +4602,91 @@ for leaderless consensus throughput and the tightest latency distribution compar
 
 ---
 
+## Phase 71: 5-Replica Support + Exp 3.1 Validation
+
+**Goal**: Enable running 5 replicas on 3 physical machines (.101, .103, .104) by making replica
+port configurable per index, then run Exp 3.1 (CURP-HO vs CURP-HT vs baseline) to validate
+correctness and collect 5-replica performance data.
+
+**Background**: Currently all replicas hardcode `port := 7070` in `run.go:31`, so two replicas
+on the same machine would bind-conflict. With `networkDelay: 25` (application-level delay),
+co-located replicas still experience simulated 50ms RTT, so results remain valid.
+
+**Machine layout (2-1-2)**:
+```
+.101: replica0 (port 7070), replica1 (port 7071)
+.103: replica2 (port 7072)
+.104: replica3 (port 7073), replica4 (port 7074)
+```
+
+**Clients (5 clients, co-located with replicas)**:
+```
+.101: client0, client1
+.103: client2
+.104: client3, client4
+```
+
+### Step 1: Port per replica index (`run.go`)
+
+- [x] **71a** Derive port from alias index in `run.go` [26:03:08]
+  - Parse digit suffix from `c.Alias` (e.g. "replica3" → 3), set `port = 7070 + index`
+  - RPC listener auto-offsets to `port+1000` (e.g. 8073)
+  - Added `strconv` import
+
+### Step 2: Latency table fix for co-located replicas
+
+- [x] **71b** Fix `WaitDurationID` to exempt self-ID only, not same-IP peers [26:03:08]
+  - Old behavior: `WaitDurationID(id)` returned 0 for all peers with same IP as self
+  - New behavior: only returns 0 for `myId` (the replica's own ID)
+  - Added `myId int` field to `LatencyTable`, passed through `NewLatencyTable`
+  - Updated callers: `replica.go` passes replica ID, `client.go` passes -1 (client has no latency table anyway)
+  - Critical for 5-replica sim: co-located replicas now get correct simulated delay
+  - Added `TestColocatedReplicasGetDelay` test verifying delay between same-IP peers
+
+### Steps 3-4: Verify master, peer, client paths
+
+- [x] **71c** Verified all paths handle heterogeneous ports correctly [26:03:08]
+  - Master: stores per-replica `addr:port` in nodeList, connects back via `port+1000` — no changes needed
+  - Peers: `waitForPeerConnections` binds to `r.PeerAddrList[r.Id]` (full `ip:port`) — correct
+  - Client: dials `c.replicas[i]` (full `ip:port` from nodeList) — correct
+
+### Step 5: Config files
+
+- [x] **71e** Created `benchmark-5r.conf` (distributed) and `benchmark-5r-local.conf` (local test) [26:03:08]
+  - Layout: .101 x2 (replica0,1), .103 x1 (replica2), .104 x2 (replica3,4)
+  - 5 clients co-located with replicas, proxy section maps each pair
+  - f=2, quorum=3 (vs 3-replica: f=1, quorum=2)
+
+### Step 6: run-multi-client.sh verification
+
+- [x] **71f** Verified script handles N replicas generically [26:03:08]
+  - `parse_config()` loops over `replica[0-9]+` — works for any count
+  - `ALL_HOSTS` deduplication handles shared hosts
+  - Log names unique per alias, `collect_remote_logs` uses `|| true` for missing files
+
+### Step 7: Local smoke test
+
+- [x] **71g** Local 5-replica smoke test passed [26:03:08]
+  - curpht: 9543 ops/s, 45 strong + 55 weak ops
+  - curpho: 10293 ops/s
+  - raft: 9065 ops/s (strong-only)
+  - All 5 replicas used correct ports (7070-7074), all 5 log files generated
+
+### Step 8: Evaluation script
+
+- [x] **71h** Created `scripts/eval-exp3.1-5r-dist.sh` [26:03:08]
+  - Uses `benchmark-5r.conf`, same protocol/thread sweep as 3-replica version
+  - Output to `results/eval-5r-YYYYMMDD/`
+
+### Step 9: Distributed smoke test + Exp 3.1
+
+- [x] **71i-smoke** Distributed 5-replica smoke test passed [26:03:08]
+  - 5 clients × 10,000 ops = 50,000 total, 2700 ops/s at t=1
+  - Strong P50: 51ms (1 RTT), Weak P50: 0.17ms (local reads)
+- [ ] **71i** Run full Exp 3.1 on 5-replica distributed setup
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task

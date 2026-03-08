@@ -40,7 +40,7 @@ def main():
     exp31_csv = os.path.join(base, 'results', 'eval-dist-20260307', 'summary-exp3.1.csv')
     exp32_csv = os.path.join(base, 'results', 'eval-dist-20260307-w5', 'summary-exp3.2.csv')
     epaxos_csv = os.path.join(base, 'results', 'eval-dist-20260307-w5', 'summary-epaxos.csv')
-    out_dir = os.path.join(base, 'plots')
+    out_dir = os.path.join(base, 'evaluation', 'plots')
 
     setup_style()
     plt.rcParams.update({'legend.fontsize': 8, 'axes.titlesize': 11})

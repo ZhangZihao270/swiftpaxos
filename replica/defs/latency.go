@@ -15,6 +15,7 @@ type LatencyTable struct {
 	tn     map[string]time.Duration
 	d      time.Duration
 	myAddr string
+	myId   int
 	addrs  []string
 }
 
@@ -150,7 +151,7 @@ func (c *DelayProposeChan) Write(p *GPropose) {
 	}()
 }
 
-func NewLatencyTable(conf, myAddr string, addrs []string) *LatencyTable {
+func NewLatencyTable(conf, myAddr string, myId int, addrs []string) *LatencyTable {
 	if conf == "" {
 		return nil
 	}
@@ -165,6 +166,7 @@ func NewLatencyTable(conf, myAddr string, addrs []string) *LatencyTable {
 	dt := &LatencyTable{
 		d:      time.Duration(0),
 		myAddr: myAddr,
+		myId:   myId,
 		addrs:  addrs,
 	}
 
@@ -177,6 +179,7 @@ func NewLatencyTable(conf, myAddr string, addrs []string) *LatencyTable {
 					return &LatencyTable{
 						d:      time.Duration(int64(d) / int64(2)),
 						myAddr: myAddr,
+						myId:   myId,
 						addrs:  addrs,
 					}
 				} else {
@@ -234,7 +237,7 @@ func (dt *LatencyTable) WaitDurationID(id int) time.Duration {
 	if dt == nil {
 		return time.Duration(0)
 	}
-	if id >= 0 && id < len(dt.addrs) && strings.Split(dt.addrs[id], ":")[0] == dt.myAddr {
+	if id == dt.myId {
 		return time.Duration(0)
 	}
 	d, exists := dt.ti[id]

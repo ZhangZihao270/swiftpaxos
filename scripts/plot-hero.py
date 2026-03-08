@@ -31,7 +31,7 @@ def main():
     exp11_csv = os.path.join(base, 'results', 'eval-dist-20260307', 'summary-exp1.1.csv')
     exp31_csv = os.path.join(base, 'results', 'eval-dist-20260307', 'summary-exp3.1.csv')
     epaxos_csv = os.path.join(base, 'results', 'eval-dist-20260307-w5', 'summary-epaxos.csv')
-    out_dir = os.path.join(base, 'plots')
+    out_dir = os.path.join(base, 'evaluation', 'plots')
 
     setup_style()
     exp11_rows = load_csv(exp11_csv)

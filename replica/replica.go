@@ -114,7 +114,7 @@ func New(alias string, id, f int, addrs []string, thrifty, exec, lread bool, con
 		Ewma:      make([]float64, n),
 		Latencies: make([]int64, n),
 
-		Dt: defs.NewLatencyTable(defs.LatencyConf, defs.IP(), addrs),
+		Dt: defs.NewLatencyTable(defs.LatencyConf, defs.IP(), id, addrs),
 	}
 
 	for i := 0; i < r.N; i++ {

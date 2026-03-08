@@ -8,6 +8,7 @@ import (
 	"net/http"
 	_ "net/http/pprof" // Enable pprof endpoints for profiling
 	"net/rpc"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -28,7 +29,18 @@ import (
 )
 
 func runReplica(c *config.Config, logger *dlog.Logger) {
+	// Derive port from alias index to allow multiple replicas on the same machine.
+	// e.g., "replica0" → 7070, "replica3" → 7073
 	port := 7070
+	for i, ch := range c.Alias {
+		if ch >= '0' && ch <= '9' {
+			idx, err := strconv.Atoi(c.Alias[i:])
+			if err == nil {
+				port = 7070 + idx
+			}
+			break
+		}
+	}
 
 	log.Printf("Server starting on port %d", port)
 	maddr := fmt.Sprintf("%s:%d", c.MasterAddr, c.MasterPort)

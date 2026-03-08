@@ -108,7 +108,7 @@ def main():
     cdf_dirs = ['results/eval-dist-cdf', 'results/eval-dist-20260307']
     exp11_dir = find_latency_dir(base, 'exp1.1', cdf_dirs)
     exp31_dir = find_latency_dir(base, 'exp3.1', cdf_dirs)
-    out_dir = os.path.join(base, 'plots')
+    out_dir = os.path.join(base, 'evaluation', 'plots')
 
     print(f'Exp 1.1 dir: {exp11_dir}')
     print(f'Exp 3.1 dir: {exp31_dir}')

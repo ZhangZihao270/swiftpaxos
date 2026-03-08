@@ -24,7 +24,7 @@ func TestUniformSkipsLocal(t *testing.T) {
 	defer os.Remove(conf)
 
 	addrs := []string{"10.0.0.1:7070", "10.0.0.2:7070", "10.0.0.3:7070"}
-	dt := NewLatencyTable(conf, "10.0.0.1:1234", addrs)
+	dt := NewLatencyTable(conf, "10.0.0.1:1234", 0, addrs)
 	if dt == nil {
 		t.Fatal("expected non-nil LatencyTable")
 	}
@@ -49,14 +49,14 @@ func TestUniformSkipsLocalByID(t *testing.T) {
 	defer os.Remove(conf)
 
 	addrs := []string{"10.0.0.1:7070", "10.0.0.2:7070", "10.0.0.3:7070"}
-	dt := NewLatencyTable(conf, "10.0.0.1", addrs)
+	dt := NewLatencyTable(conf, "10.0.0.1", 0, addrs)
 	if dt == nil {
 		t.Fatal("expected non-nil LatencyTable")
 	}
 
-	// Replica 0 is co-located, should return 0
+	// Replica 0 is self, should return 0
 	if d := dt.WaitDurationID(0); d != 0 {
-		t.Errorf("WaitDurationID(local=0) = %v, want 0", d)
+		t.Errorf("WaitDurationID(self=0) = %v, want 0", d)
 	}
 
 	// Replicas 1 and 2 are remote, should return 25ms
@@ -74,17 +74,18 @@ func TestPairwiseSkipsLocal(t *testing.T) {
 	defer os.Remove(conf)
 
 	addrs := []string{"10.0.0.1:7070", "10.0.0.2:7070", "10.0.0.3:7070"}
-	dt := NewLatencyTable(conf, "10.0.0.1:1234", addrs)
+	dt := NewLatencyTable(conf, "10.0.0.1:1234", 0, addrs)
 	if dt == nil {
 		t.Fatal("expected non-nil LatencyTable")
 	}
 
-	// Co-located should return 0
+	// Co-located should return 0 (WaitDuration uses IP match)
 	if d := dt.WaitDuration("10.0.0.1:5555"); d != 0 {
 		t.Errorf("WaitDuration(local) = %v, want 0", d)
 	}
+	// Self ID should return 0
 	if d := dt.WaitDurationID(0); d != 0 {
-		t.Errorf("WaitDurationID(local=0) = %v, want 0", d)
+		t.Errorf("WaitDurationID(self=0) = %v, want 0", d)
 	}
 
 	// Remote should return half RTT
@@ -112,8 +113,47 @@ func TestNilLatencyTable(t *testing.T) {
 	}
 }
 
+func TestColocatedReplicasGetDelay(t *testing.T) {
+	// 5 replicas on 3 machines: .1 x2, .2 x1, .3 x2
+	// Co-located replicas should still get delay (simulating separate datacenters)
+	conf := writeConf(t, "uniform 50ms\n")
+	defer os.Remove(conf)
+
+	addrs := []string{
+		"10.0.0.1:7070", "10.0.0.1:7071", // replica0, replica1 on .1
+		"10.0.0.2:7072",                   // replica2 on .2
+		"10.0.0.3:7073", "10.0.0.3:7074", // replica3, replica4 on .3
+	}
+	want := 25 * time.Millisecond
+
+	// Test from replica0's perspective (myId=0 on 10.0.0.1)
+	dt := NewLatencyTable(conf, "10.0.0.1", 0, addrs)
+	if dt == nil {
+		t.Fatal("expected non-nil LatencyTable")
+	}
+
+	// Self (replica0) should return 0
+	if d := dt.WaitDurationID(0); d != 0 {
+		t.Errorf("WaitDurationID(self=0) = %v, want 0", d)
+	}
+	// Co-located replica1 (same IP .1) should still get delay
+	if d := dt.WaitDurationID(1); d != want {
+		t.Errorf("WaitDurationID(colocated=1) = %v, want %v", d, want)
+	}
+	// Remote replicas should get delay
+	if d := dt.WaitDurationID(2); d != want {
+		t.Errorf("WaitDurationID(remote=2) = %v, want %v", d, want)
+	}
+	if d := dt.WaitDurationID(3); d != want {
+		t.Errorf("WaitDurationID(remote=3) = %v, want %v", d, want)
+	}
+	if d := dt.WaitDurationID(4); d != want {
+		t.Errorf("WaitDurationID(remote=4) = %v, want %v", d, want)
+	}
+}
+
 func TestEmptyConf(t *testing.T) {
-	dt := NewLatencyTable("", "10.0.0.1", nil)
+	dt := NewLatencyTable("", "10.0.0.1", 0, nil)
 	if dt != nil {
 		t.Errorf("expected nil for empty conf, got %+v", dt)
 	}

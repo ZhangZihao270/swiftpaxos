@@ -1,7 +1,7 @@
 # Evaluation Results Summary
 
 > Auto-generated from distributed experiments (RTT = 50 ms, 3 replicas, 3 client machines).
-> All figures in `plots/`, LaTeX tables in `plots/tables.tex`, raw CDF data in `plots/cdf-summary.csv`.
+> All figures in `evaluation/plots/`, LaTeX tables in `evaluation/plots/tables.tex`, raw CDF data in `evaluation/plots/cdf-summary.csv`.
 
 ---
 

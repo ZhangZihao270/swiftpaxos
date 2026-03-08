@@ -99,7 +99,7 @@ func (c *Client) Connect() error {
 	c.Println("replicas", c.replicas)
 	c.Println("closest (alive)", c.ClosestId)
 
-	c.dt = defs.NewLatencyTable(defs.LatencyConf, defs.IP(), c.replicas)
+	c.dt = defs.NewLatencyTable(defs.LatencyConf, defs.IP(), -1, c.replicas)
 
 	N := len(c.replicas)
 	c.servers = make([]net.Conn, N)
