@@ -1,7 +1,10 @@
 package client
 
 import (
+	"encoding/json"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -318,5 +321,69 @@ func TestSupportsHybrid(t *testing.T) {
 	hbc.SetHybridClient(&mockHybridClient{supportsWeak: true})
 	if !hbc.SupportsHybrid() {
 		t.Error("SupportsHybrid should return true when hybrid supports weak")
+	}
+}
+
+// TestExportLatencies tests ExportLatencies writes correct sorted JSON
+func TestExportLatencies(t *testing.T) {
+	m := &HybridMetrics{
+		StrongWriteLatency: []float64{30.0, 10.0, 20.0},
+		StrongReadLatency:  []float64{5.0, 15.0},
+		WeakWriteLatency:   []float64{2.0},
+		WeakReadLatency:    []float64{},
+	}
+
+	path := filepath.Join(t.TempDir(), "latencies.json")
+	if err := m.ExportLatencies(path); err != nil {
+		t.Fatalf("ExportLatencies failed: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("Failed to read exported file: %v", err)
+	}
+
+	var result struct {
+		StrongWrite []float64 `json:"strong_write"`
+		StrongRead  []float64 `json:"strong_read"`
+		WeakWrite   []float64 `json:"weak_write"`
+		WeakRead    []float64 `json:"weak_read"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("Failed to unmarshal JSON: %v", err)
+	}
+
+	// Verify sorted
+	if len(result.StrongWrite) != 3 || result.StrongWrite[0] != 10.0 || result.StrongWrite[2] != 30.0 {
+		t.Errorf("StrongWrite not sorted correctly: %v", result.StrongWrite)
+	}
+	if len(result.StrongRead) != 2 || result.StrongRead[0] != 5.0 || result.StrongRead[1] != 15.0 {
+		t.Errorf("StrongRead not sorted correctly: %v", result.StrongRead)
+	}
+	if len(result.WeakWrite) != 1 || result.WeakWrite[0] != 2.0 {
+		t.Errorf("WeakWrite incorrect: %v", result.WeakWrite)
+	}
+	if len(result.WeakRead) != 0 {
+		t.Errorf("WeakRead should be empty: %v", result.WeakRead)
+	}
+}
+
+// TestExportLatenciesDoesNotMutateOriginal verifies export doesn't sort the original slice
+func TestExportLatenciesDoesNotMutateOriginal(t *testing.T) {
+	m := &HybridMetrics{
+		StrongWriteLatency: []float64{30.0, 10.0, 20.0},
+		StrongReadLatency:  []float64{},
+		WeakWriteLatency:   []float64{},
+		WeakReadLatency:    []float64{},
+	}
+
+	path := filepath.Join(t.TempDir(), "latencies.json")
+	if err := m.ExportLatencies(path); err != nil {
+		t.Fatalf("ExportLatencies failed: %v", err)
+	}
+
+	// Original should remain unsorted
+	if m.StrongWriteLatency[0] != 30.0 {
+		t.Errorf("Original slice was mutated: %v", m.StrongWriteLatency)
 	}
 }

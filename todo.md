@@ -4445,6 +4445,56 @@ comprehensive multi-panel figure, and LaTeX tables for copy-paste into paper.
 
 ---
 
+## Phase 66: CDF Latency Distribution Plots
+
+**Goal**: Add per-operation latency export to the benchmark framework and generate CDF
+(Cumulative Distribution Function) plots showing full latency distributions.
+CDFs reveal distribution shape, bimodality, and tail behavior that percentiles alone cannot show.
+
+- [x] **66a** Add `ExportLatencies(path)` method to `HybridMetrics` — writes sorted latency arrays to JSON [26:03:07]
+  - New method in `client/hybrid.go`: exports 4 arrays (strong_write, strong_read, weak_write, weak_read)
+  - Pre-sorts each array, uses copy to avoid mutating originals
+  - Unit tests: `TestExportLatencies`, `TestExportLatenciesDoesNotMutateOriginal`
+- [x] **66b** Add export call in `main.go` — writes `latencies-<alias>.json` after aggregation [26:03:07]
+  - Works for both single-thread and multi-thread modes
+  - Each client server produces its own latency file
+- [x] **66c** Update `run-multi-client.sh` to collect + merge latency files [26:03:07]
+  - Distributed mode: SCP latency files from remote client machines
+  - Local mode: move latency files to results directory
+  - Python merge step: combines per-client files into `latencies.json` with sorted arrays
+- [x] **66d** Create `scripts/plot-cdf.py` — CDF plotting script [26:03:07]
+  - Two-panel figure: (a) strong latency CDF, (b) weak latency CDF
+  - Standalone strong-only CDF figure for paper
+  - P50/P99 reference lines, P99.9 axis clipping for clean plots
+- [x] **66e** Create `scripts/eval-cdf-dist.sh` — focused CDF data collection script [26:03:07]
+  - Runs all 5 protocols at t=32 only (moderate load, ~2 min per protocol)
+  - Outputs to `results/eval-dist-cdf/` directory structure
+- [x] **66f** Collect CDF data on distributed cluster — all 5 protocols at t=32 [26:03:07]
+  - CURP-HO: 43,485 ops/sec, 960K samples (10MB)
+  - CURP-HT: 42,956 ops/sec, 960K samples
+  - CURP baseline: 23,274 ops/sec, 960K samples
+  - Raft-HT: 22,362 ops/sec, 960K samples
+  - Raft: 16,628 ops/sec, 960K samples
+- [x] **66g** Generate CDF figures and verify [26:03:07]
+  - `plots/cdf-latency.{pdf,png}` — 2-panel: strong + weak CDFs
+  - `plots/cdf-strong-latency.{pdf,png}` — standalone strong CDF
+
+#### Key Findings from CDF Data
+
+**Strong Latency Distribution (t=32, RTT=50ms)**:
+- CURP-HO: wide distribution 0-120ms (fast path ~50ms + slow path fallbacks)
+- CURP-HT: tight cluster 50-70ms (1 RTT fast path)
+- CURP baseline: similar to CURP-HT
+- Raft-HT: P50 ~115ms (2 RTT), wide spread to 250ms
+- Raft: P50 ~100ms, longest tail
+
+**Weak Latency Distribution**:
+- CURP-HO: nearly all <10ms (local reads dominate, 95% reads)
+- CURP-HT: **bimodal** — ~50% <5ms (local reads), step at ~100ms (weak writes via leader)
+- Raft-HT: **bimodal** — fast local reads, long tail from leader-routed writes
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task

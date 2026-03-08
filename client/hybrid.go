@@ -1,8 +1,10 @@
 package client
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -639,6 +641,38 @@ func AggregateMetrics(metrics []*HybridMetrics) *HybridMetrics {
 	}
 
 	return result
+}
+
+// ExportLatencies writes all per-operation latency arrays to a JSON file for CDF plotting.
+// The output contains sorted latency arrays (in milliseconds) grouped by operation type.
+func (m *HybridMetrics) ExportLatencies(path string) error {
+	data := struct {
+		StrongWrite []float64 `json:"strong_write"`
+		StrongRead  []float64 `json:"strong_read"`
+		WeakWrite   []float64 `json:"weak_write"`
+		WeakRead    []float64 `json:"weak_read"`
+	}{
+		StrongWrite: sortedCopy(m.StrongWriteLatency),
+		StrongRead:  sortedCopy(m.StrongReadLatency),
+		WeakWrite:   sortedCopy(m.WeakWriteLatency),
+		WeakRead:    sortedCopy(m.WeakReadLatency),
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return json.NewEncoder(f).Encode(data)
+}
+
+func sortedCopy(s []float64) []float64 {
+	if len(s) == 0 {
+		return []float64{}
+	}
+	c := make([]float64, len(s))
+	copy(c, s)
+	sort.Float64s(c)
+	return c
 }
 
 // Printer is an interface for logging output.

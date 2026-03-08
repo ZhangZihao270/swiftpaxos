@@ -143,13 +143,21 @@ func runClient(c *config.Config, verbose bool) {
 		}
 	}
 
-	// Aggregate and print metrics (for protocols using HybridBufferClient with multiple threads)
+	// Aggregate and print/export metrics
 	p := strings.ToLower(c.Protocol)
-	if numThreads > 1 && (p == "curp" || p == "curpht" || p == "curpho" || p == "raft" || p == "raftht") {
+	if p == "curp" || p == "curpht" || p == "curpho" || p == "raft" || p == "raftht" {
 		aggregated := client.AggregateMetrics(allMetrics)
-		l := dlog.New(*logFile, verbose)
-		l.Printf("Test took %v\n", maxDuration)
-		aggregated.Print(l, c.Reqs*numThreads, maxDuration)
+		if numThreads > 1 {
+			l := dlog.New(*logFile, verbose)
+			l.Printf("Test took %v\n", maxDuration)
+			aggregated.Print(l, c.Reqs*numThreads, maxDuration)
+		}
+
+		// Export raw latencies for CDF plotting
+		latPath := fmt.Sprintf("latencies-%s.json", c.Alias)
+		if err := aggregated.ExportLatencies(latPath); err != nil {
+			log.Printf("Warning: failed to export latencies to %s: %v", latPath, err)
+		}
 	}
 }
 

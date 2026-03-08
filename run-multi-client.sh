@@ -358,6 +358,19 @@ echo ""
 # Collect remote server logs (master + replicas) to local results dir
 if $DISTRIBUTED; then
     collect_remote_logs
+
+    # Collect latency JSON files from remote client machines
+    echo "Collecting latency files..."
+    for i in "${!CLIENT_ALIASES[@]}"; do
+        alias="${CLIENT_ALIASES[$i]}"
+        addr="${CLIENT_ADDRS[$i]}"
+        scp $SSH_OPTS "$SSH_USER@$addr:$WORK_DIR/latencies-${alias}.json" "$RESULTS_DIR/" 2>/dev/null || true
+    done
+else
+    # Local mode: move latency files to results dir
+    for alias in "${CLIENT_ALIASES[@]}"; do
+        [ -f "latencies-${alias}.json" ] && mv "latencies-${alias}.json" "$RESULTS_DIR/" 2>/dev/null || true
+    done
 fi
 
 # ========== MERGE RESULTS ==========
@@ -497,6 +510,34 @@ for r in client_results:
     print(f"{r['alias']}: {tp:.2f} ops/sec ({ops} ops)")
 
 PYTHON_SCRIPT
+
+# Merge per-client latency JSON files into one aggregated file
+python3 - "$RESULTS_DIR" "${CLIENT_ALIASES[@]}" << 'MERGE_LATENCIES' 2>/dev/null || true
+import sys, os, json
+
+results_dir = sys.argv[1]
+client_aliases = sys.argv[2:]
+
+merged = {"strong_write": [], "strong_read": [], "weak_write": [], "weak_read": []}
+found = 0
+for alias in client_aliases:
+    path = os.path.join(results_dir, f"latencies-{alias}.json")
+    if not os.path.exists(path):
+        continue
+    with open(path) as f:
+        data = json.load(f)
+    for key in merged:
+        merged[key].extend(data.get(key, []))
+    found += 1
+
+if found > 0:
+    for key in merged:
+        merged[key].sort()
+    out_path = os.path.join(results_dir, "latencies.json")
+    with open(out_path, "w") as f:
+        json.dump(merged, f)
+    print(f"Merged {found} latency files -> {out_path} ({sum(len(v) for v in merged.values())} samples)")
+MERGE_LATENCIES
 
 echo ""
 echo "============================================"
