@@ -80,7 +80,7 @@ def table_t_property(exp32_rows):
     lines = []
     lines.append(r'\begin{table}[t]')
     lines.append(r'\centering')
-    lines.append(r'\caption{T-property validation: strong P50 latency across weak ratios (RTT = 50\,ms, 50/50 R/W, $t$=8).}')
+    lines.append(r'\caption{T-property validation: strong P50 latency across weak ratios (RTT = 50\,ms, 95/5 R/W, $t$=8).}')
     lines.append(r'\label{tab:t-property}')
     lines.append(r'\begin{tabular}{lrrrrrl}')
     lines.append(r'\toprule')
@@ -145,7 +145,7 @@ def main():
     base = base_dir()
     exp11_csv = os.path.join(base, 'results', 'eval-dist-20260307', 'summary-exp1.1.csv')
     exp31_csv = os.path.join(base, 'results', 'eval-dist-20260307', 'summary-exp3.1.csv')
-    exp32_csv = os.path.join(base, 'results', 'eval-dist-20260307', 'summary-exp3.2.csv')
+    exp32_csv = os.path.join(base, 'results', 'eval-dist-20260307-w5', 'summary-exp3.2.csv')
     out_dir = os.path.join(base, 'plots')
 
     exp11_rows = load_csv(exp11_csv)

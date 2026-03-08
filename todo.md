@@ -4422,13 +4422,26 @@ comprehensive multi-panel figure, and LaTeX tables for copy-paste into paper.
 
 **Reason**: Previous Exp 3.2 used 50% writes, causing CURP-HT weak ops to be dominated by slow weak writes (1-2 RTT commit). With 5% writes / 95% reads, weak reads are local (<1ms) for both CURP-HT and CURP-HO, giving a fair comparison. Focus on **strong op performance stability** as weak ratio increases (T property).
 
-- [ ] **65a** Rebuild + sync binary to distributed machines (.101, .103, .104)
-- [ ] **65b** Re-run `scripts/eval-exp3.2-dist.sh` (already updated: writes=5, weakWrites=5)
-- [ ] **65c** Record results — key metrics:
-  - CURP-HT throughput should scale better with weak ratio (weak reads are local)
-  - Strong P50 should remain stable (~52ms) across all weak ratios for CURP-HT
-  - Compare CURP-HO vs CURP-HT weak read latency
-- [ ] **65d** Update Exp 3.2 results table in Phase 60.4 section
+- [x] **65a** Rebuild + sync binary to distributed machines (.101, .103, .104) [26:03:07]
+- [x] **65b** Re-run `scripts/eval-exp3.2-dist.sh` — all 15 runs passed [26:03:07]
+- [x] **65c** Record results — dramatically improved with 5% writes [26:03:07]
+  - CURP-HO w100: **452,957 ops/sec** (was 128,731 with 50% writes — 3.5x improvement)
+  - CURP-HT w100: **64,942 ops/sec** (was 8,810 — 7.4x improvement, weak reads now local)
+  - Raft-HT w100: **80,866 ops/sec** (was 13,540 — 6.0x improvement)
+  - **T property clearly satisfied**: CURP-HT strong P50 = 52-53ms, CURP-HO = 52ms (perfectly flat)
+  - Raft-HT strong P50: 85→104ms (moderate rise, still within tolerance)
+- [x] **65d** Update figures/tables with new 5% writes data, commit [26:03:07]
+  - Updated plot-exp3.2.py, plot-comprehensive.py, gen-latex-tables.py to use new CSV
+  - Regenerated Exp 3.2 latency/throughput figures and comprehensive 4-panel
+  - LaTeX T-property table now shows 52, 52, 52, 52, 52 for CURP-HO (perfectly flat)
+
+#### Distributed Exp 3.2 Results (RTT=50ms, t=8, 5% writes)
+
+| Protocol | w0 | w25 | w50 | w75 | w100 | Strong P50 stable? |
+|----------|------|-------|-------|-------|---------|-------------------|
+| Raft-HT  | 4,641 | 6,206 | 9,218 | 16,540 | 80,866 | ~moderate (85→104ms) |
+| CURP-HT  | 6,774 | 6,287 | 12,303 | 20,812 | 64,942 | **YES** (~52ms) |
+| CURP-HO  | 7,004 | 9,219 | 13,571 | 26,264 | 452,957 | **YES** (~52ms) |
 
 ---
 

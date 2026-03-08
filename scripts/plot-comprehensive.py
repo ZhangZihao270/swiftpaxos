@@ -17,7 +17,7 @@ from plot_style import *
 import numpy as np
 
 WORKLOAD_TPL = '95/5 R/W, 50% weak, Zipfian'
-WORKLOAD_T = '50/50 R/W, t=8, Zipfian'
+WORKLOAD_T = '95/5 R/W, t=8, Zipfian'
 
 def get_peak_throughput(rows, protocol):
     filtered = [r for r in rows if r['protocol'] == protocol]
@@ -38,7 +38,7 @@ def main():
     base = base_dir()
     exp11_csv = os.path.join(base, 'results', 'eval-dist-20260307', 'summary-exp1.1.csv')
     exp31_csv = os.path.join(base, 'results', 'eval-dist-20260307', 'summary-exp3.1.csv')
-    exp32_csv = os.path.join(base, 'results', 'eval-dist-20260307', 'summary-exp3.2.csv')
+    exp32_csv = os.path.join(base, 'results', 'eval-dist-20260307-w5', 'summary-exp3.2.csv')
     out_dir = os.path.join(base, 'plots')
 
     setup_style()

@@ -20,15 +20,15 @@ Raft & 21.2K & 64$\times$3 & 135 & --- & --- \\
 
 \begin{table}[t]
 \centering
-\caption{T-property validation: strong P50 latency across weak ratios (RTT = 50\,ms, 50/50 R/W, $t$=8).}
+\caption{T-property validation: strong P50 latency across weak ratios (RTT = 50\,ms, 95/5 R/W, $t$=8).}
 \label{tab:t-property}
 \begin{tabular}{lrrrrrl}
 \toprule
 Protocol & $w$=0\% & $w$=25\% & $w$=50\% & $w$=75\% & $w$=100\% & T satisfied? \\
 \midrule
-Raft-HT & 86 & 88 & 93 & 97 & 106 & Yes \\
-CURP-HT & 53 & 52 & 52 & 51 & 60 & Yes \\
-CURP-HO & 51 & 52 & 53 & 54 & 61 & Yes \\
+Raft-HT & 86 & 85 & 85 & 86 & 104 & Moderate \\
+CURP-HT & 53 & 52 & 52 & 52 & 53 & Yes \\
+CURP-HO & 52 & 52 & 52 & 52 & 52 & Yes \\
 \bottomrule
 \end{tabular}
 \end{table}
