@@ -4398,6 +4398,40 @@ Fix visual artifacts in throughput-vs-latency curves caused by post-saturation d
 
 ---
 
+## Phase 64: Paper-Ready Figures — Bar Charts, Multi-Panel, LaTeX Tables
+
+Create additional figure types for the paper: peak throughput bar charts,
+comprehensive multi-panel figure, and LaTeX tables for copy-paste into paper.
+
+- [x] **64a** Create peak throughput bar chart comparing all protocols (distributed) [26:03:07]
+  - `plots/bar-peak-throughput.{pdf,png}` — colorblind-safe bars with baseline reference line
+  - CURP-HO 64K > CURP-HT 55K > Raft-HT 37K > Baseline 32K > Raft 21K
+- [x] **64b** Create comprehensive 4-panel figure [26:03:07]
+  - `plots/comprehensive-4panel.{pdf,png}` — (a) strong latency, (b) weak latency, (c) T-property, (d) peak bars
+  - Single figure tells the complete evaluation story
+- [x] **64c** Generate LaTeX tables: throughput, T-property, latency at moderate load [26:03:07]
+  - `plots/tables.tex` — 3 tables ready for paper insertion
+  - Table 1: Peak throughput with speedup vs baseline
+  - Table 2: T-property (strong P50 across weak ratios — all satisfy T)
+  - Table 3: Latency at moderate load (t=32)
+- [x] **64d** Regenerate all figures, verify, commit [26:03:07]
+
+---
+
+### Phase 65: Re-run Exp 3.2 with 5% Writes
+
+**Reason**: Previous Exp 3.2 used 50% writes, causing CURP-HT weak ops to be dominated by slow weak writes (1-2 RTT commit). With 5% writes / 95% reads, weak reads are local (<1ms) for both CURP-HT and CURP-HO, giving a fair comparison. Focus on **strong op performance stability** as weak ratio increases (T property).
+
+- [ ] **65a** Rebuild + sync binary to distributed machines (.101, .103, .104)
+- [ ] **65b** Re-run `scripts/eval-exp3.2-dist.sh` (already updated: writes=5, weakWrites=5)
+- [ ] **65c** Record results — key metrics:
+  - CURP-HT throughput should scale better with weak ratio (weak reads are local)
+  - Strong P50 should remain stable (~52ms) across all weak ratios for CURP-HT
+  - Compare CURP-HO vs CURP-HT weak read latency
+- [ ] **65d** Update Exp 3.2 results table in Phase 60.4 section
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task

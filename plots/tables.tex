@@ -1,0 +1,51 @@
+% Auto-generated LaTeX tables for SwiftPaxos evaluation
+% Generated from distributed experiment data (RTT = 50ms)
+
+\begin{table}[t]
+\centering
+\caption{Peak throughput comparison (RTT = 50\,ms, 95/5 R/W, 50\% weak, Zipfian).}
+\label{tab:peak-throughput}
+\begin{tabular}{lrrrrr}
+\toprule
+Protocol & Peak (Kops/s) & Threads & Strong P50 (ms) & Weak P50 (ms) & vs.\ Baseline \\
+\midrule
+CURP-HO & 63.5K & 128$\times$3 & 100 & 56 & 2.0$\times$ \\
+CURP-HT & 54.6K & 128$\times$3 & 196 & 5 & 1.7$\times$ \\
+Raft-HT & 36.6K & 96$\times$3 & 202 & 19 & 1.1$\times$ \\
+CURP (baseline) & 32.0K & 64$\times$3 & 86 & --- & 1.0$\times$ \\
+Raft & 21.2K & 64$\times$3 & 135 & --- & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{T-property validation: strong P50 latency across weak ratios (RTT = 50\,ms, 50/50 R/W, $t$=8).}
+\label{tab:t-property}
+\begin{tabular}{lrrrrrl}
+\toprule
+Protocol & $w$=0\% & $w$=25\% & $w$=50\% & $w$=75\% & $w$=100\% & T satisfied? \\
+\midrule
+Raft-HT & 86 & 88 & 93 & 97 & 106 & Yes \\
+CURP-HT & 53 & 52 & 52 & 51 & 60 & Yes \\
+CURP-HO & 51 & 52 & 53 & 54 & 61 & Yes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Latency at moderate load ($t$=32, RTT = 50\,ms, 95/5 R/W, 50\% weak).}
+\label{tab:latency-moderate}
+\begin{tabular}{lrrrr}
+\toprule
+Protocol & Throughput & Strong P50 & Strong P99 & Weak P50 \\
+\midrule
+CURP-HO & 41.5K & 62\,ms & 158\,ms & 2\,ms \\
+CURP-HT & 43.2K & 60\,ms & 111\,ms & 1\,ms \\
+Raft-HT & 23.3K & 116\,ms & 216\,ms & 3\,ms \\
+CURP (baseline) & 23.2K & 61\,ms & 129\,ms & ---\,ms \\
+Raft & 15.4K & 92\,ms & 179\,ms & ---\,ms \\
+\bottomrule
+\end{tabular}
+\end{table}

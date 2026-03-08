@@ -4,7 +4,7 @@
 #
 # Sweeps weak proportion for 3 protocols at fixed concurrency on distributed machines,
 # measuring strong op throughput and latency stability.
-# Workload: 50/50 read/write, sweep weakRatio (0-100%), zipfian keys.
+# Workload: 5% write / 95% read, sweep weakRatio (0-100%), zipfian keys.
 #
 # Expected: Raft-HT and CURP-HT show flat strong throughput (T satisfied).
 #           CURP-HO shows declining strong throughput (T violated).
@@ -93,7 +93,7 @@ for protocol in "${PROTOCOLS[@]}"; do
 
         log "  [$run_idx/$total_runs] weakRatio=$ratio -> $out_dir"
 
-        apply_config "$CONFIG" "$protocol" "$ratio" "50" "50"
+        apply_config "$CONFIG" "$protocol" "$ratio" "5" "5"
 
         # Run with retry
         success=false
