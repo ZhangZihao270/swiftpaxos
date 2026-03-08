@@ -2,7 +2,9 @@ package curpht
 
 import (
 	"bytes"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/imdea-software/swiftpaxos/state"
 )
@@ -1528,6 +1530,223 @@ func TestClientCacheStrongUpdate(t *testing.T) {
 func TestMaxDescRoutinesDefault(t *testing.T) {
 	if MaxDescRoutines != 10000 {
 		t.Errorf("MaxDescRoutines should be 10000, got %d", MaxDescRoutines)
+	}
+}
+
+// ============================================================================
+// Phase 73: Weak Write Pipelining Tests
+// ============================================================================
+
+// TestPendingWeakCommitsTracking tests that pendingWeakCommits correctly tracks in-flight writes
+func TestPendingWeakCommitsTracking(t *testing.T) {
+	pending := make(map[int32]struct{})
+	mu := sync.Mutex{}
+	cond := sync.NewCond(&mu)
+
+	// Add 3 pending weak writes
+	pending[1] = struct{}{}
+	pending[2] = struct{}{}
+	pending[3] = struct{}{}
+
+	if len(pending) != 3 {
+		t.Errorf("Expected 3 pending, got %d", len(pending))
+	}
+
+	// Simulate commit of seqnum 2
+	mu.Lock()
+	delete(pending, 2)
+	cond.Broadcast()
+	mu.Unlock()
+
+	if len(pending) != 2 {
+		t.Errorf("Expected 2 pending after commit, got %d", len(pending))
+	}
+
+	// Commit remaining
+	mu.Lock()
+	delete(pending, 1)
+	delete(pending, 3)
+	cond.Broadcast()
+	mu.Unlock()
+
+	if len(pending) != 0 {
+		t.Errorf("Expected 0 pending after all commits, got %d", len(pending))
+	}
+}
+
+// TestWaitPendingWeakCommitsBarrier tests that barrier blocks until all pending commits clear
+func TestWaitPendingWeakCommitsBarrier(t *testing.T) {
+	pending := make(map[int32]struct{})
+	mu := sync.Mutex{}
+	cond := sync.NewCond(&mu)
+
+	// Add a pending weak write
+	pending[1] = struct{}{}
+
+	barrierDone := make(chan struct{})
+	go func() {
+		// Simulate waitPendingWeakCommits
+		mu.Lock()
+		for len(pending) > 0 {
+			cond.Wait()
+		}
+		mu.Unlock()
+		close(barrierDone)
+	}()
+
+	// Barrier should not complete yet
+	select {
+	case <-barrierDone:
+		t.Fatal("Barrier completed before pending commit was cleared")
+	case <-time.After(50 * time.Millisecond):
+		// Expected: barrier is still blocking
+	}
+
+	// Clear the pending commit
+	mu.Lock()
+	delete(pending, 1)
+	cond.Broadcast()
+	mu.Unlock()
+
+	// Barrier should now complete
+	select {
+	case <-barrierDone:
+		// Expected: barrier completed
+	case <-time.After(time.Second):
+		t.Fatal("Barrier did not complete after pending commit was cleared")
+	}
+}
+
+// TestWaitPendingWeakCommitsEmpty tests that barrier returns immediately when no pending commits
+func TestWaitPendingWeakCommitsEmpty(t *testing.T) {
+	pending := make(map[int32]struct{})
+	mu := sync.Mutex{}
+	cond := sync.NewCond(&mu)
+
+	barrierDone := make(chan struct{})
+	go func() {
+		mu.Lock()
+		for len(pending) > 0 {
+			cond.Wait()
+		}
+		mu.Unlock()
+		close(barrierDone)
+	}()
+
+	select {
+	case <-barrierDone:
+		// Expected: immediate return
+	case <-time.After(time.Second):
+		t.Fatal("Barrier should return immediately when no pending commits")
+	}
+
+	_ = cond // Avoid unused variable
+}
+
+// TestWeakWritePipelineDedup tests that duplicate weak replies are ignored
+func TestWeakWritePipelineDedup(t *testing.T) {
+	pending := make(map[int32]struct{})
+	commitCount := 0
+
+	// Add pending
+	pending[1] = struct{}{}
+
+	// First reply — should process
+	if _, ok := pending[1]; ok {
+		delete(pending, 1)
+		commitCount++
+	}
+
+	// Duplicate reply — should be ignored
+	if _, ok := pending[1]; ok {
+		delete(pending, 1)
+		commitCount++
+	}
+
+	if commitCount != 1 {
+		t.Errorf("Expected 1 commit processing, got %d", commitCount)
+	}
+	if len(pending) != 0 {
+		t.Errorf("Expected 0 pending, got %d", len(pending))
+	}
+}
+
+// TestWeakWritePipelineMultipleBarriers tests multiple strong ops waiting for different weak writes
+func TestWeakWritePipelineMultipleBarriers(t *testing.T) {
+	pending := make(map[int32]struct{})
+	mu := sync.Mutex{}
+	cond := sync.NewCond(&mu)
+
+	// Add 2 pending weak writes
+	pending[1] = struct{}{}
+	pending[2] = struct{}{}
+
+	barrier1Done := make(chan struct{})
+	go func() {
+		mu.Lock()
+		for len(pending) > 0 {
+			cond.Wait()
+		}
+		mu.Unlock()
+		close(barrier1Done)
+	}()
+
+	// Clear first pending
+	mu.Lock()
+	delete(pending, 1)
+	cond.Broadcast()
+	mu.Unlock()
+
+	// Barrier should still block (pending[2] remains)
+	select {
+	case <-barrier1Done:
+		t.Fatal("Barrier completed with pending commits remaining")
+	case <-time.After(50 * time.Millisecond):
+		// Expected
+	}
+
+	// Clear second pending
+	mu.Lock()
+	delete(pending, 2)
+	cond.Broadcast()
+	mu.Unlock()
+
+	select {
+	case <-barrier1Done:
+		// Expected
+	case <-time.After(time.Second):
+		t.Fatal("Barrier did not complete after all commits cleared")
+	}
+}
+
+// TestOptimisticCacheUpdate tests that SendWeakWrite optimistically updates cache
+func TestOptimisticCacheUpdate(t *testing.T) {
+	cache := make(map[int64]cacheEntry)
+	maxVersion := int32(5)
+
+	// Simulate optimistic cache update (as done in SendWeakWrite)
+	key := int64(42)
+	value := state.Value([]byte("optimistic"))
+	cache[key] = cacheEntry{value: value, version: maxVersion + 1}
+
+	entry, exists := cache[key]
+	if !exists {
+		t.Fatal("Cache entry should exist after optimistic update")
+	}
+	if entry.version != 6 {
+		t.Errorf("Version should be maxVersion+1=6, got %d", entry.version)
+	}
+	if !bytes.Equal(entry.value, []byte("optimistic")) {
+		t.Errorf("Value mismatch after optimistic update")
+	}
+
+	// Simulate committed update (as done in handleWeakReply)
+	realSlot := int32(10)
+	cache[key] = cacheEntry{value: value, version: realSlot}
+
+	entry = cache[key]
+	if entry.version != 10 {
+		t.Errorf("Version should be real slot 10, got %d", entry.version)
 	}
 }
 

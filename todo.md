@@ -4775,8 +4775,8 @@ Total: ~60 runs, ~60-90 min (including startup/cooldown).
 
 #### Phase 72.4: Commit and Push
 
-- [ ] **72.4a** Commit scripts, results, and figures
-- [ ] **72.4b** Push
+- [x] **72.4a** Commit scripts, results, and figures — 30 files, 1202 insertions ✅ (2026-03-08)
+- [x] **72.4b** Push — `81632f5` ✅ (2026-03-08)
 
 ---
 
@@ -4788,6 +4788,63 @@ Total: ~60 runs, ~60-90 min (including startup/cooldown).
 | Exp 3.1 | CURP-HO, CURP-HT, CURP baseline | 9 thread counts | 27 |
 | Exp 3.2 | Raft-HT, CURP-HT, CURP-HO | 5 weak ratios | 15 |
 | **Total** | | | **60** |
+
+---
+
+### Phase 73: CURP-HT Weak Write Pipeline Optimization + 5-Replica Re-evaluation
+
+**Motivation**: In 5-replica Exp 3.1, CURP-HT peaks at 47K ops/s — nearly identical to Raft-HT (45K). Analysis shows the bottleneck is weak writes waiting for leader commit (2-RTT ~100ms per weak write), which blocks the client pipeline and adds leader pressure. CURP-HO avoids this because bound replica replies immediately.
+
+**Optimization**: Pipeline weak writes — send MWeakPropose to leader without blocking, continue sending subsequent weak ops. Only barrier-wait for all pending weak writes to commit **before** issuing the next **strong** op. This ensures strong ops see all same-session weak writes (correctness), while consecutive weak ops don't block each other.
+
+**Correctness argument**: Strong ops require session ordering (must see prior weak writes). By barrier-waiting before strong ops, all pending weak writes are committed before the strong Propose broadcasts to all replicas. Weak-to-weak ordering is handled by CausalDep chaining. No protocol change needed — only client-side flow control.
+
+---
+
+#### Phase 73.1: Implement Weak Write Pipelining in CURP-HT Client
+
+- [x] **73.1a** In `curp-ht/client.go`, modify `SendWeakWrite`: [26:03:08, 15:00]
+  - Send MWeakPropose to leader (unchanged)
+  - Do NOT wait for MWeakReply — call `RegisterReply` immediately with `state.NIL()`
+  - Track seqnum in a `pendingWeakCommits` set (new field)
+  - Update `localCache` immediately with provisional version
+
+- [x] **73.1b** Add `waitPendingWeakCommits()` method: [26:03:08, 15:00]
+  - Block until all entries in `pendingWeakCommits` have received MWeakReply
+  - Use sync.Cond for notification
+
+- [x] **73.1c** In `SendStrongWrite` and `SendStrongRead`, call `waitPendingWeakCommits()` before sending the strong Propose. [26:03:08, 15:00]
+
+- [x] **73.1d** In `handleWeakReply`, remove `RegisterReply` call (already delivered). Instead: [26:03:08, 15:00]
+  - Update `localCache` with committed slot (real version replaces provisional)
+  - Remove from `pendingWeakCommits`
+  - Signal the condition variable
+
+- [x] **73.1e** Run `go test ./curp-ht/` — all 58 tests pass including 6 new pipelining tests. Full suite `go test ./...` passes. [26:03:08, 15:30]
+
+---
+
+#### Phase 73.2: Run 5-Replica Experiments
+
+- [ ] **73.2a** Build and deploy: `go build -o swiftpaxos . && rsync` to .101/.103/.104
+- [ ] **73.2b** Run Exp 3.1 (throughput scaling): CURP-HT with threads 1,2,4,8,16,32,64,96,128
+  ```bash
+  bash scripts/eval-exp3.1-5r-dist.sh results/eval-5r-phase73-$(date +%Y%m%d)
+  ```
+- [ ] **73.2c** Run Exp 3.2 (weak ratio sweep): CURP-HT with w=0,25,50,75,100
+  ```bash
+  bash scripts/eval-exp3.2-5r-dist.sh results/eval-5r-phase73-$(date +%Y%m%d)
+  ```
+
+---
+
+#### Phase 73.3: Compare Results
+
+- [ ] **73.3a** Compare CURP-HT peak throughput: before (47K) vs after
+- [ ] **73.3b** Compare S-P50 at high load: before (283ms at t=96) vs after (expect ~100ms)
+- [ ] **73.3c** Compare W-P50: before (0.17ms reads, 103ms writes P99) vs after (expect all ~0.17ms)
+- [ ] **73.3d** Verify T-property still holds in Exp 3.2 (S-P50 stable across weak ratios)
+- [ ] **73.3e** Commit results
 
 ---
 

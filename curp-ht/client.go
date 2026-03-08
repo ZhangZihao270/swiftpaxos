@@ -56,6 +56,10 @@ type Client struct {
 
 	// Mutex for concurrent map access (needed for pipelining)
 	mu sync.Mutex
+
+	// Weak write pipelining: track in-flight weak writes awaiting leader commit
+	pendingWeakCommits map[int32]struct{}
+	weakCommitCond     *sync.Cond
 }
 
 var (
@@ -95,8 +99,11 @@ func NewClient(b *client.BufferClient, repNum, reqNum, pclients int) *Client {
 		weakPendingKeys:   make(map[int32]int64),
 		weakPendingValues: make(map[int32]state.Value),
 		strongPendingKeys: make(map[int32]int64),
-		localCache:        make(map[int64]cacheEntry),
+		localCache:         make(map[int64]cacheEntry),
+		pendingWeakCommits: make(map[int32]struct{}),
 	}
+
+	c.weakCommitCond = sync.NewCond(&c.mu)
 
 	c.lastCmdId = CommandId{
 		ClientId: c.ClientId,
@@ -293,10 +300,14 @@ func (c *Client) handleAcks(leaderMsg interface{}, msgs []interface{}) {
 	c.Println("Slow Paths:", c.slowPaths)
 }
 
-// handleWeakReply handles weak write commit reply from leader (post-commit, includes Slot)
+// handleWeakReply handles weak write commit reply from leader (post-commit, includes Slot).
+// Since pipelined weak writes already called RegisterReply in SendWeakWrite,
+// this handler only updates the cache and signals the barrier condition variable.
 func (c *Client) handleWeakReply(rep *MWeakReply) {
 	c.mu.Lock()
-	if _, exists := c.delivered[rep.CmdId.SeqNum]; exists {
+
+	// Dedup: if not in pendingWeakCommits, already processed or unknown
+	if _, pending := c.pendingWeakCommits[rep.CmdId.SeqNum]; !pending {
 		c.mu.Unlock()
 		return
 	}
@@ -314,7 +325,7 @@ func (c *Client) handleWeakReply(rep *MWeakReply) {
 	// Update leader (reply always comes from leader)
 	c.leader = rep.Replica
 
-	// Update local cache with committed write value + slot
+	// Update local cache with committed write value + real slot version
 	if key, hasKey := c.weakPendingKeys[rep.CmdId.SeqNum]; hasKey {
 		if val, hasVal := c.weakPendingValues[rep.CmdId.SeqNum]; hasVal {
 			c.localCache[key] = cacheEntry{value: val, version: rep.Slot}
@@ -326,12 +337,12 @@ func (c *Client) handleWeakReply(rep *MWeakReply) {
 		delete(c.weakPendingKeys, rep.CmdId.SeqNum)
 	}
 
-	// Weak write completes upon receiving leader's commit reply
-	c.val = state.Value(rep.Rep)
-	c.delivered[rep.CmdId.SeqNum] = struct{}{}
+	// Mark as no longer pending commit — signal waitPendingWeakCommits
 	delete(c.weakPending, rep.CmdId.SeqNum)
+	delete(c.pendingWeakCommits, rep.CmdId.SeqNum)
+	c.weakCommitCond.Broadcast()
 	c.mu.Unlock()
-	c.RegisterReply(c.val, rep.CmdId.SeqNum)
+	// Note: RegisterReply was already called in SendWeakWrite (pipelining)
 }
 
 // handleWeakReadReply handles weak read reply from nearest replica
@@ -374,7 +385,10 @@ func (c *Client) handleWeakReadReply(rep *MWeakReadReply) {
 }
 
 // SendWeakWrite sends a weak consistency write operation to leader only.
-// Leader replicates (1 RTT for commit), then replies. Execution is background.
+// The write is pipelined: RegisterReply is called immediately so the benchmark
+// loop can proceed to the next command without waiting for the leader's commit.
+// The leader commit is tracked in pendingWeakCommits; strong ops barrier-wait
+// for all pending weak commits before proceeding (correctness guarantee).
 func (c *Client) SendWeakWrite(key int64, value []byte) int32 {
 	seqnum := c.getNextSeqnum()
 
@@ -384,6 +398,9 @@ func (c *Client) SendWeakWrite(key int64, value []byte) int32 {
 	c.weakPendingKeys[seqnum] = key
 	c.weakPendingValues[seqnum] = value
 	c.lastWeakWriteSeqNum = seqnum
+	c.pendingWeakCommits[seqnum] = struct{}{}
+	// Optimistic cache update with provisional version
+	c.localCache[key] = cacheEntry{value: value, version: c.maxVersion + 1}
 	leader := c.leader
 	c.mu.Unlock()
 
@@ -403,6 +420,9 @@ func (c *Client) SendWeakWrite(key int64, value []byte) int32 {
 	if leader != -1 {
 		c.SendMsg(leader, c.cs.weakProposeRPC, p)
 	}
+
+	// Pipeline: complete immediately from the benchmark's perspective
+	c.RegisterReply(state.NIL(), seqnum)
 	return seqnum
 }
 
@@ -441,11 +461,24 @@ func (c *Client) getNextSeqnum() int32 {
 	return seqnum
 }
 
+// waitPendingWeakCommits blocks until all pipelined weak writes have been
+// committed by the leader. Must be called before any strong op to ensure
+// session ordering: strong ops must see all prior weak writes from the same session.
+func (c *Client) waitPendingWeakCommits() {
+	c.mu.Lock()
+	for len(c.pendingWeakCommits) > 0 {
+		c.weakCommitCond.Wait()
+	}
+	c.mu.Unlock()
+}
+
 // HybridClient interface implementation
 
 // SendStrongWrite sends a linearizable write command (delegates to base SendWrite).
 // Tracks the key for local cache updates on completion.
+// Barrier-waits for all pipelined weak writes to commit first.
 func (c *Client) SendStrongWrite(key int64, value []byte) int32 {
+	c.waitPendingWeakCommits()
 	seqnum := c.SendWrite(key, value)
 	c.mu.Lock()
 	c.strongPendingKeys[seqnum] = key
@@ -455,7 +488,9 @@ func (c *Client) SendStrongWrite(key int64, value []byte) int32 {
 
 // SendStrongRead sends a linearizable read command (delegates to base SendRead).
 // Tracks the key for local cache updates on completion.
+// Barrier-waits for all pipelined weak writes to commit first.
 func (c *Client) SendStrongRead(key int64) int32 {
+	c.waitPendingWeakCommits()
 	seqnum := c.SendRead(key)
 	c.mu.Lock()
 	c.strongPendingKeys[seqnum] = key
