@@ -4358,7 +4358,28 @@ Data sources: `results/eval-dist-20260307/summary-exp*.csv` and `results/eval-lo
   - Raft-HT shows moderate rise (86→106ms distributed, 214ms stable locally)
   - CURP-HO throughput scales dramatically: 7K→129K ops/sec at w100 distributed
 - [x] **61d** Generate all figures into `plots/` directory, verify visually [26:03:07]
-- [ ] **61e** Commit plotting scripts and generated figures
+- [x] **61e** Commit plotting scripts and generated figures (commit adc62e8) [26:03:07]
+
+---
+
+## Phase 62: Figure Improvements — P99, Hero Figure, Colorblind-Safe
+
+Improve Phase 61 figures for publication readiness. P99 data exists in CSVs but was not plotted.
+
+- [x] **62a** Update all plot scripts with colorblind-safe palette (Wong palette) [26:03:07]
+  - Created `scripts/plot_style.py` shared module with Wong's Nature-recommended palette
+  - Red=Raft-HT, Orange=Raft, Blue=CURP-HO, Green=CURP-HT, Purple=CURP-baseline
+- [x] **62b** Add P99 latency curves to Exp 1.1 and Exp 3.1 (separate P99 figures) [26:03:07]
+  - `exp1.1-throughput-latency-p99.{pdf,png}` — tail latency shows saturation behavior
+  - `exp3.1-throughput-latency-p99.{pdf,png}` — P99 spikes to 500-800ms at peak
+  - Exp 3.2 latency figure now includes P50 (solid) and P99 (dotted) on same plot
+- [x] **62c** Create hero figure: all protocols on one plot (distributed data only) [26:03:07]
+  - `plots/hero-all-protocols.{pdf,png}` — two panels: strong P50 + weak P50
+  - Combines Exp 1.1 (Raft family) and Exp 3.1 (CURP family) data
+  - CURP-HO highest throughput (64K), lowest strong latency (~52ms at low load)
+- [x] **62d** Improve titles with workload details (95/5 R/W, 50% weak, Zipfian) [26:03:07]
+- [x] **62e** Regenerate all figures, verify, commit [26:03:07]
+  - Total: 14 figures (7 PDF + 7 PNG) in `plots/` directory
 
 ---
 

@@ -1,0 +1,121 @@
+"""
+Shared plotting style for SwiftPaxos experiment figures.
+Uses Wong's colorblind-safe palette and consistent typography.
+"""
+
+import csv
+import os
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+
+# ── Wong colorblind-safe palette ──────────────────────────────────────
+# From: https://www.nature.com/articles/nmeth.1618
+WONG = {
+    'blue':    '#0072B2',
+    'orange':  '#E69F00',
+    'green':   '#009E73',
+    'red':     '#D55E00',
+    'purple':  '#CC79A7',
+    'cyan':    '#56B4E9',
+    'yellow':  '#F0E442',
+    'black':   '#000000',
+}
+
+# Protocol colors — distinct even for colorblind viewers
+PROTOCOL_COLORS = {
+    'raftht':        WONG['red'],
+    'raft':          WONG['orange'],
+    'curpho':        WONG['blue'],
+    'curpht':        WONG['green'],
+    'curp-baseline': WONG['purple'],
+}
+
+PROTOCOL_MARKERS = {
+    'raftht':        's',
+    'raft':          '^',
+    'curpho':        'o',
+    'curpht':        'D',
+    'curp-baseline': 'v',
+}
+
+PROTOCOL_LABELS = {
+    'raftht':        'Raft-HT',
+    'raft':          'Raft',
+    'curpho':        'CURP-HO',
+    'curpht':        'CURP-HT',
+    'curp-baseline': 'CURP (baseline)',
+}
+
+def setup_style():
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.size': 11,
+        'axes.labelsize': 13,
+        'axes.titlesize': 13,
+        'legend.fontsize': 9,
+        'xtick.labelsize': 10,
+        'ytick.labelsize': 10,
+        'figure.dpi': 300,
+        'savefig.dpi': 300,
+        'savefig.bbox': 'tight',
+        'savefig.pad_inches': 0.1,
+        'lines.linewidth': 2.0,
+        'lines.markersize': 7,
+        'axes.grid': True,
+        'grid.alpha': 0.3,
+        'grid.linestyle': '--',
+    })
+
+def load_csv(path):
+    rows = []
+    with open(path, newline='') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rows.append(row)
+    return rows
+
+def get_val(row, key):
+    """Get a float value from a CSV row, returning None for N/A."""
+    v = row.get(key, 'N/A')
+    if v == 'N/A' or v is None or v == '':
+        return None
+    return float(v)
+
+def extract_tput_latency(rows, protocol):
+    """Extract throughput-vs-latency data sorted by thread count."""
+    filtered = [r for r in rows if r['protocol'] == protocol]
+    filtered.sort(key=lambda r: int(r['threads']))
+    return {
+        'threads': [int(r['threads']) for r in filtered],
+        'throughput': [float(r['throughput']) for r in filtered],
+        's_p50': [get_val(r, 's_p50') for r in filtered],
+        's_p99': [get_val(r, 's_p99') for r in filtered],
+        'w_p50': [get_val(r, 'w_p50') for r in filtered],
+        'w_p99': [get_val(r, 'w_p99') for r in filtered],
+    }
+
+def clean_pairs(xs, ys):
+    """Filter out None/zero entries from paired lists."""
+    xc, yc = [], []
+    for x, y in zip(xs, ys):
+        if x is not None and y is not None and x > 0:
+            xc.append(x)
+            yc.append(y)
+    return xc, yc
+
+def kops_formatter(x, _):
+    """Format throughput axis as Kops/sec."""
+    return f'{x/1000:.0f}'
+
+def base_dir():
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+def save_figure(fig, out_dir, name):
+    os.makedirs(out_dir, exist_ok=True)
+    for ext in ['pdf', 'png']:
+        path = os.path.join(out_dir, f'{name}.{ext}')
+        fig.savefig(path)
+        print(f'Saved: {path}')
+    plt.close(fig)
