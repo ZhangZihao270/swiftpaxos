@@ -4842,9 +4842,55 @@ Total: ~60 runs, ~60-90 min (including startup/cooldown).
 - [x] **73.3c** Compare W-P99: before 103ms (t=1) vs after 0.90ms — **115x improvement** [26:03:08, 14:40]
   - Weak writes no longer wait for leader commit; return immediately
   - At t=32: w_p99 224ms → 21ms (11x better)
-- [x] **73.3d** T-property verified: S-P50 stable across weak ratios [26:03:08, 14:40]
-  - CURP-HT: w0=51.64ms, w25=51.68ms, w50=51.54ms, w75=51.39ms — all ~51ms
+- [x] **73.3d** T-property **BROKEN at P99**: S-P50 stable (~51ms), but S-P99 jumps 77ms→155ms when weakRatio>0 [26:03:08, 14:40]
+  - Barrier adds ~100ms to strong ops following weak writes → S-P99 ≈ barrier(100ms) + 1-RTT(50ms)
+  - Before: S-P99 stable at ~77ms across all weak ratios
 - [x] **73.3e** Commit results [26:03:08, 14:45]
+
+**Conclusion**: Phase 73 optimization **FAILED** — breaks T-property at P99. Weak write pipelining with barrier-before-strong is fundamentally incompatible with T-property guarantees. Need to revert.
+
+---
+
+### Phase 74: Revert Phase 73 + CURP-HT Throughput Analysis
+
+#### Phase 74.1: Revert Weak Write Pipelining
+
+- [x] **74.1a** Revert Phase 73.1 code changes in `curp-ht/client.go` and `curp-ht/curp-ht_test.go` [26:03:08, 15:00]
+  - Used `git checkout 583e58d~1 -- curp-ht/client.go curp-ht/curp-ht_test.go`
+- [x] **74.1b** Run `go test ./curp-ht/` — 52 tests pass (6 pipelining tests removed) [26:03:08, 15:00]
+- [x] **74.1c** Build verified, full suite `go test ./...` passes [26:03:08, 15:00]
+- [x] **74.1d** Commit revert [26:03:08, 15:05]
+
+---
+
+#### Phase 74.2: CURP-HT Throughput Limitation Analysis
+
+**Why CURP-HT (47K) can't match CURP-HO (91K) — this is a structural limitation, not a bug.**
+
+Root cause chain:
+1. T-property requires: weak ops must not affect strong op latency
+2. → weak writes must wait for leader commit before returning (否则 barrier 破坏 T-property)
+3. → weak writes occupy client pipeline slots for ~100ms (2-RTT)
+4. → at high load, strong ops queue at leader, S-P50 grows unboundedly (373ms at t=128)
+5. → each strong op takes longer → per-thread throughput drops → total throughput caps at ~47K
+
+CURP-HO avoids this because weak ops return from bound replica in <1ms (O-property), never blocking the pipeline. But CURP-HO sacrifices T-property (S-P50 degrades +11% at high weak ratio).
+
+**This is the HOT theorem trade-off**: CURP-HT chooses H+T (sacrificing O for weak writes), CURP-HO chooses H+O (sacrificing T at tail). Neither can have all three.
+
+**Replica-side optimizations — marginal gains only (~10-30%), cannot close the 2x gap:**
+
+1. **Accept/Commit batching**: Buffer multiple Accept messages into single network write instead of per-command flush. Reduces syscall overhead. Est. ~10-15% throughput gain.
+
+2. **Goroutine pooling**: Replace per-command `go handleDesc()` + `go asyncReplicateWeak()` with fixed worker pool. Reduces scheduling overhead at high concurrency. Est. ~5-10%.
+
+3. **Separate weak/strong Accept channels**: Dedicated network connections for weak vs strong replication to avoid head-of-line blocking. Est. ~5%.
+
+4. **Conflict detection optimization**: `leaderUnsync` uses concurrent map; optimize to reduce lock contention. Est. ~5%.
+
+These are all constant-factor improvements. The 2x gap with CURP-HO is structural (pipeline slot utilization) and cannot be closed by replica optimizations alone.
+
+**Recommendation**: Accept CURP-HT's throughput as the cost of T-property. The value of CURP-HT is its latency guarantee (S-P50 stable at 51ms regardless of weak ratio), not peak throughput. In the paper, position this as an explicit trade-off in the HOT design space.
 
 ---
 
