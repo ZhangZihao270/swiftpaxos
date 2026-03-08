@@ -4383,6 +4383,21 @@ Improve Phase 61 figures for publication readiness. P99 data exists in CSVs but 
 
 ---
 
+## Phase 63: Figure Polish — Pareto Frontier, Annotations, Cleanup
+
+Fix visual artifacts in throughput-vs-latency curves caused by post-saturation degradation.
+
+- [x] **63a** Truncate throughput-latency curves at peak throughput (Pareto frontier) [26:03:07]
+  - Added `pareto_frontier()` helper to `plot_style.py`
+  - Applied to Exp 1.1, 3.1, and hero figure — eliminates visual loops
+  - Keeps all data up to and including peak throughput point
+- [x] **63b** Add peak throughput annotations to hero figure [26:03:07]
+  - Peak labels: CURP-HO 64K, CURP-HT 55K, Raft-HT 37K, CURP baseline 32K, Raft 21K
+- [x] **63c** Add `__pycache__/` to .gitignore [26:03:07]
+- [x] **63d** Regenerate all figures, verify, commit [26:03:07]
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task

@@ -105,6 +105,18 @@ def clean_pairs(xs, ys):
             yc.append(y)
     return xc, yc
 
+def pareto_frontier(xs, ys):
+    """Keep only points up to and including peak throughput.
+
+    For throughput-vs-latency curves, after peak throughput adding more
+    threads degrades both throughput and latency, creating visual loops.
+    This trims to the Pareto-optimal prefix.
+    """
+    if not xs:
+        return xs, ys
+    peak_idx = max(range(len(xs)), key=lambda i: xs[i])
+    return xs[:peak_idx + 1], ys[:peak_idx + 1]
+
 def kops_formatter(x, _):
     """Format throughput axis as Kops/sec."""
     return f'{x/1000:.0f}'

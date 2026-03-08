@@ -23,14 +23,16 @@ def plot_subplot(ax, rows, rtt_label, percentile='p50'):
         marker = PROTOCOL_MARKERS[proto]
         label = PROTOCOL_LABELS[proto]
 
-        # Strong ops (solid)
+        # Strong ops (solid) — trim past peak throughput
         x, y = clean_pairs(data['throughput'], data[s_key])
+        x, y = pareto_frontier(x, y)
         ax.plot(x, y, color=color, marker=marker,
                 label=f'{label} (strong)', zorder=3)
 
         # Weak ops (dashed) — only for hybrid protocols
         if proto == 'raftht':
             x, y = clean_pairs(data['throughput'], data[w_key])
+            x, y = pareto_frontier(x, y)
             if x:
                 ax.plot(x, y, color=WONG['cyan'], marker='o', markersize=5,
                         linestyle='--', label=f'{label} (weak)', zorder=3)

@@ -19,8 +19,9 @@ bin/
 *.iml
 results/
 
-# Python venv
+# Python venv and cache
 .venv/
+__pycache__/
 
 # TLA+ tools (downloaded at runtime)
 tla/tla2tools.jar
