@@ -4826,25 +4826,25 @@ Total: ~60 runs, ~60-90 min (including startup/cooldown).
 
 #### Phase 73.2: Run 5-Replica Experiments
 
-- [ ] **73.2a** Build and deploy: `go build -o swiftpaxos . && rsync` to .101/.103/.104
-- [ ] **73.2b** Run Exp 3.1 (throughput scaling): CURP-HT with threads 1,2,4,8,16,32,64,96,128
-  ```bash
-  bash scripts/eval-exp3.1-5r-dist.sh results/eval-5r-phase73-$(date +%Y%m%d)
-  ```
-- [ ] **73.2c** Run Exp 3.2 (weak ratio sweep): CURP-HT with w=0,25,50,75,100
-  ```bash
-  bash scripts/eval-exp3.2-5r-dist.sh results/eval-5r-phase73-$(date +%Y%m%d)
-  ```
+- [x] **73.2a** Build and deploy: `go build -o swiftpaxos-dist . && rsync` to .101/.103/.104 [26:03:08, 12:56]
+- [x] **73.2b** Run Exp 3.1 (throughput scaling): all protocols, threads 1-128 [26:03:08, 14:06]
+  - CURP-HO peak: 92.6K (t=128), CURP-HT peak: 47.5K (t=128), Baseline peak: 28.5K (t=128)
+- [x] **73.2c** Run Exp 3.2 (weak ratio sweep): raftht, curpht, curpho, w=0,25,50,75,100 [26:03:08, 14:38]
+  - CURP-HT w100 throughput: 514.9K ops/s (pipelined weak writes return instantly)
 
 ---
 
 #### Phase 73.3: Compare Results
 
-- [ ] **73.3a** Compare CURP-HT peak throughput: before (47K) vs after
-- [ ] **73.3b** Compare S-P50 at high load: before (283ms at t=96) vs after (expect ~100ms)
-- [ ] **73.3c** Compare W-P50: before (0.17ms reads, 103ms writes P99) vs after (expect all ~0.17ms)
-- [ ] **73.3d** Verify T-property still holds in Exp 3.2 (S-P50 stable across weak ratios)
-- [ ] **73.3e** Commit results
+- [x] **73.3a** Compare CURP-HT peak throughput: before 47K vs after 47.5K — **same** (leader bottleneck) [26:03:08, 14:40]
+- [x] **73.3b** Compare S-P50 at high load: before 283ms (t=96) vs after 135ms — **52% improvement** [26:03:08, 14:40]
+  - Barrier resolves quickly since pending weak commits are in-flight to leader
+- [x] **73.3c** Compare W-P99: before 103ms (t=1) vs after 0.90ms — **115x improvement** [26:03:08, 14:40]
+  - Weak writes no longer wait for leader commit; return immediately
+  - At t=32: w_p99 224ms → 21ms (11x better)
+- [x] **73.3d** T-property verified: S-P50 stable across weak ratios [26:03:08, 14:40]
+  - CURP-HT: w0=51.64ms, w25=51.68ms, w50=51.54ms, w75=51.39ms — all ~51ms
+- [x] **73.3e** Commit results [26:03:08, 14:45]
 
 ---
 
