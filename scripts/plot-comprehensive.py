@@ -39,6 +39,7 @@ def main():
     exp11_csv = os.path.join(base, 'results', 'eval-dist-20260307', 'summary-exp1.1.csv')
     exp31_csv = os.path.join(base, 'results', 'eval-dist-20260307', 'summary-exp3.1.csv')
     exp32_csv = os.path.join(base, 'results', 'eval-dist-20260307-w5', 'summary-exp3.2.csv')
+    epaxos_csv = os.path.join(base, 'results', 'eval-dist-20260307-w5', 'summary-epaxos.csv')
     out_dir = os.path.join(base, 'plots')
 
     setup_style()
@@ -47,13 +48,15 @@ def main():
     exp11_rows = load_csv(exp11_csv)
     exp31_rows = load_csv(exp31_csv)
     exp32_rows = load_csv(exp32_csv)
+    epaxos_rows = load_csv_optional(epaxos_csv)
 
     fig, ((ax_a, ax_b), (ax_c, ax_d)) = plt.subplots(2, 2, figsize=(12, 9))
 
     # ── Panel (a): Strong P50 vs Throughput ────────────────────────────
     for proto, src_rows in [('curpho', exp31_rows), ('curpht', exp31_rows),
                              ('curp-baseline', exp31_rows),
-                             ('raftht', exp11_rows), ('raft', exp11_rows)]:
+                             ('raftht', exp11_rows), ('raft', exp11_rows),
+                             ('epaxos', epaxos_rows)]:
         data = extract_tput_latency(src_rows, proto)
         x, y = clean_pairs(data['throughput'], data['s_p50'])
         x, y = pareto_frontier(x, y)
@@ -111,6 +114,7 @@ def main():
         ('CURP-HT',    'curpht',        exp31_rows),
         ('Raft-HT',    'raftht',        exp11_rows),
         ('CURP\n(base)', 'curp-baseline', exp31_rows),
+        ('EPaxos',     'epaxos',         epaxos_rows),
         ('Raft',       'raft',           exp11_rows),
     ]
 
@@ -118,8 +122,11 @@ def main():
     peaks = []
     colors = []
     for label, proto, rows in protocols:
+        peak = get_peak_throughput(rows, proto)
+        if peak == 0:
+            continue
         names.append(label)
-        peaks.append(get_peak_throughput(rows, proto) / 1000)
+        peaks.append(peak / 1000)
         colors.append(PROTOCOL_COLORS[proto])
 
     x_pos = np.arange(len(names))

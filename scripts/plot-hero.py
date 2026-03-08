@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Hero Figure: All Protocols — Throughput vs Latency (Distributed)
-Single figure combining Exp 1.1 and 3.1 data to show the complete
-HOT trade-off landscape. Shows strong P50 latency for all 5 protocols.
+Single figure combining Exp 1.1, 3.1, and EPaxos data to show the complete
+HOT trade-off landscape. Shows strong P50 latency for all 6 protocols.
 Curves trimmed at peak throughput. Peak annotated.
 """
 
@@ -30,11 +30,13 @@ def main():
     base = base_dir()
     exp11_csv = os.path.join(base, 'results', 'eval-dist-20260307', 'summary-exp1.1.csv')
     exp31_csv = os.path.join(base, 'results', 'eval-dist-20260307', 'summary-exp3.1.csv')
+    epaxos_csv = os.path.join(base, 'results', 'eval-dist-20260307-w5', 'summary-epaxos.csv')
     out_dir = os.path.join(base, 'plots')
 
     setup_style()
     exp11_rows = load_csv(exp11_csv)
     exp31_rows = load_csv(exp31_csv)
+    epaxos_rows = load_csv_optional(epaxos_csv)
 
     fig, (ax_strong, ax_weak) = plt.subplots(1, 2, figsize=(13, 5))
 
@@ -46,11 +48,13 @@ def main():
         'curp-baseline': (5, -15),
         'raftht': (5, 8),
         'raft': (5, -15),
+        'epaxos': (5, -15),
     }
 
     for proto, src_rows in [('curpho', exp31_rows), ('curpht', exp31_rows),
                              ('curp-baseline', exp31_rows),
-                             ('raftht', exp11_rows), ('raft', exp11_rows)]:
+                             ('raftht', exp11_rows), ('raft', exp11_rows),
+                             ('epaxos', epaxos_rows)]:
         data = extract_tput_latency(src_rows, proto)
         x, y = clean_pairs(data['throughput'], data['s_p50'])
         x, y = pareto_frontier(x, y)

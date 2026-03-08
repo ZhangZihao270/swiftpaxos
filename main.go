@@ -16,6 +16,7 @@ import (
 	curpht "github.com/imdea-software/swiftpaxos/curp-ht"
 	curpho "github.com/imdea-software/swiftpaxos/curp-ho"
 	"github.com/imdea-software/swiftpaxos/dlog"
+	"github.com/imdea-software/swiftpaxos/epaxos"
 	"github.com/imdea-software/swiftpaxos/master"
 	"github.com/imdea-software/swiftpaxos/raft"
 	raftht "github.com/imdea-software/swiftpaxos/raft-ht"
@@ -145,7 +146,7 @@ func runClient(c *config.Config, verbose bool) {
 
 	// Aggregate and print/export metrics
 	p := strings.ToLower(c.Protocol)
-	if p == "curp" || p == "curpht" || p == "curpho" || p == "raft" || p == "raftht" {
+	if p == "curp" || p == "curpht" || p == "curpho" || p == "raft" || p == "raftht" || p == "epaxos" {
 		aggregated := client.AggregateMetrics(allMetrics)
 		if numThreads > 1 {
 			l := dlog.New(*logFile, verbose)
@@ -277,6 +278,13 @@ func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads i
 		}
 		hbc := client.NewHybridBufferClient(b, c.WeakRatio, weakWrites)
 		hbc.SetHybridClient(rafthtCl)
+		printResults := (numThreads == 1)
+		hbc.HybridLoopWithOptions(printResults)
+		return hbc.GetMetrics(), hbc.GetDuration()
+	} else if p == "epaxos" {
+		epaxosCl := epaxos.NewClient(b)
+		hbc := client.NewHybridBufferClient(b, 0, 0) // weakRatio=0: all strong
+		hbc.SetHybridClient(epaxosCl)
 		printResults := (numThreads == 1)
 		hbc.HybridLoopWithOptions(printResults)
 		return hbc.GetMetrics(), hbc.GetDuration()

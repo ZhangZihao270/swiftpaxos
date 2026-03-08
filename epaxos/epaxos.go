@@ -165,6 +165,9 @@ func New(alias string, id int, peerAddrList []string, exec, beacon, durable bool
 
 	r.Beacon = beacon
 	r.Durable = durable
+	// Reply at commit time (not execution time) to avoid stalls from
+	// pending dependency resolution in the SCC-based execution engine.
+	r.Dreply = false
 
 	for i := 0; i < r.N; i++ {
 		r.InstanceSpace[i] = make([]*Instance, MAX_INSTANCE) // FIXME

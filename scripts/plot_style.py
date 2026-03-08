@@ -30,6 +30,7 @@ PROTOCOL_COLORS = {
     'curpho':        WONG['blue'],
     'curpht':        WONG['green'],
     'curp-baseline': WONG['purple'],
+    'epaxos':        WONG['cyan'],
 }
 
 PROTOCOL_MARKERS = {
@@ -38,6 +39,7 @@ PROTOCOL_MARKERS = {
     'curpho':        'o',
     'curpht':        'D',
     'curp-baseline': 'v',
+    'epaxos':        'P',
 }
 
 PROTOCOL_LABELS = {
@@ -46,7 +48,14 @@ PROTOCOL_LABELS = {
     'curpho':        'CURP-HO',
     'curpht':        'CURP-HT',
     'curp-baseline': 'CURP (baseline)',
+    'epaxos':        'EPaxos',
 }
+
+def load_csv_optional(path):
+    """Load CSV if file exists, return empty list otherwise."""
+    if not os.path.exists(path):
+        return []
+    return load_csv(path)
 
 def setup_style():
     plt.rcParams.update({

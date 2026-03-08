@@ -4571,6 +4571,37 @@ and figure/table references organized for easy paper writing. Verify all figures
 
 ---
 
+## Phase 70: EPaxos Baseline Evaluation
+
+**Goal**: Add EPaxos as a strong-only baseline to the evaluation, providing an upper bound
+for leaderless consensus throughput and the tightest latency distribution comparison.
+
+- [x] **70a** Create `epaxos/client.go` — HybridClient interface (strong-only, leaderless) [26:03:07]
+  - Uses `b.ClosestId` for `WaitReplies` (leaderless, no leader routing)
+  - `SupportsWeak() = false` — all operations routed through strong path
+- [x] **70b** Wire EPaxos client into `main.go` with `HybridBufferClient` + latency export [26:03:07]
+  - Added `"epaxos"` case before generic `else` branch
+  - `NewHybridBufferClient(b, 0, 0)` — weakRatio=0
+- [x] **70c** Add `epaxos/client_test.go` — interface compliance tests [26:03:07]
+  - TestClientSupportsWeak, TestClientMarkAllSent, TestClientInterfaceCompliance
+- [x] **70d** Fix EPaxos `Dreply` stall bug in `epaxos/epaxos.go` [26:03:07]
+  - Set `r.Dreply = false` — reply at commit time, not execution time
+  - SCC-based deferred execution caused reply stalls with unresolved dependencies
+- [x] **70e** Create `scripts/eval-epaxos-dist.sh` + run distributed experiments [26:03:07]
+  - Thread sweep: 1, 2, 4, 8, 16, 32, 64, 96, 128
+  - Peak throughput: **68,870 ops/s** at t=128 (highest of all 6 protocols)
+  - Strong P50 at t=32: 56 ms (tightest distribution: P1=50, P99=77)
+- [x] **70f** Update all plotting scripts to include EPaxos [26:03:07]
+  - `plot_style.py`: color (cyan), marker ('P'), label, `load_csv_optional()` helper
+  - `plot-hero.py`, `plot-bar-peak.py`, `plot-comprehensive.py`, `plot-cdf.py`
+  - `gen-latex-tables.py`: EPaxos in all 5 tables + CSV export
+- [x] **70g** Regenerate all figures and tables with EPaxos data [26:03:07]
+  - 13+ PDFs regenerated, 5 LaTeX tables, CDF summary CSV (6 protocols)
+- [x] **70h** Update `docs/results-summary.md` with EPaxos results [26:03:07]
+  - Peak throughput table, moderate load table, CDF percentiles, HOT trade-off summary
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task

@@ -9,7 +9,7 @@ import json
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from plot_style import load_csv, get_val, base_dir
+from plot_style import load_csv, load_csv_optional, get_val, base_dir
 
 def fmt_k(v):
     """Format throughput as X.XK or X,XXX."""
@@ -32,8 +32,10 @@ def get_peak(rows, protocol):
         return None
     return max(filtered, key=lambda r: float(r['throughput']))
 
-def table_peak_throughput(exp11_rows, exp31_rows):
+def table_peak_throughput(exp11_rows, exp31_rows, epaxos_rows=None):
     """Table 1: Peak throughput comparison (distributed)."""
+    if epaxos_rows is None:
+        epaxos_rows = []
     lines = []
     lines.append(r'\begin{table}[t]')
     lines.append(r'\centering')
@@ -49,6 +51,7 @@ def table_peak_throughput(exp11_rows, exp31_rows):
         ('CURP-HT',         'curpht',        exp31_rows),
         ('Raft-HT',         'raftht',        exp11_rows),
         ('CURP (baseline)',  'curp-baseline', exp31_rows),
+        ('EPaxos',          'epaxos',         epaxos_rows),
         ('Raft',            'raft',           exp11_rows),
     ]
 
@@ -56,6 +59,8 @@ def table_peak_throughput(exp11_rows, exp31_rows):
 
     for label, proto, rows in protocols:
         row = get_peak(rows, proto)
+        if row is None:
+            continue
         tput = float(row['throughput'])
         threads = int(row['threads'])
         s_p50 = get_val(row, 's_p50')
@@ -106,8 +111,10 @@ def table_t_property(exp32_rows):
     lines.append(r'\end{table}')
     return '\n'.join(lines)
 
-def table_latency_at_saturation(exp11_rows, exp31_rows):
+def table_latency_at_saturation(exp11_rows, exp31_rows, epaxos_rows=None):
     """Table 3: Latency at moderate load (t=32, before saturation)."""
+    if epaxos_rows is None:
+        epaxos_rows = []
     lines = []
     lines.append(r'\begin{table}[t]')
     lines.append(r'\centering')
@@ -123,6 +130,7 @@ def table_latency_at_saturation(exp11_rows, exp31_rows):
         ('CURP-HT',         'curpht',        exp31_rows),
         ('Raft-HT',         'raftht',        exp11_rows),
         ('CURP (baseline)',  'curp-baseline', exp31_rows),
+        ('EPaxos',          'epaxos',         epaxos_rows),
         ('Raft',            'raft',           exp11_rows),
     ]
 
@@ -155,6 +163,12 @@ def load_cdf_latencies(base):
         if os.path.exists(path):
             with open(path) as f:
                 data[proto] = json.load(f)
+    # EPaxos CDF data from its own experiment directory
+    epaxos_path = os.path.join(base, 'results', 'eval-dist-20260307-w5',
+                                'epaxos', 'epaxos', 't32', 'latencies.json')
+    if os.path.exists(epaxos_path):
+        with open(epaxos_path) as f:
+            data['epaxos'] = json.load(f)
     return data
 
 
@@ -183,8 +197,10 @@ def table_cdf_percentiles(cdf_data):
     protocols = [
         ('CURP-HO', 'curpho'), ('CURP-HT', 'curpht'),
         ('Raft-HT', 'raftht'), ('CURP (baseline)', 'curp-baseline'),
-        ('Raft', 'raft'),
+        ('EPaxos', 'epaxos'), ('Raft', 'raft'),
     ]
+
+    last_proto = [p for _, p in protocols if p in cdf_data][-1] if cdf_data else None
 
     for label, proto in protocols:
         if proto not in cdf_data:
@@ -204,7 +220,7 @@ def table_cdf_percentiles(cdf_data):
             ps_str = ' & '.join(fmt_ms(v) for v in ps)
             lines.append(f' & Weak & {ps_str} \\\\')
 
-        lines.append(r'\midrule' if proto != 'raft' else r'\bottomrule')
+        lines.append(r'\midrule' if proto != last_proto else r'\bottomrule')
 
     # Remove the last midrule and replace with bottomrule
     if lines[-1] == r'\midrule':
@@ -232,7 +248,7 @@ def table_op_type_breakdown(cdf_data):
     protocols = [
         ('CURP-HO', 'curpho'), ('CURP-HT', 'curpht'),
         ('Raft-HT', 'raftht'), ('CURP (baseline)', 'curp-baseline'),
-        ('Raft', 'raft'),
+        ('EPaxos', 'epaxos'), ('Raft', 'raft'),
     ]
 
     for label, proto in protocols:
@@ -264,7 +280,7 @@ def export_cdf_summary_csv(cdf_data, out_path):
     protocols = [
         ('curpho', 'CURP-HO'), ('curpht', 'CURP-HT'),
         ('raftht', 'Raft-HT'), ('curp-baseline', 'CURP (baseline)'),
-        ('raft', 'Raft'),
+        ('epaxos', 'EPaxos'), ('raft', 'Raft'),
     ]
     pcts = [1, 5, 10, 25, 50, 75, 90, 95, 99, 99.9]
 
@@ -295,11 +311,13 @@ def main():
     exp11_csv = os.path.join(base, 'results', 'eval-dist-20260307', 'summary-exp1.1.csv')
     exp31_csv = os.path.join(base, 'results', 'eval-dist-20260307', 'summary-exp3.1.csv')
     exp32_csv = os.path.join(base, 'results', 'eval-dist-20260307-w5', 'summary-exp3.2.csv')
+    epaxos_csv = os.path.join(base, 'results', 'eval-dist-20260307-w5', 'summary-epaxos.csv')
     out_dir = os.path.join(base, 'plots')
 
     exp11_rows = load_csv(exp11_csv)
     exp31_rows = load_csv(exp31_csv)
     exp32_rows = load_csv(exp32_csv)
+    epaxos_rows = load_csv_optional(epaxos_csv)
 
     # Load CDF data
     cdf_data = load_cdf_latencies(base)
@@ -310,11 +328,11 @@ def main():
     tables.append('% Auto-generated LaTeX tables for SwiftPaxos evaluation')
     tables.append('% Generated from distributed experiment data (RTT = 50ms)')
     tables.append('')
-    tables.append(table_peak_throughput(exp11_rows, exp31_rows))
+    tables.append(table_peak_throughput(exp11_rows, exp31_rows, epaxos_rows))
     tables.append('')
     tables.append(table_t_property(exp32_rows))
     tables.append('')
-    tables.append(table_latency_at_saturation(exp11_rows, exp31_rows))
+    tables.append(table_latency_at_saturation(exp11_rows, exp31_rows, epaxos_rows))
 
     if cdf_data:
         tables.append('')

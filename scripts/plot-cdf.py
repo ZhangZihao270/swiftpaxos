@@ -49,7 +49,7 @@ def plot_cdf_panel(ax, data_dict, category, title):
     data_dict: {proto: latencies_json_dict}
     """
     all_p999 = []
-    for proto in ['curpho', 'curpht', 'curp-baseline', 'raftht', 'raft']:
+    for proto in ['curpho', 'curpht', 'curp-baseline', 'raftht', 'epaxos', 'raft']:
         if proto not in data_dict or data_dict[proto] is None:
             continue
         lat = data_dict[proto]
@@ -115,6 +115,9 @@ def main():
 
     setup_style()
 
+    # Load EPaxos latency from its own results directory
+    epaxos_dir = os.path.join(base, 'results', 'eval-dist-20260307-w5', 'epaxos')
+
     # Load latency data for each protocol at t=CDF_THREADS
     data = {}
     for proto, exp_dir in [
@@ -123,6 +126,7 @@ def main():
         ('curp-baseline', exp31_dir),
         ('raftht', exp11_dir),
         ('raft', exp11_dir),
+        ('epaxos', epaxos_dir),
     ]:
         lat = load_latencies(exp_dir, proto, CDF_THREADS)
         if lat is not None:

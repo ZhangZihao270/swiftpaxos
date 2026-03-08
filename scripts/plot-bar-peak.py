@@ -28,11 +28,13 @@ def main():
     base = base_dir()
     exp11_csv = os.path.join(base, 'results', 'eval-dist-20260307', 'summary-exp1.1.csv')
     exp31_csv = os.path.join(base, 'results', 'eval-dist-20260307', 'summary-exp3.1.csv')
+    epaxos_csv = os.path.join(base, 'results', 'eval-dist-20260307-w5', 'summary-epaxos.csv')
     out_dir = os.path.join(base, 'plots')
 
     setup_style()
     exp11_rows = load_csv(exp11_csv)
     exp31_rows = load_csv(exp31_csv)
+    epaxos_rows = load_csv_optional(epaxos_csv)
 
     # Collect peak throughputs
     protocols = [
@@ -40,6 +42,7 @@ def main():
         ('CURP-HT',       'curpht',        exp31_rows),
         ('Raft-HT',       'raftht',        exp11_rows),
         ('CURP\n(baseline)', 'curp-baseline', exp31_rows),
+        ('EPaxos',        'epaxos',         epaxos_rows),
         ('Raft',          'raft',           exp11_rows),
     ]
 
@@ -48,6 +51,8 @@ def main():
     colors = []
     for label, proto, rows in protocols:
         data = get_peak_throughput(rows, proto)
+        if data is None:
+            continue
         names.append(label)
         peaks.append(data['throughput'] / 1000)  # Kops/sec
         colors.append(PROTOCOL_COLORS[proto])

@@ -13,6 +13,7 @@ CURP-HO & 63.5K & 128$\times$3 & 100 & 56 & 2.0$\times$ \\
 CURP-HT & 54.6K & 128$\times$3 & 196 & 5 & 1.7$\times$ \\
 Raft-HT & 36.6K & 96$\times$3 & 202 & 19 & 1.1$\times$ \\
 CURP (baseline) & 32.0K & 64$\times$3 & 86 & --- & 1.0$\times$ \\
+EPaxos & 68.9K & 128$\times$3 & 85 & --- & 2.2$\times$ \\
 Raft & 21.2K & 64$\times$3 & 135 & --- & --- \\
 \bottomrule
 \end{tabular}
@@ -45,6 +46,7 @@ CURP-HO & 41.5K & 62\,ms & 158\,ms & 2\,ms \\
 CURP-HT & 43.2K & 60\,ms & 111\,ms & 1\,ms \\
 Raft-HT & 23.3K & 116\,ms & 216\,ms & 3\,ms \\
 CURP (baseline) & 23.2K & 61\,ms & 129\,ms & ---\,ms \\
+EPaxos & 25.3K & 56\,ms & 80\,ms & ---\,ms \\
 Raft & 15.4K & 92\,ms & 179\,ms & ---\,ms \\
 \bottomrule
 \end{tabular}
@@ -69,6 +71,8 @@ Raft-HT & Strong & 55 & 97 & 111 & 151 & 218 & 241 \\
 \midrule
 CURP (baseline) & Strong & 51 & 51 & 55 & 77 & 109 & 161 \\
 \midrule
+EPaxos & Strong & 50 & 52 & 56 & 60 & 77 & 91 \\
+\midrule
 Raft & Strong & 53 & 77 & 84 & 99 & 148 & 214 \\
 \bottomrule
 \end{tabular}
@@ -86,6 +90,7 @@ CURP-HO & 55\,ms & 55\,ms & 0.43\,ms & 0.28\,ms \\
 CURP-HT & 53\,ms & 53\,ms & 0.32\,ms & 102\,ms \\
 Raft-HT & 111\,ms & 112\,ms & 0.70\,ms & 53\,ms \\
 CURP (baseline) & 55\,ms & 55\,ms & ---\,ms & ---\,ms \\
+EPaxos & 56\,ms & 56\,ms & ---\,ms & ---\,ms \\
 Raft & 84\,ms & 84\,ms & ---\,ms & ---\,ms \\
 \bottomrule
 \end{tabular}

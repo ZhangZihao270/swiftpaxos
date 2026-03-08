@@ -14,13 +14,14 @@
 
 | Protocol | Peak (ops/s) | Threads | vs CURP baseline |
 |----------|-------------|---------|-----------------|
-| CURP-HO | 63,517 | 128x3 | **1.98x** |
+| EPaxos | 68,870 | 128x3 | **2.15x** |
+| CURP-HO | 63,517 | 128x3 | 1.98x |
 | CURP-HT | 54,628 | 128x3 | 1.71x |
 | Raft-HT | 36,638 | 96x3 | 1.14x |
 | CURP (baseline) | 32,028 | 64x3 | 1.00x |
-| Raft | 21,222 | 64x3 | --- |
+| Raft | 21,222 | 64x3 | 0.66x |
 
-**Key claim**: Hybrid consistency enables up to 2x throughput improvement over strong-only baselines (CURP-HO vs CURP baseline) by offloading weak operations from the critical consensus path.
+**Key claim**: EPaxos achieves the highest raw throughput (68.9K ops/s) due to its leaderless design, but provides only strong consistency. Hybrid consistency enables up to 2x throughput improvement over strong-only baselines (CURP-HO vs CURP baseline) by offloading weak operations from the critical consensus path.
 
 ### Latency at Moderate Load (t=32)
 
@@ -28,11 +29,12 @@
 |----------|-----------|------------|------------|----------|
 | CURP-HO | 41,543 | 62 ms | 158 ms | 2.2 ms |
 | CURP-HT | 43,208 | 60 ms | 111 ms | 1.3 ms |
+| EPaxos | 25,292 | 56 ms | 80 ms | --- |
 | CURP (baseline) | 23,171 | 61 ms | 129 ms | --- |
 | Raft-HT | 23,255 | 116 ms | 216 ms | 2.8 ms |
 | Raft | 15,403 | 92 ms | 179 ms | --- |
 
-**Key claim**: CURP-HT delivers the same strong operation P50 as strong-only CURP (60 vs 61 ms) while nearly doubling throughput (43K vs 23K ops/s). Strong latency is unaffected by adding weak operations.
+**Key claim**: EPaxos has the lowest strong P50 (56 ms) and tightest tail (P99 = 80 ms) at moderate load, reflecting its leaderless 1-RTT fast path. CURP-HT delivers the same strong P50 as strong-only CURP (60 vs 61 ms) while nearly doubling throughput (43K vs 23K ops/s). Strong latency is unaffected by adding weak operations.
 
 ---
 
@@ -73,6 +75,7 @@
 
 | Protocol | Type | P1 | P50 | P99 | P99.9 |
 |----------|------|-----|-----|------|-------|
+| EPaxos | Strong | 50 ms | 56 ms | 77 ms | 91 ms |
 | CURP-HO | Strong | 3 ms | 55 ms | 124 ms | 164 ms |
 | CURP-HO | Weak | 0.04 ms | 0.42 ms | 47 ms | 226 ms |
 | CURP-HT | Strong | 51 ms | 53 ms | 106 ms | 144 ms |
@@ -98,17 +101,20 @@
 
 ### The O vs T Trade-off
 
-|  | CURP-HO (H+O) | CURP-HT (H+T) | Raft-HT (H+T) |
-|--|---------------|---------------|---------------|
-| **Peak throughput** | 63.5K | 54.6K | 36.6K |
-| **Strong P50 @ t=32** | 62 ms | 60 ms | 116 ms |
-| **Weak P50 @ t=32** | 2.2 ms | 1.3 ms | 2.8 ms |
-| **Weak write P50** | 0.28 ms | 102 ms | 53 ms |
-| **T property** | Yes (0.7 ms) | Yes (1.9 ms) | Moderate (18 ms) |
-| **O property** | Yes | No (writes slow) | No (writes slow) |
+|  | EPaxos (Strong-only) | CURP-HO (H+O) | CURP-HT (H+T) | Raft-HT (H+T) |
+|--|---------------------|---------------|---------------|---------------|
+| **Peak throughput** | 68.9K | 63.5K | 54.6K | 36.6K |
+| **Strong P50 @ t=32** | 56 ms | 62 ms | 60 ms | 116 ms |
+| **Strong P99 @ t=32** | 80 ms | 158 ms | 111 ms | 216 ms |
+| **Weak P50 @ t=32** | --- | 2.2 ms | 1.3 ms | 2.8 ms |
+| **Weak write P50** | --- | 0.28 ms | 102 ms | 53 ms |
+| **T property** | N/A | Yes (0.7 ms) | Yes (1.9 ms) | Moderate (18 ms) |
+| **O property** | N/A | Yes | No (writes slow) | No (writes slow) |
+| **Consistency** | Linearizable | Hybrid | Hybrid | Hybrid |
 
 **Key claim**: The HOT theorem predicts that no protocol can simultaneously satisfy H, O, and T. Our experiments confirm this:
-- CURP-HO achieves H+O: optimal weak latency for all operations, and empirically also satisfies T (strong latency stable). However, this comes at the cost of wider strong latency distribution (P99 = 124 ms vs 106 ms for CURP-HT).
+- EPaxos achieves the highest throughput and tightest latency distribution (P99-P50 spread = 24 ms), but only provides strong (linearizable) consistency — it cannot serve weak operations at reduced cost.
+- CURP-HO achieves H+O: optimal weak latency for all operations, and empirically also satisfies T (strong latency stable). However, this comes at the cost of wider strong latency distribution (P99 = 124 ms vs 80 ms for EPaxos).
 - CURP-HT achieves H+T: strong latency is unaffected by weak operations, but weak writes must go through the leader (102 ms P50).
 - Raft-HT achieves H+T with a simpler protocol, but at higher baseline latency (2 RTT vs 1 RTT for strong ops).
 
@@ -118,7 +124,7 @@
 
 | # | File | Description | Use in paper |
 |---|------|-------------|-------------|
-| 1 | `hero-all-protocols.pdf` | All 5 protocols, 2 panels (strong+weak) | Main evaluation figure |
+| 1 | `hero-all-protocols.pdf` | All 6 protocols, 2 panels (strong+weak) | Main evaluation figure |
 | 2 | `comprehensive-4panel.pdf` | 4-panel summary | Alternative to hero |
 | 3 | `exp1.1-throughput-latency.pdf` | Exp 1.1 P50 (Raft family) | Case Study 1 |
 | 4 | `exp3.1-throughput-latency.pdf` | Exp 3.1 P50 (CURP family) | Case Study 3 |
@@ -137,7 +143,7 @@
 
 | # | Label | Content |
 |---|-------|---------|
-| 1 | `tab:peak-throughput` | Peak throughput comparison (5 protocols) |
+| 1 | `tab:peak-throughput` | Peak throughput comparison (6 protocols) |
 | 2 | `tab:t-property` | Strong P50 across weak ratios |
 | 3 | `tab:latency-moderate` | Latency at moderate load (t=32) |
 | 4 | `tab:cdf-percentiles` | Full percentile breakdown (P1-P99.9) |
