@@ -4338,6 +4338,30 @@ Bug fixes discovered during Phase 58 local pre-run experiments. All issues cause
 
 ---
 
+## Phase 61: Publication-Quality Figure Generation
+
+Generate paper-ready figures from the distributed experiment data (Phase 60.3c-e results).
+Data sources: `results/eval-dist-20260307/summary-exp*.csv` and `results/eval-local-20260307-final3/summary-exp*.csv`
+
+- [x] **61a** Create `scripts/plot-exp1.1.py`: Throughput-vs-latency plot for Exp 1.1 (Raft-HT vs Vanilla Raft) [26:03:07]
+  - X=throughput (Kops/sec), Y=median latency (ms)
+  - 3 curves: Raft-HT strong (blue), Raft-HT weak (light blue), Raft strong-only (orange)
+  - Output: `plots/exp1.1-throughput-latency.{pdf,png}` (2 subplots: distributed + local)
+- [x] **61b** Create `scripts/plot-exp3.1.py`: Throughput-vs-latency plot for Exp 3.1 (CURP-HO vs CURP-HT vs Baseline) [26:03:07]
+  - 5 curves: CURP-HO strong/weak, CURP-HT strong/weak, Baseline strong-only
+  - Output: `plots/exp3.1-throughput-latency.{pdf,png}` (2 subplots: distributed + local)
+- [x] **61c** Create `scripts/plot-exp3.2.py`: T Property verification plots for Exp 3.2 [26:03:07]
+  - Two separate figures (cleaner than dual-axis):
+    - Latency: X=weak ratio (%), Y=strong P50 latency → `plots/exp3.2-t-property-latency.{pdf,png}`
+    - Throughput: X=weak ratio (%), Y=throughput (Kops/sec) → `plots/exp3.2-t-property-throughput.{pdf,png}`
+  - Key finding: CURP-HT and CURP-HO both satisfy T property (flat strong latency)
+  - Raft-HT shows moderate rise (86→106ms distributed, 214ms stable locally)
+  - CURP-HO throughput scales dramatically: 7K→129K ops/sec at w100 distributed
+- [x] **61d** Generate all figures into `plots/` directory, verify visually [26:03:07]
+- [ ] **61e** Commit plotting scripts and generated figures
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task

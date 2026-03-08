@@ -19,6 +19,9 @@ bin/
 *.iml
 results/
 
+# Python venv
+.venv/
+
 # TLA+ tools (downloaded at runtime)
 tla/tla2tools.jar
 tla/states/
