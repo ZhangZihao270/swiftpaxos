@@ -4683,7 +4683,13 @@ co-located replicas still experience simulated 50ms RTT, so results remain valid
 - [x] **71i-smoke** Distributed 5-replica smoke test passed [26:03:08]
   - 5 clients × 10,000 ops = 50,000 total, 2700 ops/s at t=1
   - Strong P50: 51ms (1 RTT), Weak P50: 0.17ms (local reads)
-- [ ] **71i** Run full Exp 3.1 on 5-replica distributed setup
+- [x] **71i** Run full Exp 3.1 on 5-replica distributed setup [26:03:08]
+  - All 27 runs completed (3 protocols × 9 thread counts)
+  - CURP-HO peak: **91,281 ops/s** at t=128 (strong P50=100ms, weak P50=73ms)
+  - CURP-HT peak: **47,482 ops/s** at t=96 (strong P50=283ms, weak P50=0.62ms)
+  - Baseline peak: **27,818 ops/s** at t=128 (strong P50=332ms)
+  - CURP-HO achieves ~2x CURP-HT throughput (O-property advantage: local weak ops)
+  - Data: `results/eval-5r-20260308/summary-exp3.1.csv`
 
 ---
 
