@@ -4495,6 +4495,41 @@ CDFs reveal distribution shape, bimodality, and tail behavior that percentiles a
 
 ---
 
+## Phase 67: CDF Enhancements — Weak Breakdown + T Property Distributions
+
+**Goal**: Add per-operation-type CDF breakdown (reads vs writes) and T-property CDF
+showing how the full strong latency distribution remains stable as weak ratio increases.
+
+- [x] **67a** Add weak read/write CDF breakdown to `plot-cdf.py` [26:03:07]
+  - 3-panel figure: CURP-HO, CURP-HT, Raft-HT — weak read vs weak write CDFs
+  - `plots/cdf-weak-breakdown.{pdf,png}`
+  - Key finding: CURP-HT weak writes P50=102ms (leader path), reads P50=0.3ms (local)
+  - CURP-HO both reads and writes fast (<50ms), Raft-HT writes P50=53ms (1 RTT)
+- [x] **67b** Create `scripts/eval-exp3.2-cdf-dist.sh` — T property CDF data collection [26:03:07]
+  - Runs 3 protocols × 3 weak ratios (0%, 50%, 100%) at t=8 on distributed cluster
+  - 9 runs total, ~15 minutes
+- [x] **67c** Collect Exp 3.2 CDF data on distributed cluster [26:03:07]
+  - CURP-HO: w0=6,926, w50=13,607, w100=446,792 ops/sec
+  - CURP-HT: w0=6,789, w50=12,374, w100=65,933 ops/sec
+  - Raft-HT: w0=4,647, w50=9,239, w100=61,228 ops/sec
+- [x] **67d** Add T-property CDF figure to `plot-cdf.py` [26:03:07]
+  - 3-panel figure: overlays strong latency CDFs at w0/w50/w100 for each protocol
+  - `plots/cdf-t-property.{pdf,png}`
+  - **Key finding**: CURP-HT and CURP-HO CDFs overlap almost perfectly across all weak ratios
+    → not just P50 stays flat, the *entire distribution shape* is preserved (strong T)
+  - Raft-HT: w0 tight at ~85ms, w50/w100 shift right to ~100-130ms (moderate T degradation)
+
+#### CDF Figure Summary (Phase 66-67)
+
+| Figure | Panels | Key Insight |
+|--------|--------|-------------|
+| `cdf-latency` | Strong + Weak CDF | CURP family 50ms strong, Raft 100-115ms |
+| `cdf-strong-latency` | Strong CDF (paper) | 5 protocols compared at t=32 |
+| `cdf-weak-breakdown` | Read/Write per protocol | CURP-HT bimodal explained: reads local, writes ~100ms |
+| `cdf-t-property` | w0/w50/w100 per protocol | Distribution shape preserved for CURP-HT/HO (T property) |
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task

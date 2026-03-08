@@ -158,6 +158,127 @@ def main():
     plt.tight_layout()
     save_figure(fig2, out_dir, 'cdf-strong-latency')
 
+    # Weak operation breakdown: read vs write per protocol
+    plot_weak_breakdown(data, out_dir)
+
+    # T property CDF: strong latency at different weak ratios (Exp 3.2)
+    plot_t_property_cdf(base, out_dir)
+
+
+def plot_weak_breakdown(data, out_dir):
+    """Plot weak read vs weak write CDF breakdown for each hybrid protocol.
+
+    This figure explains the bimodal weak latency distributions:
+    - CURP-HO: both reads and writes are fast (local)
+    - CURP-HT: reads are local (<1ms), writes go through leader (~100ms)
+    - Raft-HT: reads are local (<1ms), writes go through leader (~50ms)
+    """
+    hybrid_protos = ['curpho', 'curpht', 'raftht']
+    available = [p for p in hybrid_protos if p in data]
+    if not available:
+        return
+
+    fig, axes = plt.subplots(1, len(available), figsize=(5 * len(available), 4.5))
+    if len(available) == 1:
+        axes = [axes]
+
+    read_color = WONG['blue']
+    write_color = WONG['red']
+
+    for ax, proto in zip(axes, available):
+        lat = data[proto]
+        all_p999 = []
+
+        for key, label, color, ls in [
+            ('weak_read', 'Weak Read', read_color, '-'),
+            ('weak_write', 'Weak Write', write_color, '-'),
+        ]:
+            vals = lat.get(key, [])
+            if not vals:
+                continue
+            x, y = cdf_xy(vals)
+            ax.plot(x, y, color=color, label=label, linewidth=2, linestyle=ls)
+            p999_idx = min(int(len(vals) * 0.999), len(vals) - 1)
+            all_p999.append(vals[p999_idx])
+
+        ax.set_xlabel('Latency (ms)')
+        ax.set_ylabel('CDF')
+        ax.set_title(f'{PROTOCOL_LABELS[proto]}', fontsize=12)
+        ax.set_ylim(0, 1.02)
+        ax.set_xlim(left=0)
+        if all_p999:
+            ax.set_xlim(right=max(all_p999) * 1.1)
+        ax.legend(loc='lower right', fontsize=9)
+        ax.axhline(0.5, color='gray', linestyle='--', alpha=0.3, linewidth=0.8)
+        ax.axhline(0.99, color='gray', linestyle='--', alpha=0.3, linewidth=0.8)
+
+    fig.suptitle(f'Weak Operation Breakdown (t={CDF_THREADS}, {WORKLOAD})',
+                 fontsize=12, y=1.02)
+    plt.tight_layout()
+    save_figure(fig, out_dir, 'cdf-weak-breakdown')
+
+
+def plot_t_property_cdf(base, out_dir):
+    """Plot strong latency CDFs at different weak ratios to show T property.
+
+    For each protocol, overlay strong latency CDFs at w0, w50, w100.
+    T-satisfying protocols (CURP-HT, Raft-HT) should show overlapping CDFs.
+    """
+    exp32_dir = os.path.join(base, 'results', 'eval-dist-cdf', 'exp3.2')
+    if not os.path.isdir(exp32_dir):
+        print(f'Exp 3.2 CDF dir not found: {exp32_dir}')
+        return
+
+    protos = ['curpho', 'curpht', 'raftht']
+    ratios = [0, 50, 100]
+    ratio_styles = {
+        0:   ('-',  1.0, 'w0 (all strong)'),
+        50:  ('--', 0.8, 'w50 (50% weak)'),
+        100: (':',  0.6, 'w100 (all weak)'),
+    }
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
+
+    for ax, proto in zip(axes, protos):
+        all_p999 = []
+        for ratio in ratios:
+            path = os.path.join(exp32_dir, proto, f'w{ratio}', 'latencies.json')
+            if not os.path.exists(path):
+                print(f'  Missing: {path}')
+                continue
+            with open(path) as f:
+                lat = json.load(f)
+            vals = sorted(lat.get('strong_write', []) + lat.get('strong_read', []))
+            if not vals:
+                continue
+
+            ls, alpha, label = ratio_styles[ratio]
+            x, y = cdf_xy(vals)
+            ax.plot(x, y,
+                    color=PROTOCOL_COLORS[proto],
+                    linestyle=ls, alpha=alpha,
+                    label=label, linewidth=2)
+
+            p999_idx = min(int(len(vals) * 0.999), len(vals) - 1)
+            all_p999.append(vals[p999_idx])
+
+        ax.set_xlabel('Latency (ms)')
+        ax.set_ylabel('CDF')
+        ax.set_title(PROTOCOL_LABELS[proto], fontsize=12)
+        ax.set_ylim(0, 1.02)
+        ax.set_xlim(left=0)
+        if all_p999:
+            ax.set_xlim(right=max(all_p999) * 1.1)
+        ax.legend(loc='lower right', fontsize=8)
+        ax.axhline(0.5, color='gray', linestyle='--', alpha=0.3, linewidth=0.8)
+        ax.axhline(0.99, color='gray', linestyle='--', alpha=0.3, linewidth=0.8)
+
+    fig.suptitle('T Property: Strong Latency CDF vs Weak Ratio\n'
+                 '95/5 R/W, t=8, Zipfian, RTT=50ms',
+                 fontsize=12, y=1.04)
+    plt.tight_layout()
+    save_figure(fig, out_dir, 'cdf-t-property')
+
 
 if __name__ == '__main__':
     main()
