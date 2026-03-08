@@ -4550,6 +4550,27 @@ and per-operation-type latency analysis. Also export CDF summary statistics as C
 
 ---
 
+## Phase 69: Paper-Ready Evaluation Summary + Figure Verification
+
+**Goal**: Create a comprehensive evaluation summary document with all key numbers, claims,
+and figure/table references organized for easy paper writing. Verify all figures regenerate cleanly.
+
+- [x] **69a** Create `docs/results-summary.md` — paper-ready evaluation summary [26:03:07]
+  - Section 1: Throughput vs Latency (Exp 1.1, 3.1) — peak throughput + moderate load tables
+  - Section 2: T Property Verification (Exp 3.2) — strong P50 stability + throughput scaling
+  - Section 3: Latency Distributions (CDF) — full percentile + per-operation-type breakdown
+  - Section 4: HOT Trade-off Summary — O vs T trade-off table with key claims
+  - Figure Index (14 figures) and Table Index (5 tables) with paper placement suggestions
+- [x] **69b** Verify all 13 PDF figures regenerate cleanly from scripts [26:03:07]
+  - `plot-exp1.1.py`, `plot-exp3.1.py`, `plot-hero.py` — throughput-latency figures
+  - `plot-exp3.2.py` — T-property line plots
+  - `plot-bar-peak.py`, `plot-comprehensive.py` — summary figures
+  - `plot-cdf.py` — CDF distribution figures (4 PDFs)
+  - `gen-latex-tables.py` — 5 LaTeX tables + CSV export
+- [x] **69c** All outputs verified reproducible from raw data [26:03:07]
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
