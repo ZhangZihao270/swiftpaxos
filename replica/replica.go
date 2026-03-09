@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -70,6 +71,9 @@ type Replica struct {
 
 	Dt             *defs.LatencyTable
 	clientDropOnce sync.Once
+
+	// Message drop counter for SendClientMsgFast (Phase 77.1c)
+	ClientMsgDrops int64 // atomic: total messages dropped due to full per-client channel
 }
 
 func New(alias string, id, f int, addrs []string, thrifty, exec, lread bool, config *config.Config, l *dlog.Logger) *Replica {
@@ -289,10 +293,15 @@ func (r *Replica) SendClientMsgFast(id int32, code uint8, msg fastrpc.Serializab
 	select {
 	case ch <- clientSendArg{code: code, msg: msg}:
 	default:
-		// Channel full — drop message. Log warning once per replica to aid debugging.
+		// Channel full — drop message and count it.
+		drops := atomic.AddInt64(&r.ClientMsgDrops, 1)
 		r.clientDropOnce.Do(func() {
 			r.Printf("WARNING: per-client channel full for client %d, dropping messages (buffer=%d)", id, cap(ch))
 		})
+		// Log every 1000th drop to track ongoing issues without flooding logs
+		if drops%1000 == 0 {
+			r.Printf("[MSGDROP] total=%d (client %d, buffer=%d)", drops, id, cap(ch))
+		}
 	}
 }
 

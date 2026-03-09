@@ -2,9 +2,11 @@ package curpht
 
 import (
 	"bytes"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/imdea-software/swiftpaxos/replica"
 	"github.com/imdea-software/swiftpaxos/state"
 )
 
@@ -1585,6 +1587,23 @@ func TestCommandDescSlotAssignedAt(t *testing.T) {
 	elapsed := time.Since(desc.slotAssignedAt)
 	if elapsed < 0 {
 		t.Error("elapsed time should be non-negative")
+	}
+}
+
+// TestClientMsgDropCounter tests that the ClientMsgDrops counter on Replica
+// can be atomically incremented and read.
+func TestClientMsgDropCounter(t *testing.T) {
+	r := &replica.Replica{}
+	if atomic.LoadInt64(&r.ClientMsgDrops) != 0 {
+		t.Errorf("ClientMsgDrops should start at 0, got %d", r.ClientMsgDrops)
+	}
+
+	atomic.AddInt64(&r.ClientMsgDrops, 1)
+	atomic.AddInt64(&r.ClientMsgDrops, 1)
+	atomic.AddInt64(&r.ClientMsgDrops, 1)
+
+	if atomic.LoadInt64(&r.ClientMsgDrops) != 3 {
+		t.Errorf("ClientMsgDrops: got %d, want 3", atomic.LoadInt64(&r.ClientMsgDrops))
 	}
 }
 

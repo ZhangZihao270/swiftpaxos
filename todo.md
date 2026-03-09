@@ -5138,8 +5138,10 @@ Key: ↑ = growing with load, ≈ = stable
   - Log `[SYNCREPLY-HT] slot=N delay=X.XXms` when MSyncReply sent in deliver() COMMIT phase
   - Measures actual slot ordering delay (slot assignment → SyncReply)
 
-- [ ] 77.1c: Add message drop counter to SendClientMsgFast
-  - Count how many messages are dropped due to full buffer
+- [x] 77.1c: Add message drop counter to SendClientMsgFast
+  - Added `ClientMsgDrops int64` atomic counter to Replica struct
+  - Incremented in SendClientMsgFast default (channel full) case
+  - Logs `[MSGDROP] total=N` every 1000 drops to track ongoing issues
   - If drops > 0 at high load, H3 (permanent stalls) is confirmed
 
 - [ ] 77.1d: Run instrumented CURP-HT and CURP-HO at t=8 and t=128, compare metrics
