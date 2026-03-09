@@ -5503,24 +5503,68 @@ consistency — a local read of committed state is sufficient and correct.
 
 ---
 
-### Phase 82: CURP Leader Saturation Test
+### Phase 82: ~~CURP Leader Saturation Test~~ DISCARDED
 
-**Context**: CURP leader uses async I/O (Batcher+Sender goroutines) while Raft leader uses sync
-I/O (broadcastAppendEntries in main loop). This implementation difference means CURP throughput
-scales linearly up to t=128 (~45K ops/s) while Raft saturates at ~18K ops/s. Cross-protocol
-comparison is unfair because the throughput gap comes from I/O architecture, not protocol design.
+**Status**: DISCARDED — superseded by Phase 83 (fix speculative reply correctness bug).
+The saturation test is no longer needed because the root cause of CURP's excessive scaling
+was identified: speculative replies skip slot ordering, returning potentially stale results
+for strong reads. Fixing this bug will naturally bring CURP's throughput back to Phase 76 levels.
 
-**Goal**: Find CURP's actual leader saturation point by pushing thread count beyond 128.
-This tells us the true capacity of async I/O architecture and informs Phase 83's unification work.
+---
 
-**Script**: `scripts/test-curp-saturation.sh` — runs CURP baseline (curpht with weakRatio=0)
-with thread counts [64, 128, 192, 256, 384, 512], 5 clients, pendings=15.
+### Phase 83: Fix Speculative Reply Slot Ordering Bug in All CURP Protocols
 
-#### Phase 82.1: Run Saturation Test
+**Context**: CURP-HO's `deliver()` has always skipped slot ordering for speculative replies
+(since Phase 19). Phase 77.2e ported this behavior to CURP baseline and CURP-HT as "D7 optimization".
+This is a **correctness bug**: speculative `ComputeResult(r.State)` reads committed state, but if
+previous slots haven't executed yet, the state is stale. For strong GETs, this violates linearizability
+because the client uses the speculative result when fast path succeeds (majority RecordAcks arrive
+before SyncReply).
 
-- [ ] 82.1a: Fix script bug (bash string substitution in log line)
-- [ ] 82.1b: Run `bash scripts/test-curp-saturation.sh`
-- [ ] 82.1c: Record results — identify saturation point (throughput plateau / latency explosion)
+**Bug location**: `deliver()` in all three protocols:
+```go
+// BUG: slot ordering only applies to COMMIT, speculative reply skips it
+if desc.phase == COMMIT && slot > 0 && !r.executed.Has(...) {
+    return
+}
+```
+
+**Correct behavior** (original CURP baseline before Phase 77):
+```go
+// CORRECT: slot ordering applies to ALL phases including speculative
+if slot > 0 && !r.executed.Has(...) {
+    return
+}
+```
+
+**Evidence**:
+- Phase 76 data (pre-bug): baseline=27.6K, CURP-HT=44.2K, CURP-HO=97K
+- Phase 78 data (post-bug): baseline=75K, CURP-HT=78K, CURP-HO=88K
+- The +172% "improvement" in baseline came from skipping slot ordering, not from a legitimate optimization
+- CURP-HO's 97K in Phase 76 was also inflated by this bug (it had it from the start)
+
+**Impact on paper**: After fix, expect all three CURP protocols to show proper saturation
+behavior (throughput plateau + latency explosion at high concurrency), similar to Raft.
+Cross-protocol comparison becomes fairer.
+
+#### Phase 83.1: Fix deliver() in All CURP Protocols
+
+- [ ] 83.1a: Fix `curp-ho/curp-ho.go` — remove `desc.phase == COMMIT &&` condition from
+  slot ordering check in deliver(). Speculative reply must wait for previous slots to execute.
+- [ ] 83.1b: Fix `curp/curp.go` — revert Phase 77.2e D7 change: restore original slot ordering
+  that applies to all phases (revert to pre-Phase 77 behavior).
+- [ ] 83.1c: Fix `curp-ht/curp-ht.go` — same fix as 83.1b, ensure speculative reply waits
+  for slot ordering.
+- [ ] 83.1d: Run `go test ./...` to verify all tests pass after fix.
+
+#### Phase 83.2: Re-run Exp 3.1 (5r) with Correct Implementation
+
+- [ ] 83.2a: Run Exp 3.1 — Run 1 (CURP-HO vs CURP-HT vs baseline, 5r, t=1..128)
+- [ ] 83.2b: Run Exp 3.1 — Run 2
+- [ ] 83.2c: Run Exp 3.1 — Run 3
+- [ ] 83.2d: Collect CSV results, compute medians
+- [ ] 83.2e: Regenerate exp3.1-5r plots (throughput-vs-avg-latency + latency-breakdown)
+- [ ] 83.2f: Compare with Phase 76 data to confirm results are consistent
 
 ---
 
