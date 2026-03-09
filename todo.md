@@ -5065,6 +5065,134 @@ No immediate fix required — the protocols perform as expected per their design
     The clean numbers confirm Phase 75 root cause analysis: goroutine scheduling pressure
     at high thread counts causes CURP-HT latency inflation.
 
+### Phase 77: Investigate CURP-HO Scaling Advantage — Root Cause & Port to CURP-HT/Baseline
+
+**Goal**: Understand WHY CURP-HO throughput scales to 97K (5r) with stable S-P50=100ms while CURP-HT caps at 44K with S-P50=390ms and curp-baseline caps at 28K with S-P50=330ms. If the cause is a legitimate optimization (not a bug), port it to CURP-HT and curp-baseline.
+
+**Priority**: HIGH
+
+**Observation Summary** (Phase 76 data):
+
+| Metric | curp-baseline | curp-ht | curp-ho |
+|--------|---------------|---------|---------|
+| Peak tput (5r, t=128) | 27,623 | 44,231 | **97,050** |
+| S-P50 at t=128 (5r) | 330ms ↑ | 390ms ↑ | **100ms ≈** |
+| Peak tput (3r, t=128) | 29,872 | 54,628 | **63,517** |
+| S-P50 at t=128 (3r) | 186ms ↑ | 196ms ↑ | **100ms ≈** |
+
+Key: ↑ = growing with load, ≈ = stable
+
+**Critical Observations**:
+1. CURP-HO S-P50 stabilizes at exactly 100ms = 2 RTTs in BOTH 3r and 5r
+2. curp-baseline (0% weak ops) has the SAME S-P50 growth → not a weak-write issue
+3. CURP-HO scales FROM 63.5K (3r) TO 97K (5r) — more replicas = more throughput
+4. CURP-HT DROPS from 54.6K (3r) to 44.2K (5r) — more replicas = LESS throughput
+
+**Identified Code Differences** (CURP-HO vs CURP-HT/baseline):
+
+| # | Difference | CURP-HO | CURP-HT / baseline |
+|---|-----------|---------|---------------------|
+| D1 | Client msg goroutines | `handleStrongMsgs()` + `handleWeakMsgs()` (2 goroutines) | Single `handleMsgs()` (1 goroutine) |
+| D2 | MSync retry timer | Active (2s interval), retransmits for pending commands | **Disabled** (`break` in timer case) |
+| D3 | MSync recovery on leader | `ComputeResult(r.State)` bypasses slot ordering for committed-but-unexecuted commands | No recovery — MSync silently ignored (r.values never set) |
+| D4 | `r.values.Set` in deliver() | Set immediately after execution (line 971) → enables MSync recovery | **Never set** → MSync can never find values |
+| D5 | Fast/slow path handlers | Separate `handleFastPathAcks` / `handleSlowPathAcks` | Single `handleAcks` for both acks and macks |
+| D6 | Per-replica send queues | `remoteSendQueues[i]` with async goroutines | Direct synchronous send |
+| D7 | curp-baseline speculative MReply | N/A | **Behind ALL-phase slot ordering** (blocks MReply until slot-1 executed) |
+| D8 | curp-baseline MReply gating | N/A | Only sends MReply when `Ok==TRUE` (not when FALSE) |
+
+**Hypotheses** (ordered by likelihood):
+
+**H1: MSync recovery bypasses slot ordering (D3+D4)** — MOST LIKELY
+- When slot ordering stalls deliver(), CURP-HO leader can respond to MSync with `ComputeResult()` read-only
+- CURP-HT has no equivalent — commands stuck in slot ordering have NO recovery path
+- This explains the 100ms S-P50: fast path (1 RTT=50ms) fails at high load → client falls to slow path → SyncReply is delayed by slot ordering → MSync retry (2s) eventually recovers → but the 100ms suggests normal slow path (2 RTT), not MSync
+- **CORRECTION**: MSync retry is 2s, so it can't explain 100ms S-P50. MSync is a safety net, not steady-state. Need to verify if the normal SyncReply path is fast enough at 2 RTTs
+
+**H2: Client single-goroutine bottleneck (D1)** — LIKELY
+- At 128 threads × 5 replicas, the client receives ~68K+ messages/sec through ONE goroutine
+- Strong and weak replies compete for processing time
+- Could cause RecordAck/MReply processing delays → higher apparent S-P50
+- Split goroutines would halve the load per goroutine
+
+**H3: Missing MSync recovery causes permanent command stalls (D2+D3+D4)** — PLAUSIBLE
+- If SyncReply is dropped (buffer full at high load), CURP-HT command hangs FOREVER
+- This would stall client pipeline slots → reduce effective throughput
+- CURP-HO's MSync retry (2s) rescues these stuck commands
+- Would explain throughput DROP at high load, not just latency growth
+
+**H4: Event loop queuing delay (load-dependent)** — POSSIBLE
+- Leader event loop saturated with events → Propose queuing → delayed speculative MReply
+- But CURP-HO leader handles MORE events (97K vs 44K) with LOWER latency — contradicts
+
+#### Phase 77.1: Instrument & Measure (Diagnosis)
+
+- [ ] 77.1a: Add fast-path success rate counter to CURP-HT and CURP-HO clients
+  - Count how many strong ops complete via fast path (acks) vs slow path (SyncReply/macks)
+  - Log at end of benchmark: "Fast path: X%, Slow path: Y%"
+  - This tells us whether Ok=FALSE is common at high load
+
+- [ ] 77.1b: Add SyncReply timing in CURP-HT leader deliver()
+  - Log timestamp delta from slot assignment to SyncReply sent
+  - Measures actual slot ordering delay on the leader
+  - Compare with theoretical 2-RTT (100ms) — if >> 100ms, slot ordering is the culprit
+
+- [ ] 77.1c: Add message drop counter to SendClientMsgFast
+  - Count how many messages are dropped due to full buffer
+  - If drops > 0 at high load, H3 (permanent stalls) is confirmed
+
+- [ ] 77.1d: Run instrumented CURP-HT and CURP-HO at t=8 and t=128, compare metrics
+
+#### Phase 77.2: Port Optimizations (Incremental)
+
+Based on diagnosis, port optimizations one at a time to isolate impact:
+
+- [ ] 77.2a: Add `r.values.Set` in CURP-HT and curp-baseline deliver() (D4)
+  - Prerequisite for D2/D3 to work
+  - Set `r.values.Set(desc.cmdId.String(), desc.val)` after execution in deliver() COMMIT phase
+  - Should be safe — values map is concurrent
+
+- [ ] 77.2b: Enable MSync retry timer in CURP-HT client (D2)
+  - Change `break` in timer case to actual MSync retry logic (adapted from CURP-HO client)
+  - Send MSync to ALL replicas for pending strong commands
+  - Timer interval: 2s (same as CURP-HO)
+
+- [ ] 77.2c: Add MSync recovery in CURP-HT and curp-baseline leader syncChan handler (D3)
+  - When r.values doesn't have the value: check if command is committed (phase==COMMIT)
+  - If committed, compute read-only result via `cmd.ComputeResult(r.State)` and reply
+  - **CORRECTNESS NOTE**: ComputeResult reads current state which may be stale if prior slots
+    haven't executed. For PUT ops this is fine (returns written value). For GET ops, result
+    may be stale if same-key prior slot is unexecuted. With 1M keys and 0% conflict,
+    staleness probability is negligible. BUT: must verify this doesn't violate linearizability
+    in the general case. May need to restrict to PUT-only recovery.
+
+- [ ] 77.2d: Split client handleMsgs into handleStrongMsgs/handleWeakMsgs in CURP-HT (D1)
+  - Create separate goroutine for weak replies (MWeakReply, MWeakReadReply)
+  - Keep strong replies (MReply, MRecordAck, MSyncReply, timer) in dedicated goroutine
+
+- [ ] 77.2e: Port D7/D8 fixes to curp-baseline
+  - Skip slot ordering for speculative MReply (only apply for COMMIT phase)
+  - Always send MReply even when Ok=FALSE (client can fall back to slow path via macks)
+  - These are the biggest bottlenecks in curp-baseline
+
+#### Phase 77.3: Evaluate
+
+- [ ] 77.3a: Run Exp 3.1 after each 77.2 step to measure incremental impact
+  - 5 replicas, t=1,2,4,8,16,32,64,96,128, weakRatio=50, 0% conflict
+  - Track: peak throughput, S-P50 at t=128, S-P99 at t=128
+
+- [ ] 77.3b: Run 3-replica comparison to verify improvement scales across cluster sizes
+
+- [ ] 77.3c: Write summary comparing before/after for each optimization
+
+#### Phase 77.4: Correctness Verification
+
+- [ ] 77.4a: Verify MSync ComputeResult correctness
+  - Run with high conflict rate (conflicts=100) to stress-test stale reads
+  - Compare CURP-HO and CURP-HT results for identical workloads
+
+- [ ] 77.4b: Run existing test suite: `go test ./...`
+
 ---
 
 ## Legend
