@@ -5254,7 +5254,60 @@ Based on diagnosis, port optimizations one at a time to isolate impact:
   - Note: curp-baseline 3r improvement (+52.6%) is smaller than 5r (+172.3%) because
     the 3r cluster was already less constrained by slot ordering bottleneck
 
-- [ ] 77.3c: Write summary comparing before/after for each optimization
+- [x] 77.3c: Phase 77.2 optimization summary
+
+  ### Phase 77.2 Optimization Summary
+
+  **Goal**: Close the throughput gap between CURP-HT and CURP-HO by porting
+  architectural improvements identified in Phase 77.1 (D1–D8 code differences).
+
+  #### Individual Optimizations
+
+  | Step | Fix | Target | Change |
+  |------|-----|--------|--------|
+  | 77.2a | D4: r.values.Set after execution | HT + baseline | Enables MSync recovery before descriptor cleanup |
+  | 77.2b | D2: MSync retry timer | HT client | 2s timer retransmits MSync to all replicas for stalled commands |
+  | 77.2c | D3: MSync ComputeResult recovery | HT + baseline | Leader can reply with ComputeResult for committed-but-stuck commands |
+  | 77.2d | D1: Split handleMsgs goroutines | HT client | Separate strong/weak reply processing to reduce contention |
+  | 77.2e | D7+D8: deliver() restructure | baseline | Speculative replies skip slot ordering; always send MReply |
+
+  #### Cumulative Results (5 replicas, Exp 3.1)
+
+  | Protocol | Before Peak | After Peak | Change | S-P50 @t=128 |
+  |----------|-------------|------------|--------|--------------|
+  | curp-baseline | 27.6K | 75.2K | **+172.3%** | 330ms → 100ms |
+  | CURP-HT | 44.2K | 78.2K | **+76.8%** | 390ms → 100ms |
+  | CURP-HO | 97.0K | 88.5K | -8.8% (variance) | 100ms → 100ms |
+
+  - CURP-HT/HO throughput ratio: **45.6% → 88.4%** (5r), **86.0% → 95.1%** (3r)
+
+  #### Cross-Cluster Scaling (3 replicas)
+
+  | Protocol | Before Peak | After Peak | Change |
+  |----------|-------------|------------|--------|
+  | curp-baseline | 32.0K | 48.9K | +52.6% |
+  | CURP-HT | 54.6K | 62.7K | +14.8% |
+  | CURP-HO | 63.5K | 65.9K | +3.8% |
+
+  #### Key Insights
+
+  1. **D7/D8 (deliver restructure) was the dominant fix**: curp-baseline saw the
+     largest gain (+172% at 5r) because speculative replies were completely blocked
+     by slot ordering. Separating speculative (ComputeResult) from COMMIT (Execute)
+     paths eliminated this bottleneck.
+
+  2. **Improvements scale with cluster size**: 5r gains are larger than 3r because
+     the slot ordering bottleneck is amplified with more replicas (more Paxos traffic,
+     longer commit queues). The 3r cluster was already less constrained.
+
+  3. **CURP-HT low-concurrency regression**: At t=1, CURP-HT dropped from 2698 to
+     1612 ops/s (-40%) due to overhead from the 2s timer goroutine and the
+     strong/weak goroutine split. This overhead amortizes at higher concurrency
+     levels where the optimizations provide meaningful benefit.
+
+  4. **Remaining HT/HO gap (~12% at 5r)**: Likely due to CURP-HT's weak write
+     path still routing through Paxos (H5 hypothesis from Phase 77.1d), adding
+     leader CPU load that doesn't exist in CURP-HO's direct-to-acceptor weak path.
 
 #### Phase 77.4: Correctness Verification
 
