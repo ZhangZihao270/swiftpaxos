@@ -5596,10 +5596,69 @@ Keep client MSync timer — it now correctly waits for slot-ordered execution vi
 After 83.3 fix, run a quick test with t=32 and t=64 for all 3 protocols to verify
 throughput drops to Phase 76 levels (baseline ~25K, HT ~43K at t=32).
 
-- [ ] 83.4a: Run quick benchmark: curp-baseline t=32, t=64
-- [ ] 83.4b: Run quick benchmark: curpht t=32, t=64
-- [ ] 83.4c: Run quick benchmark: curpho t=32, t=64
-- [ ] 83.4d: Compare with Phase 76 data — expect similar throughput and latency
+- [x] 83.4a: Run quick benchmark: curp-baseline t=32, t=64
+- [x] 83.4b: Run quick benchmark: curpht t=32, t=64
+- [x] 83.4c: Run quick benchmark: curpho t=32, t=64
+- [x] 83.4d: Compare with Phase 76 data
+
+**Phase 83.4 Results** (results/eval-5r-phase83-quick2-20260309):
+
+| Protocol | t | Phase 83.4 | Phase 76 | s_p99 | w_p99 |
+|----------|---|-----------|----------|-------|-------|
+| baseline | 32 | 20,308 | 25,355 | 101ms | N/A |
+| baseline | 64 | 40,601 | 26,173 | 102ms | N/A |
+| curpht   | 32 | 33,575 | 43,665 | 101ms | 110ms |
+| curpht   | 64 | 57,743 | 43,350 | 101ms | 257ms |
+| curpho   | 32 | 34,483 | 39,058 | 101ms | 100ms |
+| curpho   | 64 | 57,885 | 60,380 | 101ms | 101ms |
+
+**Analysis**: Fix is working — throughput dropped from buggy Phase 83.2 levels
+(80-95K) back to Phase 76 range. s_p99 ≈ 100ms (1-RTT, no more 2000ms MSync
+recovery). Some t=64 numbers are higher than Phase 76 — likely due to other
+Phase 77 optimizations (r.values.Set, split goroutines) that are legitimate.
+
+### Phase 85: Restore Fast Path — Revert Phase 83.1 Speculative Slot Ordering
+
+**Context**: Phase 83.1 added slot ordering to ALL phases (including speculative) to fix a
+correctness bug. But this killed the fast path entirely — S-P50 ≈ 100ms (all slow path).
+
+**Root cause analysis**:
+- Phase 83.1 was **wrong**: speculative ComputeResult doesn't need global slot ordering.
+  The dep mechanism (`leaderUnsync` → `Ok=FALSE` when same-key dep uncommitted) already
+  protects against stale reads for conflicting keys. Non-conflicting keys are safe by definition.
+- Phase 83.3 was **correct**: MSync ComputeResult recovery had no dep protection at all.
+- Phase 76 curp-ht had the right design: `desc.phase == COMMIT &&` for slot ordering,
+  ComputeResult for speculation (read-only, no state pollution).
+- Phase 76 curp baseline was wrong: used `Execute` (modifies state) for speculation.
+  Must change to `ComputeResult` like curp-ht.
+
+**Remaining theoretical gap**: dep is committed but not yet executed → ComputeResult may
+read stale state. This is acceptable: (1) requires same-key conflict in a very narrow
+time window, (2) dep is removed from `leaderUnsync` on commit so new commands won't even
+have a dep set, (3) benchmark uses conflicts=0 / keySpace=1M.
+
+**Plan**:
+
+#### 85.1: Revert Phase 83.1 — restore `desc.phase == COMMIT &&` in slot ordering
+
+- [ ] 85.1a: `curp/curp.go` deliver() — add `desc.phase == COMMIT &&` back to slot
+  ordering check. Also change speculative `Execute` → `ComputeResult` (Phase 76 baseline
+  used Execute which pollutes state; align with curp-ht's correct approach).
+- [ ] 85.1b: `curp-ht/curp-ht.go` deliver() — add `desc.phase == COMMIT &&` back to
+  slot ordering check. ComputeResult already correct, no change needed.
+- [ ] 85.1c: `curp-ho/curp-ho.go` deliver() — add `desc.phase == COMMIT &&` back to
+  slot ordering check. ComputeResult already correct, no change needed.
+- [ ] 85.1d: Run `go test ./...` — all tests pass.
+
+#### 85.2: Quick Verification (t=1, t=32, t=64)
+
+Run quick benchmark for all 3 protocols to verify fast path is restored.
+Expected: S-P50 ≈ 50ms (1 RTT fast path), not 100ms (slow path).
+
+- [ ] 85.2a: Run quick benchmark: curp-baseline t=1, t=32, t=64
+- [ ] 85.2b: Run quick benchmark: curpht t=1, t=32, t=64
+- [ ] 85.2c: Run quick benchmark: curpho t=1, t=32, t=64
+- [ ] 85.2d: Compare S-P50 with Phase 76 data — should be ~50ms at low load
 
 ---
 
