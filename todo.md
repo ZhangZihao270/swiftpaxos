@@ -5133,10 +5133,10 @@ Key: ↑ = growing with load, ≈ = stable
   - CURP-HO: fastPaths++ in handleFastPathAcks success, slowPaths++ in handleSyncReply and handleSlowPathAcks
   - Log line: "Fast/Slow Paths: X / Y" on every strong op completion
 
-- [ ] 77.1b: Add SyncReply timing in CURP-HT leader deliver()
-  - Log timestamp delta from slot assignment to SyncReply sent
-  - Measures actual slot ordering delay on the leader
-  - Compare with theoretical 2-RTT (100ms) — if >> 100ms, slot ordering is the culprit
+- [x] 77.1b: Add SyncReply timing in CURP-HT leader deliver()
+  - Added `slotAssignedAt time.Time` to commandDesc, set in handlePropose
+  - Log `[SYNCREPLY-HT] slot=N delay=X.XXms` when MSyncReply sent in deliver() COMMIT phase
+  - Measures actual slot ordering delay (slot assignment → SyncReply)
 
 - [ ] 77.1c: Add message drop counter to SendClientMsgFast
   - Count how many messages are dropped due to full buffer

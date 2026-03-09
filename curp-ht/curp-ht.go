@@ -1,6 +1,7 @@
 package curpht
 
 import (
+	"log"
 	"strconv"
 	"sync"
 	"time"
@@ -104,6 +105,9 @@ type commandDesc struct {
 
 	isWeak  bool // Mark if this is a weak command
 	applied bool // Track if command has been applied to state machine
+
+	// Instrumentation: timestamp when slot was assigned (Phase 77.1b)
+	slotAssignedAt time.Time
 
 	// Cached string keys to avoid repeated conversions
 	slotStr  string // cached strconv.Itoa(cmdSlot)
@@ -348,6 +352,7 @@ func (r *Replica) handlePropose(msg *defs.GPropose, desc *commandDesc, slot int,
 	}
 	desc.cmdSlot = slot
 	desc.dep = dep
+	desc.slotAssignedAt = time.Now()
 	if dep != -1 {
 		depDesc := r.getCmdDesc(dep, nil, -1)
 		if depDesc != nil {
@@ -645,6 +650,11 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 						Slot:    int32(slot),
 					}
 					r.sender.SendToClient(desc.propose.ClientId, rep, r.cs.syncReplyRPC)
+					// Instrumentation: measure slot assignment → MSyncReply sent
+					if !desc.slotAssignedAt.IsZero() {
+						delayMs := float64(time.Since(desc.slotAssignedAt)) / 1e6
+						log.Printf("[SYNCREPLY-HT] slot=%d delay=%.2fms", slot, delayMs)
+					}
 				}
 			}
 			// For weak commands on leader: skip cleanup here. asyncReplicateWeak

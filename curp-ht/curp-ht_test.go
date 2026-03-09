@@ -3,6 +3,7 @@ package curpht
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"github.com/imdea-software/swiftpaxos/state"
 )
@@ -1567,6 +1568,23 @@ func TestClientFastSlowPathCounters(t *testing.T) {
 	}
 	if c.slowPaths != 1 {
 		t.Errorf("slowPaths: got %d, want 1", c.slowPaths)
+	}
+}
+
+// TestCommandDescSlotAssignedAt tests the slotAssignedAt field on commandDesc.
+func TestCommandDescSlotAssignedAt(t *testing.T) {
+	desc := &commandDesc{}
+	if !desc.slotAssignedAt.IsZero() {
+		t.Error("slotAssignedAt should be zero on new descriptor")
+	}
+	desc.slotAssignedAt = time.Now()
+	if desc.slotAssignedAt.IsZero() {
+		t.Error("slotAssignedAt should not be zero after assignment")
+	}
+	// Verify elapsed time is measurable
+	elapsed := time.Since(desc.slotAssignedAt)
+	if elapsed < 0 {
+		t.Error("elapsed time should be non-negative")
 	}
 }
 
