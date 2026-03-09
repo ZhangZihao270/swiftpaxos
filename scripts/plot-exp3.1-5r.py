@@ -2,6 +2,7 @@
 """
 Exp 3.1 (5-Replica): CURP-HO vs CURP-HT vs Baseline — Throughput vs Latency
 Single-panel figure for 5-replica distributed results (RTT=50ms).
+Uses Phase 78 data: median of 3 runs with min/max error bands.
 """
 
 import os
@@ -17,23 +18,53 @@ def plot_figure(ax, rows, percentile='p50'):
     w_key = f'w_{percentile}'
 
     for proto in ['curpho', 'curpht', 'curp-baseline']:
-        data = extract_tput_latency(rows, proto)
+        data = extract_tput_latency_with_errbars(rows, proto)
         color = PROTOCOL_COLORS[proto]
         marker = PROTOCOL_MARKERS[proto]
         label = PROTOCOL_LABELS[proto]
 
-        # Strong ops (solid) — trim past peak throughput
-        x, y = clean_pairs(data['throughput'], data[s_key])
-        x, y = pareto_frontier(x, y)
-        ax.plot(x, y, color=color, marker=marker,
-                label=f'{label} (strong)', zorder=3)
+        # Build aligned arrays for strong ops
+        xs, ys, x_los, x_his = [], [], [], []
+        for i in range(len(data['throughput'])):
+            xv = data['throughput'][i]
+            yv = data[s_key][i]
+            if xv is not None and yv is not None and xv > 0:
+                xs.append(xv)
+                ys.append(yv)
+                xlo = (data['throughput_lo'] or [])[i] if data.get('throughput_lo') else None
+                xhi = (data['throughput_hi'] or [])[i] if data.get('throughput_hi') else None
+                x_los.append(xlo if xlo is not None else xv)
+                x_his.append(xhi if xhi is not None else xv)
+
+        # Pareto trim (up to peak throughput)
+        if xs:
+            peak_idx = max(range(len(xs)), key=lambda j: xs[j])
+            xs = xs[:peak_idx + 1]
+            ys = ys[:peak_idx + 1]
+            x_los = x_los[:peak_idx + 1]
+            x_his = x_his[:peak_idx + 1]
+
+            xerr_lo = [x - lo for x, lo in zip(xs, x_los)]
+            xerr_hi = [hi - x for x, hi in zip(xs, x_his)]
+
+            ax.errorbar(xs, ys, xerr=[xerr_lo, xerr_hi],
+                        color=color, marker=marker, capsize=3, capthick=1,
+                        label=f'{label} (strong)', zorder=3)
 
         # Weak ops (dashed) — only for hybrid protocols
         if proto != 'curp-baseline':
-            x, y = clean_pairs(data['throughput'], data[w_key])
-            x, y = pareto_frontier(x, y)
-            if x:
-                ax.plot(x, y, color=color, marker=marker, markersize=5,
+            xs, ys = [], []
+            for i in range(len(data['throughput'])):
+                xv = data['throughput'][i]
+                yv = data[w_key][i]
+                if xv is not None and yv is not None and xv > 0:
+                    xs.append(xv)
+                    ys.append(yv)
+            if xs:
+                peak_idx = max(range(len(xs)), key=lambda j: xs[j])
+                xs = xs[:peak_idx + 1]
+                ys = ys[:peak_idx + 1]
+                ax.plot(xs, ys, color=color, marker=marker, markersize=5,
                         linestyle='--', alpha=0.7,
                         label=f'{label} (weak)', zorder=2)
 
@@ -47,11 +78,15 @@ def plot_figure(ax, rows, percentile='p50'):
 
 def main():
     base = base_dir()
-    csv_path = os.path.join(base, 'results', 'eval-5r-20260308', 'summary-exp3.1.csv')
+    # Phase 78: 3 reproducible runs
+    csv_paths = [
+        os.path.join(base, 'results', f'eval-5r-phase78-run{i}', 'summary-exp3.1.csv')
+        for i in range(1, 4)
+    ]
     out_dir = os.path.join(base, 'evaluation', 'plots')
 
     setup_style()
-    rows = load_csv(csv_path)
+    rows = load_multi_run_csv(csv_paths)
 
     for pct, name_suffix in [('p50', ''), ('p99', '-p99')]:
         fig, ax = plt.subplots(1, 1, figsize=(7, 4.5))

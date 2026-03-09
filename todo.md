@@ -5439,6 +5439,27 @@ Based on diagnosis, port optimizations one at a time to isolate impact:
   - The t=32 sweet spot from Exp 3.1 is confirmed: CURP-HT's leader centralization
     provides better throughput at moderate concurrency
 
+### Phase 79: Paper Figures from Phase 78 Data
+
+#### Phase 79.1: Update Plotting Scripts
+
+- [x] 79.1a: Update plot-exp3.1-5r.py for Phase 78 data with error bars [26:03:09]
+  - Added `load_multi_run_csv()` and `extract_tput_latency_with_errbars()` to plot_style.py
+  - Loads 3 CSV files, computes median throughput/latency, adds min/max horizontal error bars
+  - Generates: exp3.1-5r-throughput-latency.{pdf,png}, exp3.1-5r-throughput-latency-p99.{pdf,png}
+
+- [x] 79.1b: Update plot-exp3.2-5r.py for Phase 78.3b data [26:03:09]
+  - Changed protocols from raftht to curp-baseline
+  - Updated data path to eval-5r-exp3.2-phase78-20260309/
+  - Updated workload label (t=32), added weak ratio 10% to x-ticks
+  - Generates: exp3.2-5r-t-property-latency.{pdf,png}, exp3.2-5r-t-property-throughput.{pdf,png}
+
+- [x] 79.1c: Update plot-cdf-5r.py and regenerate all figures [26:03:09]
+  - Updated CDF script: Phase 78 run1 for latency distributions, curp-baseline instead of raftht
+  - All 10 figure files regenerated in evaluation/plots/
+  - Figures: exp3.1 throughput-latency (P50, P99), exp3.2 latency + throughput,
+    CDF latency (2-panel), CDF strong-only, CDF weak breakdown, CDF T-property
+
 ---
 
 ## Legend

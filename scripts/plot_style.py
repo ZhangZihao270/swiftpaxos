@@ -130,6 +130,62 @@ def kops_formatter(x, _):
     """Format throughput axis as Kops/sec."""
     return f'{x/1000:.0f}'
 
+def load_multi_run_csv(paths):
+    """Load multiple CSV files and aggregate by (protocol, threads).
+
+    Returns rows with median values and min/max for error bars.
+    Each row dict has keys like 'throughput', 'throughput_lo', 'throughput_hi'.
+    """
+    import statistics
+    all_runs = [load_csv(p) for p in paths if os.path.exists(p)]
+    if not all_runs:
+        return []
+
+    groups = {}
+    for run_rows in all_runs:
+        for row in run_rows:
+            key = (row['protocol'], row['threads'])
+            groups.setdefault(key, []).append(row)
+
+    agg_rows = []
+    numeric_keys = ['throughput', 's_avg', 's_p50', 's_p99', 'w_avg', 'w_p50', 'w_p99']
+    for (proto, threads), rows in sorted(groups.items(), key=lambda x: (x[0][0], int(x[0][1]))):
+        agg = {'protocol': proto, 'threads': threads, 'total_threads': rows[0].get('total_threads', '')}
+        for k in numeric_keys:
+            vals = []
+            for r in rows:
+                v = r.get(k, 'N/A')
+                if v != 'N/A' and v is not None and v != '':
+                    vals.append(float(v))
+            if vals:
+                med = statistics.median(vals)
+                agg[k] = str(med)
+                agg[f'{k}_lo'] = str(min(vals))
+                agg[f'{k}_hi'] = str(max(vals))
+            else:
+                agg[k] = 'N/A'
+                agg[f'{k}_lo'] = 'N/A'
+                agg[f'{k}_hi'] = 'N/A'
+        agg_rows.append(agg)
+    return agg_rows
+
+def extract_tput_latency_with_errbars(rows, protocol):
+    """Extract throughput-vs-latency data with min/max error bars."""
+    filtered = [r for r in rows if r['protocol'] == protocol]
+    filtered.sort(key=lambda r: int(r['threads']))
+    result = {
+        'threads': [int(r['threads']) for r in filtered],
+        'throughput': [float(r['throughput']) for r in filtered],
+        's_p50': [get_val(r, 's_p50') for r in filtered],
+        's_p99': [get_val(r, 's_p99') for r in filtered],
+        'w_p50': [get_val(r, 'w_p50') for r in filtered],
+        'w_p99': [get_val(r, 'w_p99') for r in filtered],
+    }
+    for key in ['throughput', 's_p50', 's_p99', 'w_p50', 'w_p99']:
+        result[f'{key}_lo'] = [get_val(r, f'{key}_lo') for r in filtered]
+        result[f'{key}_hi'] = [get_val(r, f'{key}_hi') for r in filtered]
+    return result
+
 def base_dir():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 

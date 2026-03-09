@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Exp 3.2 (5-Replica): T Property Verification — Strong Latency Stability
+Exp 3.2 (5-Replica): Weak Ratio Sweep — Strong Latency Stability & Throughput
 Two figures: strong latency vs weak ratio, and throughput vs weak ratio.
 Single-panel each for 5-replica distributed results (RTT=50ms).
+Uses Phase 78.3b data: CURP-HO vs CURP-HT vs Baseline at t=32.
 """
 
 import os
@@ -10,7 +11,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from plot_style import *
 
-WORKLOAD = '95/5 R/W, t=8, Zipfian, 5 replicas'
+WORKLOAD = '95/5 R/W, t=32, Zipfian, 5 replicas'
 
 def extract_weak_ratio_series(rows, protocol):
     filtered = [r for r in rows if r['protocol'] == protocol]
@@ -23,7 +24,7 @@ def extract_weak_ratio_series(rows, protocol):
     }
 
 def plot_latency(ax, rows):
-    for proto in ['raftht', 'curpht', 'curpho']:
+    for proto in ['curp-baseline', 'curpht', 'curpho']:
         data = extract_weak_ratio_series(rows, proto)
         ax.plot(data['weak_ratio'], data['s_p50'],
                 color=PROTOCOL_COLORS[proto], marker=PROTOCOL_MARKERS[proto],
@@ -35,14 +36,14 @@ def plot_latency(ax, rows):
 
     ax.set_xlabel('Weak Operation Ratio (%)')
     ax.set_ylabel('Strong Latency (ms)')
-    ax.set_title(f'T Property: Strong Latency (5 replicas, RTT = 50 ms)\n{WORKLOAD}', fontsize=11)
-    ax.set_xticks([0, 25, 50, 75, 100])
+    ax.set_title(f'Strong Latency Stability (5 replicas, RTT = 50 ms)\n{WORKLOAD}', fontsize=11)
+    ax.set_xticks([0, 10, 25, 50, 75, 100])
     ax.legend(loc='upper left', fontsize=7.5, ncol=2)
     ax.set_xlim(-5, 105)
     ax.set_ylim(bottom=0)
 
 def plot_throughput(ax, rows):
-    for proto in ['raftht', 'curpht', 'curpho']:
+    for proto in ['curp-baseline', 'curpht', 'curpho']:
         data = extract_weak_ratio_series(rows, proto)
         ax.plot(data['weak_ratio'], [t/1000 for t in data['throughput']],
                 color=PROTOCOL_COLORS[proto], marker=PROTOCOL_MARKERS[proto],
@@ -51,14 +52,14 @@ def plot_throughput(ax, rows):
     ax.set_xlabel('Weak Operation Ratio (%)')
     ax.set_ylabel('Throughput (Kops/sec)')
     ax.set_title(f'Weak Ratio Sweep: Throughput (5 replicas, RTT = 50 ms)\n{WORKLOAD}', fontsize=11)
-    ax.set_xticks([0, 25, 50, 75, 100])
+    ax.set_xticks([0, 10, 25, 50, 75, 100])
     ax.legend(loc='upper left')
     ax.set_xlim(-5, 105)
     ax.set_ylim(bottom=0)
 
 def main():
     base = base_dir()
-    csv_path = os.path.join(base, 'results', 'eval-5r-20260308', 'summary-exp3.2.csv')
+    csv_path = os.path.join(base, 'results', 'eval-5r-exp3.2-phase78-20260309', 'summary-exp3.2.csv')
     out_dir = os.path.join(base, 'evaluation', 'plots')
 
     setup_style()

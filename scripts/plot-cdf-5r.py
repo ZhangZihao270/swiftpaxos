@@ -5,6 +5,8 @@ CDF plots for 5-replica latency distributions.
 Reads latencies.json files from 5-replica experiment directories and generates
 CDF plots comparing latency distributions across protocols.
 
+Uses Phase 78 data (run1 for latency distributions).
+
 Figures:
   - Strong latency CDF at moderate load (t=32)
   - Weak latency CDF at moderate load (t=32)
@@ -43,7 +45,7 @@ def cdf_xy(values):
 
 def plot_cdf_panel(ax, data_dict, category, title):
     all_p999 = []
-    for proto in ['curpho', 'curpht', 'curp-baseline', 'raftht', 'raft']:
+    for proto in ['curpho', 'curpht', 'curp-baseline']:
         if proto not in data_dict or data_dict[proto] is None:
             continue
         lat = data_dict[proto]
@@ -84,13 +86,11 @@ def plot_cdf_panel(ax, data_dict, category, title):
 
 def main():
     base = base_dir()
-    results_dir = os.path.join(base, 'results', 'eval-5r-20260308')
-    exp11_dir = os.path.join(results_dir, 'exp1.1')
-    exp31_dir = os.path.join(results_dir, 'exp3.1')
-    exp32_dir = os.path.join(results_dir, 'exp3.2')
+    # Phase 78 data: use run1 for CDF (latency distributions)
+    exp31_dir = os.path.join(base, 'results', 'eval-5r-phase78-run1', 'exp3.1')
+    exp32_dir = os.path.join(base, 'results', 'eval-5r-exp3.2-phase78-20260309', 'exp3.2')
     out_dir = os.path.join(base, 'evaluation', 'plots')
 
-    print(f'Exp 1.1 dir: {exp11_dir}')
     print(f'Exp 3.1 dir: {exp31_dir}')
     print(f'Exp 3.2 dir: {exp32_dir}')
 
@@ -98,14 +98,8 @@ def main():
 
     # Load latency data
     data = {}
-    for proto, exp_dir in [
-        ('curpho', exp31_dir),
-        ('curpht', exp31_dir),
-        ('curp-baseline', exp31_dir),
-        ('raftht', exp11_dir),
-        ('raft', exp11_dir),
-    ]:
-        lat = load_latencies(exp_dir, proto, CDF_THREADS)
+    for proto in ['curpho', 'curpht', 'curp-baseline']:
+        lat = load_latencies(exp31_dir, proto, CDF_THREADS)
         if lat is not None:
             data[proto] = lat
             total = sum(len(lat.get(k, [])) for k in ['strong_write', 'strong_read', 'weak_write', 'weak_read'])
@@ -121,7 +115,7 @@ def main():
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.5))
     plot_cdf_panel(ax1, data, 'strong',
                    f'(a) Strong Latency CDF (t={CDF_THREADS})\n{WORKLOAD}')
-    weak_data = {k: v for k, v in data.items() if k in ('curpho', 'curpht', 'raftht')}
+    weak_data = {k: v for k, v in data.items() if k in ('curpho', 'curpht')}
     plot_cdf_panel(ax2, weak_data, 'weak',
                    f'(b) Weak Latency CDF (t={CDF_THREADS})\n{WORKLOAD}')
     plt.tight_layout(w_pad=3)
@@ -142,7 +136,7 @@ def main():
 
 
 def plot_weak_breakdown(data, out_dir):
-    hybrid_protos = ['curpho', 'curpht', 'raftht']
+    hybrid_protos = ['curpho', 'curpht']
     available = [p for p in hybrid_protos if p in data]
     if not available:
         return
@@ -192,7 +186,7 @@ def plot_t_property_cdf(exp32_dir, out_dir):
         print(f'Exp 3.2 dir not found: {exp32_dir}')
         return
 
-    protos = ['curpho', 'curpht', 'raftht']
+    protos = ['curpho', 'curpht', 'curp-baseline']
     ratios = [0, 50, 100]
     ratio_styles = {
         0:   ('-',  1.0, 'w0 (all strong)'),
@@ -235,7 +229,7 @@ def plot_t_property_cdf(exp32_dir, out_dir):
         ax.axhline(0.99, color='gray', linestyle='--', alpha=0.3, linewidth=0.8)
 
     fig.suptitle('T Property: Strong Latency CDF vs Weak Ratio\n'
-                 '95/5 R/W, t=8, Zipfian, 5 replicas, RTT=50ms',
+                 '95/5 R/W, t=32, Zipfian, 5 replicas, RTT=50ms',
                  fontsize=12, y=1.04)
     plt.tight_layout()
     save_figure(fig, out_dir, 'cdf-5r-t-property')
