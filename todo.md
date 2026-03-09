@@ -5479,30 +5479,48 @@ Based on diagnosis, port optimizations one at a time to isolate impact:
 
 ---
 
-### Phase 81: Raft-HT Weak Read Through Log (Fairness)
+### Phase 81: Revert Raft-HT Weak Read Change
 
-**Context**: For fair comparison with vanilla Raft (which replicates all ops including reads),
-weak reads in Raft-HT now go through the same path as weak writes — leader assigns log slot,
-reads committed state, replies immediately (1-RTT), then replicates async.
+**Context**: Phase 81 originally routed Raft-HT weak reads through log+replicate for "fairness"
+with vanilla Raft. After analysis, this was wrong: weak reads don't modify state, so replication
+is meaningless. Strong reads DO need consensus (linearizability), but weak reads only need causal
+consistency — a local read of committed state is sufficient and correct.
 
-**Rationale**: While weak reads technically only need causal consistency (local read is sufficient),
-routing them through the log makes the Raft vs Raft-HT comparison fair: both protocols log all
-operations. The 1-RTT latency advantage of Raft-HT comes from not waiting for commit, not from
-skipping the log.
+**Fairness analysis**:
+- Vanilla Raft: all ops are strong → reads go through consensus (correct, linearizability requires it)
+- Raft-HT: strong ops go through consensus; weak reads bypass consensus (correct, causal consistency)
+- This is NOT unfair — it's the whole point of hybrid consistency. The performance gain comes from
+  the protocol's ability to classify some ops as weak and serve them faster.
 
-**Changes made**:
-- `raft-ht.go`: Removed `weakReadLoop` goroutine; weak reads now go through `handleWeakPropose`
-  (same path as weak writes). For GET ops, leader reads state under `stateMu.RLock()` and
-  includes the value in `MWeakReply`.
-- `client.go`: `SendWeakRead` sends `MWeakPropose` with GET command to leader (was `MWeakRead`
-  to nearest replica). `handleWeakReply` handles both writes (Value=nil) and reads (Value=result).
-- `defs.go`: `MWeakReply` now includes `Value []byte` field (varint-prefixed, variable size).
-- `raft-ht_test.go`: Updated serialization tests for new `Value` field.
+#### Phase 81.1: Revert Changes
 
-#### Phase 81.1: Implement Weak Read Through Log
+- [x] 81.1a: Revert `raft-ht.go` — restore `weakReadLoop` goroutine, remove GET handling from
+  `handleWeakPropose`, restore `MWeakRead` message path [26:03:09]
+- [x] 81.1b: Revert `client.go` — restore `SendWeakRead` to send `MWeakRead` to nearest replica [26:03:09]
+- [x] 81.1c: Revert `defs.go` — remove `Value` field from `MWeakReply` [26:03:09]
+- [x] 81.1d: Revert `raft-ht_test.go` — restore serialization tests [26:03:09]
+- [x] 81.1e: Verify all Raft-HT tests pass after revert [26:03:09]
 
-- [x] 81.1a: Route weak reads through handleWeakPropose [26:03:09]
-- [x] 81.1b: Verify Raft-HT tests pass (42/42 pass) [26:03:09]
+---
+
+### Phase 82: CURP Leader Saturation Test
+
+**Context**: CURP leader uses async I/O (Batcher+Sender goroutines) while Raft leader uses sync
+I/O (broadcastAppendEntries in main loop). This implementation difference means CURP throughput
+scales linearly up to t=128 (~45K ops/s) while Raft saturates at ~18K ops/s. Cross-protocol
+comparison is unfair because the throughput gap comes from I/O architecture, not protocol design.
+
+**Goal**: Find CURP's actual leader saturation point by pushing thread count beyond 128.
+This tells us the true capacity of async I/O architecture and informs Phase 83's unification work.
+
+**Script**: `scripts/test-curp-saturation.sh` — runs CURP baseline (curpht with weakRatio=0)
+with thread counts [64, 128, 192, 256, 384, 512], 5 clients, pendings=15.
+
+#### Phase 82.1: Run Saturation Test
+
+- [ ] 82.1a: Fix script bug (bash string substitution in log line)
+- [ ] 82.1b: Run `bash scripts/test-curp-saturation.sh`
+- [ ] 82.1c: Record results — identify saturation point (throughput plateau / latency explosion)
 
 ---
 
