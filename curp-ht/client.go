@@ -1,10 +1,7 @@
 package curpht
 
 import (
-	"log"
 	"sync"
-	"sync/atomic"
-	"time"
 
 	"github.com/imdea-software/swiftpaxos/client"
 	"github.com/imdea-software/swiftpaxos/replica"
@@ -12,39 +9,6 @@ import (
 	fastrpc "github.com/imdea-software/swiftpaxos/rpc"
 	"github.com/imdea-software/swiftpaxos/state"
 )
-
-// clientInstrStats tracks client-side strong op phase timing via atomic counters.
-// Reset every second by the ticker goroutine.
-type clientInstrStats struct {
-	// Fast vs slow path counts
-	fastPathCount int64
-	slowPathCount int64
-
-	// Propose sent → first RecordAck received (network RTT)
-	firstAckNs    int64
-	firstAckCount int64
-
-	// Propose sent → fast path success/failure detected
-	fastPathNs    int64 // only for successful fast path ops
-	fastPathFailNs    int64 // time to detect fast path failure (slow path ack triggers)
-	fastPathFailCount int64
-
-	// Fast path failure → MSyncReply received (slow path wait)
-	syncReplyWaitNs    int64
-	syncReplyWaitCount int64
-}
-
-func (s *clientInstrStats) reset() {
-	atomic.StoreInt64(&s.fastPathCount, 0)
-	atomic.StoreInt64(&s.slowPathCount, 0)
-	atomic.StoreInt64(&s.firstAckNs, 0)
-	atomic.StoreInt64(&s.firstAckCount, 0)
-	atomic.StoreInt64(&s.fastPathNs, 0)
-	atomic.StoreInt64(&s.fastPathFailNs, 0)
-	atomic.StoreInt64(&s.fastPathFailCount, 0)
-	atomic.StoreInt64(&s.syncReplyWaitNs, 0)
-	atomic.StoreInt64(&s.syncReplyWaitCount, 0)
-}
 
 // cacheEntry stores a value and its version (slot number) for the client local cache
 type cacheEntry struct {
@@ -90,12 +54,6 @@ type Client struct {
 	// Slot from last leader MReply (for strong fast-path cache update)
 	lastReplySlot int32
 
-	// Client-side strong op instrumentation (Phase 75.2a)
-	proposeSentAt    map[int32]time.Time // seqnum → time Propose was sent
-	firstAckSeen     map[int32]struct{}  // seqnum set: first ack already recorded
-	fastPathFailedAt map[int32]time.Time // seqnum → time fast path failure detected
-	cInstr           clientInstrStats
-
 	// Mutex for concurrent map access (needed for pipelining)
 	mu sync.Mutex
 }
@@ -139,9 +97,6 @@ func NewClient(b *client.BufferClient, repNum, reqNum, pclients int) *Client {
 		strongPendingKeys: make(map[int32]int64),
 		localCache:        make(map[int64]cacheEntry),
 
-		proposeSentAt:    make(map[int32]time.Time),
-		firstAckSeen:     make(map[int32]struct{}),
-		fastPathFailedAt: make(map[int32]time.Time),
 	}
 
 	c.lastCmdId = CommandId{
@@ -164,7 +119,6 @@ func NewClient(b *client.BufferClient, repNum, reqNum, pclients int) *Client {
 	}
 
 	go c.handleMsgs()
-	go c.instrTicker()
 
 	return c
 }
@@ -243,14 +197,6 @@ func (c *Client) handleRecordAck(r *MRecordAck, fromLeader bool) {
 		c.mu.Unlock()
 		return
 	}
-	// Record first ack timing (network RTT from Propose sent)
-	if _, seen := c.firstAckSeen[r.CmdId.SeqNum]; !seen {
-		if sentAt, ok := c.proposeSentAt[r.CmdId.SeqNum]; ok {
-			atomic.AddInt64(&c.cInstr.firstAckNs, int64(time.Since(sentAt)))
-			atomic.AddInt64(&c.cInstr.firstAckCount, 1)
-			c.firstAckSeen[r.CmdId.SeqNum] = struct{}{}
-		}
-	}
 	c.mu.Unlock()
 
 	if c.ballot == -1 {
@@ -295,24 +241,6 @@ func (c *Client) handleSyncReply(rep *MSyncReply) {
 	c.val = state.Value(rep.Rep)
 	c.delivered[rep.CmdId.SeqNum] = struct{}{}
 
-	// Record slow path timing
-	if sentAt, ok := c.proposeSentAt[rep.CmdId.SeqNum]; ok {
-		totalNs := int64(time.Since(sentAt))
-		atomic.AddInt64(&c.cInstr.slowPathCount, 1)
-		// If fast path failure was recorded, measure the wait from failure → sync reply
-		if failAt, hasFail := c.fastPathFailedAt[rep.CmdId.SeqNum]; hasFail {
-			atomic.AddInt64(&c.cInstr.syncReplyWaitNs, int64(time.Since(failAt)))
-			atomic.AddInt64(&c.cInstr.syncReplyWaitCount, 1)
-			delete(c.fastPathFailedAt, rep.CmdId.SeqNum)
-		} else {
-			// No explicit fast path failure recorded — use total time as sync wait estimate
-			atomic.AddInt64(&c.cInstr.syncReplyWaitNs, totalNs)
-			atomic.AddInt64(&c.cInstr.syncReplyWaitCount, 1)
-		}
-		delete(c.proposeSentAt, rep.CmdId.SeqNum)
-		delete(c.firstAckSeen, rep.CmdId.SeqNum)
-	}
-
 	// Update local cache from strong slow-path result
 	if key, hasKey := c.strongPendingKeys[rep.CmdId.SeqNum]; hasKey {
 		ver := rep.Slot
@@ -343,15 +271,6 @@ func (c *Client) handleAcks(leaderMsg interface{}, msgs []interface{}) {
 	if _, exists := c.delivered[seqNum]; exists {
 		c.mu.Unlock()
 		return
-	}
-
-	// Record fast path timing (Propose sent → quorum completion)
-	if sentAt, ok := c.proposeSentAt[seqNum]; ok {
-		atomic.AddInt64(&c.cInstr.fastPathNs, int64(time.Since(sentAt)))
-		atomic.AddInt64(&c.cInstr.fastPathCount, 1)
-		delete(c.proposeSentAt, seqNum)
-		delete(c.firstAckSeen, seqNum)
-		delete(c.fastPathFailedAt, seqNum)
 	}
 
 	c.delivered[seqNum] = struct{}{}
@@ -531,7 +450,6 @@ func (c *Client) SendStrongWrite(key int64, value []byte) int32 {
 	seqnum := c.SendWrite(key, value)
 	c.mu.Lock()
 	c.strongPendingKeys[seqnum] = key
-	c.proposeSentAt[seqnum] = time.Now()
 	c.mu.Unlock()
 	return seqnum
 }
@@ -542,7 +460,6 @@ func (c *Client) SendStrongRead(key int64) int32 {
 	seqnum := c.SendRead(key)
 	c.mu.Lock()
 	c.strongPendingKeys[seqnum] = key
-	c.proposeSentAt[seqnum] = time.Now()
 	c.mu.Unlock()
 	return seqnum
 }
@@ -550,46 +467,6 @@ func (c *Client) SendStrongRead(key int64) int32 {
 // SupportsWeak returns true since curp-ht supports weak consistency commands.
 func (c *Client) SupportsWeak() bool {
 	return true
-}
-
-// instrTicker logs client-side strong op instrumentation stats every second.
-func (c *Client) instrTicker() {
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-	for range ticker.C {
-		fp := atomic.LoadInt64(&c.cInstr.fastPathCount)
-		sp := atomic.LoadInt64(&c.cInstr.slowPathCount)
-		faNs := atomic.LoadInt64(&c.cInstr.firstAckNs)
-		faCnt := atomic.LoadInt64(&c.cInstr.firstAckCount)
-		fpNs := atomic.LoadInt64(&c.cInstr.fastPathNs)
-		fpfNs := atomic.LoadInt64(&c.cInstr.fastPathFailNs)
-		fpfCnt := atomic.LoadInt64(&c.cInstr.fastPathFailCount)
-		srNs := atomic.LoadInt64(&c.cInstr.syncReplyWaitNs)
-		srCnt := atomic.LoadInt64(&c.cInstr.syncReplyWaitCount)
-
-		if fp+sp == 0 && faCnt == 0 {
-			c.cInstr.reset()
-			continue
-		}
-
-		var faAvgUs, fpAvgMs, fpfAvgMs, srAvgMs float64
-		if faCnt > 0 {
-			faAvgUs = float64(faNs) / float64(faCnt) / 1000.0
-		}
-		if fp > 0 {
-			fpAvgMs = float64(fpNs) / float64(fp) / 1e6
-		}
-		if fpfCnt > 0 {
-			fpfAvgMs = float64(fpfNs) / float64(fpfCnt) / 1e6
-		}
-		if srCnt > 0 {
-			srAvgMs = float64(srNs) / float64(srCnt) / 1e6
-		}
-
-		log.Printf("[CINSTR-HT] fast=%d slow=%d firstAck=%d(%.1fus) fastPath=%.2fms fpFail=%d(%.2fms) syncWait=%d(%.2fms)",
-			fp, sp, faCnt, faAvgUs, fpAvgMs, fpfCnt, fpfAvgMs, srCnt, srAvgMs)
-		c.cInstr.reset()
-	}
 }
 
 func (c *Client) MarkAllSent() {}

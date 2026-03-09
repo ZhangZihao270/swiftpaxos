@@ -5033,6 +5033,34 @@ No immediate fix required — the protocols perform as expected per their design
 
 ---
 
+### Phase 76: Re-run Exp 3.1 (Throughput Scaling) with Clean Code
+
+**Goal**: Re-run Experiment 3.1 with the current code state (post Phase 73 revert, post Phase 75 instrumentation removal) to get clean baseline numbers. The Phase 72 data (`eval-5r-20260308`) was collected before Phase 73/74/75 code changes. Need to verify whether CURP-HT S-P50 divergence persists and confirm CURP-HO/CURP-HT peak throughput numbers.
+
+**Priority**: HIGH
+
+- [x] 76.1: Remove Phase 75 instrumentation code to ensure clean evaluation
+  - Removed instrStats struct, reset(), slotAssignedAt, ticker goroutines from curp-ht.go and curp-ho.go
+  - Removed clientInstrStats, proposeSentAt/firstAckSeen/fastPathFailedAt/msyncRetryCount maps, instrTicker() from both client.go files
+  - Removed 10 instrumentation test functions (5 per protocol)
+  - Cleaned up unused imports (log, runtime, sync/atomic)
+  - All tests pass: `go test ./...`
+
+- [ ] 76.2: Run Exp 3.1 — Throughput scaling (5 replicas, 0% conflict)
+  - Protocols: curp-baseline, curpho, curpht
+  - Thread counts: 1, 2, 4, 8, 16, 32, 64, 96, 128
+  - Config: 5 replicas, weakRatio=50, weakWrites=5, 0% conflict
+  - Save results to `results/eval-5r-phase76-20260308/`
+  - Generate summary CSV: `summary-exp3.1.csv`
+
+- [ ] 76.3: Compare with Phase 72 results
+  - Compare peak throughput: CURP-HO (was 92K), CURP-HT (was 47K), CURP-baseline (was 28K)
+  - Compare S-P50 at high load: CURP-HT t=128 (was 373ms), CURP-HO t=128 (was 100ms)
+  - Document any significant changes in `todo.md`
+  - Generate updated figures and LaTeX tables
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task

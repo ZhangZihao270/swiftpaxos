@@ -1,11 +1,8 @@
 package curpho
 
 import (
-	"log"
-	"runtime"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/imdea-software/swiftpaxos/config"
@@ -16,47 +13,6 @@ import (
 	"github.com/imdea-software/swiftpaxos/state"
 	"github.com/orcaman/concurrent-map"
 )
-
-// instrStats tracks per-second instrumentation metrics for the leader's event loop.
-type instrStats struct {
-	proposeCount       int64 // strong propose count
-	weakProposeCount   int64 // weak propose count (leader weak writes)
-	causalProposeCount int64 // causal propose count (all replicas)
-	weakReadCount      int64 // weak read count
-	acceptCount        int64 // accept message count
-	commitCount        int64 // commit message count
-	syncCount          int64 // sync request count
-	deliverCount       int64 // deliver event count
-
-	// Cumulative processing time (nanoseconds)
-	proposeTimeNs       int64
-	weakProposeTimeNs   int64
-	causalProposeTimeNs int64
-
-	// Slow path pipeline timing (nanoseconds)
-	commitPipelineNs    int64 // slot assignment → COMMIT phase
-	commitPipelineCount int64
-	syncReplyPipelineNs    int64 // slot assignment → MSyncReply sent
-	syncReplyPipelineCount int64
-}
-
-func (s *instrStats) reset() {
-	atomic.StoreInt64(&s.proposeCount, 0)
-	atomic.StoreInt64(&s.weakProposeCount, 0)
-	atomic.StoreInt64(&s.causalProposeCount, 0)
-	atomic.StoreInt64(&s.weakReadCount, 0)
-	atomic.StoreInt64(&s.acceptCount, 0)
-	atomic.StoreInt64(&s.commitCount, 0)
-	atomic.StoreInt64(&s.syncCount, 0)
-	atomic.StoreInt64(&s.deliverCount, 0)
-	atomic.StoreInt64(&s.proposeTimeNs, 0)
-	atomic.StoreInt64(&s.weakProposeTimeNs, 0)
-	atomic.StoreInt64(&s.causalProposeTimeNs, 0)
-	atomic.StoreInt64(&s.commitPipelineNs, 0)
-	atomic.StoreInt64(&s.commitPipelineCount, 0)
-	atomic.StoreInt64(&s.syncReplyPipelineNs, 0)
-	atomic.StoreInt64(&s.syncReplyPipelineCount, 0)
-}
 
 type Replica struct {
 	*replica.Replica
@@ -131,9 +87,6 @@ type Replica struct {
 
 	// Track per-key version (slot of last write) for weak read responses
 	keyVersions cmap.ConcurrentMap
-
-	// Instrumentation stats (Phase 75)
-	stats instrStats
 }
 
 // pendingWrite tracks an uncommitted write for speculative read computation
@@ -167,9 +120,6 @@ type commandDesc struct {
 
 	isWeak  bool // Mark if this is a weak command
 	applied bool // Track if command has been applied to state machine
-
-	// Instrumentation: timestamp when slot was assigned (Phase 75.1b)
-	slotAssignedAt time.Time
 
 	// Cached string keys to avoid repeated conversions
 	slotStr  string // cached strconv.Itoa(cmdSlot)
@@ -305,67 +255,14 @@ func (r *Replica) run() {
 
 	go r.WaitForClientConnections()
 
-	// Instrumentation: log per-second stats on leader
-	if r.isLeader {
-		go func() {
-			ticker := time.NewTicker(1 * time.Second)
-			defer ticker.Stop()
-			for range ticker.C {
-				if r.Shutdown {
-					return
-				}
-				pc := atomic.LoadInt64(&r.stats.proposeCount)
-				wpc := atomic.LoadInt64(&r.stats.weakProposeCount)
-				cpc := atomic.LoadInt64(&r.stats.causalProposeCount)
-				wrc := atomic.LoadInt64(&r.stats.weakReadCount)
-				ac := atomic.LoadInt64(&r.stats.acceptCount)
-				cc := atomic.LoadInt64(&r.stats.commitCount)
-				sc := atomic.LoadInt64(&r.stats.syncCount)
-				dc := atomic.LoadInt64(&r.stats.deliverCount)
-				ptNs := atomic.LoadInt64(&r.stats.proposeTimeNs)
-				wptNs := atomic.LoadInt64(&r.stats.weakProposeTimeNs)
-				cptNs := atomic.LoadInt64(&r.stats.causalProposeTimeNs)
-				cpNs := atomic.LoadInt64(&r.stats.commitPipelineNs)
-				cpCnt := atomic.LoadInt64(&r.stats.commitPipelineCount)
-				srpNs := atomic.LoadInt64(&r.stats.syncReplyPipelineNs)
-				srpCnt := atomic.LoadInt64(&r.stats.syncReplyPipelineCount)
-
-				var avgPropUs, avgWpropUs, avgCpropUs float64
-				if pc > 0 {
-					avgPropUs = float64(ptNs) / float64(pc) / 1000.0
-				}
-				if wpc > 0 {
-					avgWpropUs = float64(wptNs) / float64(wpc) / 1000.0
-				}
-				if cpc > 0 {
-					avgCpropUs = float64(cptNs) / float64(cpc) / 1000.0
-				}
-				var avgCommitPipeMs, avgSyncReplyPipeMs float64
-				if cpCnt > 0 {
-					avgCommitPipeMs = float64(cpNs) / float64(cpCnt) / 1e6
-				}
-				if srpCnt > 0 {
-					avgSyncReplyPipeMs = float64(srpNs) / float64(srpCnt) / 1e6
-				}
-
-				goroutines := runtime.NumGoroutine()
-				log.Printf("[INSTR-HO] propose=%d(%.1fus) weakPropose=%d(%.1fus) causalPropose=%d(%.1fus) weakRead=%d accept=%d commit=%d sync=%d deliver=%d goroutines=%d routineCount=%d commitPipe=%d(%.1fms) syncReplyPipe=%d(%.1fms)",
-					pc, avgPropUs, wpc, avgWpropUs, cpc, avgCpropUs, wrc, ac, cc, sc, dc, goroutines, r.routineCount, cpCnt, avgCommitPipeMs, srpCnt, avgSyncReplyPipeMs)
-				r.stats.reset()
-			}
-		}()
-	}
-
 	var cmdId CommandId
 	for !r.Shutdown {
 		select {
 		case int := <-r.deliverChan:
-			atomic.AddInt64(&r.stats.deliverCount, 1)
 			r.getCmdDesc(int, "deliver", -1)
 
 		case propose := <-r.ProposeChan:
 			if r.isLeader {
-				t0 := time.Now()
 				proposeCmdId := CommandId{ClientId: propose.ClientId, SeqNum: propose.CommandId}
 				dep := r.leaderUnsyncStrong(propose.Command, r.lastCmdSlot, proposeCmdId)
 				desc := r.getCmdDescSeq(r.lastCmdSlot, propose, dep, true) // why Seq?
@@ -374,8 +271,6 @@ func (r *Replica) run() {
 						propose.ClientId, propose.CommandId)
 				}
 				r.lastCmdSlot++
-				atomic.AddInt64(&r.stats.proposeTimeNs, int64(time.Since(t0)))
-				atomic.AddInt64(&r.stats.proposeCount, 1)
 			} else {
 				cmdId.ClientId = propose.ClientId
 				cmdId.SeqNum = propose.CommandId
@@ -401,7 +296,6 @@ func (r *Replica) run() {
 			}
 
 		case m := <-r.cs.acceptChan:
-			atomic.AddInt64(&r.stats.acceptCount, 1)
 			acc := m.(*MAccept)
 			if r.values.Has(acc.CmdId.String()) {
 				continue
@@ -410,7 +304,6 @@ func (r *Replica) run() {
 			r.getCmdDesc(acc.CmdSlot, acc, -1)
 
 		case m := <-r.cs.acceptAckChan:
-			atomic.AddInt64(&r.stats.acceptCount, 1)
 			ack := m.(*MAcceptAck)
 			r.getCmdDesc(ack.CmdSlot, ack, -1)
 
@@ -430,12 +323,10 @@ func (r *Replica) run() {
 			}
 
 		case m := <-r.cs.commitChan:
-			atomic.AddInt64(&r.stats.commitCount, 1)
 			commit := m.(*MCommit)
 			r.getCmdDesc(commit.CmdSlot, commit, -1)
 
 		case m := <-r.cs.syncChan:
-			atomic.AddInt64(&r.stats.syncCount, 1)
 			sync := m.(*MSync)
 			val, exists := r.values.Get(sync.CmdId.String())
 			if exists {
@@ -502,24 +393,17 @@ func (r *Replica) run() {
 
 		case m := <-r.cs.weakProposeChan:
 			if r.isLeader {
-				t0 := time.Now()
 				weakPropose := m.(*MWeakPropose)
 				r.handleWeakPropose(weakPropose)
-				atomic.AddInt64(&r.stats.weakProposeTimeNs, int64(time.Since(t0)))
-				atomic.AddInt64(&r.stats.weakProposeCount, 1)
 			}
 			// Non-Leader ignores weak propose (should not receive it)
 
 		case m := <-r.cs.causalProposeChan:
-			t0 := time.Now()
 			causalPropose := m.(*MCausalPropose)
 			r.handleCausalPropose(causalPropose)
-			atomic.AddInt64(&r.stats.causalProposeTimeNs, int64(time.Since(t0)))
-			atomic.AddInt64(&r.stats.causalProposeCount, 1)
 			// ALL replicas handle causal proposes (witness pool + reply)
 
 		case m := <-r.cs.weakReadChan:
-			atomic.AddInt64(&r.stats.weakReadCount, 1)
 			weakRead := m.(*MWeakRead)
 			r.handleWeakRead(weakRead)
 		}
@@ -539,7 +423,6 @@ func (r *Replica) handlePropose(msg *defs.GPropose, desc *commandDesc, slot int,
 	}
 	desc.cmdSlot = slot
 	desc.dep = dep
-	desc.slotAssignedAt = time.Now()
 	if dep != -1 {
 		depDesc := r.getCmdDesc(dep, nil, -1)
 		if depDesc != nil {
@@ -667,11 +550,6 @@ func (r *Replica) handleCommit(msg *MCommit, desc *commandDesc) {
 
 		desc.phase = COMMIT
 		if r.isLeader {
-			// Instrumentation: measure slot assignment → COMMIT pipeline
-			if !desc.slotAssignedAt.IsZero() {
-				atomic.AddInt64(&r.stats.commitPipelineNs, int64(time.Since(desc.slotAssignedAt)))
-				atomic.AddInt64(&r.stats.commitPipelineCount, 1)
-			}
 			r.committed.Set(strconv.Itoa(desc.cmdSlot), struct{}{})
 			r.notifyCommit(desc.cmdSlot) // Notify waiters that slot is committed
 		}
@@ -1119,11 +997,6 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 						Rep:     desc.val,
 					}
 					r.sender.SendToClient(desc.propose.ClientId, rep, r.cs.syncReplyRPC)
-					// Instrumentation: measure slot assignment → MSyncReply sent
-					if !desc.slotAssignedAt.IsZero() {
-						atomic.AddInt64(&r.stats.syncReplyPipelineNs, int64(time.Since(desc.slotAssignedAt)))
-						atomic.AddInt64(&r.stats.syncReplyPipelineCount, 1)
-					}
 				}
 			}
 			// For weak commands on leader: skip cleanup here. The async function
