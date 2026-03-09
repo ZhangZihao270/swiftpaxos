@@ -34,6 +34,10 @@ type clientInstrStats struct {
 	// Fast path failure → MSyncReply received (slow path wait)
 	syncReplyWaitNs    int64
 	syncReplyWaitCount int64
+
+	// MSync retry counts (Phase 75.2b)
+	msyncRetryTotal int64 // sum of retries across all completed ops
+	msyncRetryOps   int64 // number of ops that had at least 1 retry
 }
 
 func (s *clientInstrStats) reset() {
@@ -46,6 +50,8 @@ func (s *clientInstrStats) reset() {
 	atomic.StoreInt64(&s.fastPathFailCount, 0)
 	atomic.StoreInt64(&s.syncReplyWaitNs, 0)
 	atomic.StoreInt64(&s.syncReplyWaitCount, 0)
+	atomic.StoreInt64(&s.msyncRetryTotal, 0)
+	atomic.StoreInt64(&s.msyncRetryOps, 0)
 }
 
 // cacheEntry stores a cached value and its version (slot number).
@@ -110,10 +116,11 @@ type Client struct {
 	stalledRetries     int
 	forceDeliverSeen   bool // true after first force-delivery (lower threshold for subsequent)
 
-	// Client-side strong op instrumentation (Phase 75.2a)
+	// Client-side strong op instrumentation (Phase 75.2a, 75.2b)
 	proposeSentAt    map[int32]time.Time // seqnum → time Propose was sent
 	firstAckSeen     map[int32]struct{}  // seqnum set: first ack already recorded
 	fastPathFailedAt map[int32]time.Time // seqnum → time fast path failure detected
+	msyncRetryCount  map[int32]int64     // seqnum → number of MSync retries (Phase 75.2b)
 	cInstr           clientInstrStats
 
 	// Mutex for concurrent map access (needed for pipelining)
@@ -183,6 +190,7 @@ func NewClient(b *client.BufferClient, repNum, reqNum, pclients int) *Client {
 		proposeSentAt:    make(map[int32]time.Time),
 		firstAckSeen:     make(map[int32]struct{}),
 		fastPathFailedAt: make(map[int32]time.Time),
+		msyncRetryCount:  make(map[int32]int64),
 
 		writerMu:         make([]sync.Mutex, repNum),
 		remoteSendQueues: make([]chan sendRequest, repNum),
@@ -351,6 +359,11 @@ func (c *Client) handleStrongMsgs() {
 			}
 
 			// MSync for strong and causal write commands
+			c.mu.Lock()
+			for _, seqnum := range syncSeqnums {
+				c.msyncRetryCount[seqnum]++
+			}
+			c.mu.Unlock()
 			for _, seqnum := range syncSeqnums {
 				sync := &MSync{
 					CmdId: CommandId{ClientId: clientId, SeqNum: seqnum},
@@ -495,6 +508,13 @@ func (c *Client) handleSyncReply(rep *MSyncReply) {
 		delete(c.firstAckSeen, rep.CmdId.SeqNum)
 	}
 
+	// Record MSync retry count (Phase 75.2b)
+	if retries, hasRetry := c.msyncRetryCount[rep.CmdId.SeqNum]; hasRetry {
+		atomic.AddInt64(&c.cInstr.msyncRetryTotal, retries)
+		atomic.AddInt64(&c.cInstr.msyncRetryOps, 1)
+		delete(c.msyncRetryCount, rep.CmdId.SeqNum)
+	}
+
 	// Clear write set entries up to this committed seqnum
 	for ws := range c.writeSet {
 		if ws.ClientId == c.ClientId && ws.SeqNum <= rep.CmdId.SeqNum {
@@ -581,6 +601,7 @@ func (c *Client) handleFastPathAcks(leaderMsg interface{}, msgs []interface{}) {
 		delete(c.firstAckSeen, cmdId.SeqNum)
 		delete(c.fastPathFailedAt, cmdId.SeqNum)
 	}
+	delete(c.msyncRetryCount, cmdId.SeqNum)
 
 	c.delivered[cmdId.SeqNum] = struct{}{}
 	// Clear write set entries up to this delivered seqnum
@@ -622,6 +643,7 @@ func (c *Client) handleSlowPathAcks(leaderMsg interface{}, msgs []interface{}) {
 		delete(c.firstAckSeen, seqNum)
 		delete(c.fastPathFailedAt, seqNum)
 	}
+	delete(c.msyncRetryCount, seqNum)
 
 	c.delivered[seqNum] = struct{}{}
 	c.mu.Unlock()
@@ -943,6 +965,8 @@ func (c *Client) instrTicker() {
 		fpfCnt := atomic.LoadInt64(&c.cInstr.fastPathFailCount)
 		srNs := atomic.LoadInt64(&c.cInstr.syncReplyWaitNs)
 		srCnt := atomic.LoadInt64(&c.cInstr.syncReplyWaitCount)
+		msyncTotal := atomic.LoadInt64(&c.cInstr.msyncRetryTotal)
+		msyncOps := atomic.LoadInt64(&c.cInstr.msyncRetryOps)
 
 		if fp+sp == 0 && faCnt == 0 {
 			c.cInstr.reset()
@@ -963,8 +987,13 @@ func (c *Client) instrTicker() {
 			srAvgMs = float64(srNs) / float64(srCnt) / 1e6
 		}
 
-		log.Printf("[CINSTR-HO] fast=%d slow=%d firstAck=%d(%.1fus) fastPath=%.2fms fpFail=%d(%.2fms) syncWait=%d(%.2fms)",
-			fp, sp, faCnt, faAvgUs, fpAvgMs, fpfCnt, fpfAvgMs, srCnt, srAvgMs)
+		var msyncAvg float64
+		if msyncOps > 0 {
+			msyncAvg = float64(msyncTotal) / float64(msyncOps)
+		}
+
+		log.Printf("[CINSTR-HO] fast=%d slow=%d firstAck=%d(%.1fus) fastPath=%.2fms fpFail=%d(%.2fms) syncWait=%d(%.2fms) msyncRetry=%d(avg=%.1f)",
+			fp, sp, faCnt, faAvgUs, fpAvgMs, fpfCnt, fpfAvgMs, srCnt, srAvgMs, msyncOps, msyncAvg)
 		c.cInstr.reset()
 	}
 }

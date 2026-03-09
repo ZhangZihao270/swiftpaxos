@@ -5470,6 +5470,16 @@ func TestClientInstrStatsAtomicIncrement(t *testing.T) {
 	if atomic.LoadInt64(&s.syncReplyWaitCount) != 1 {
 		t.Error("syncReplyWaitCount mismatch")
 	}
+
+	// Phase 75.2b: MSync retry counters
+	atomic.AddInt64(&s.msyncRetryTotal, 12)
+	atomic.AddInt64(&s.msyncRetryOps, 4)
+	if atomic.LoadInt64(&s.msyncRetryTotal) != 12 {
+		t.Error("msyncRetryTotal mismatch")
+	}
+	if atomic.LoadInt64(&s.msyncRetryOps) != 4 {
+		t.Error("msyncRetryOps mismatch")
+	}
 }
 
 // TestClientInstrStatsReset tests that clientInstrStats reset() zeroes all counters.
@@ -5485,6 +5495,8 @@ func TestClientInstrStatsReset(t *testing.T) {
 	atomic.StoreInt64(&s.fastPathFailCount, 2)
 	atomic.StoreInt64(&s.syncReplyWaitNs, 100000)
 	atomic.StoreInt64(&s.syncReplyWaitCount, 4)
+	atomic.StoreInt64(&s.msyncRetryTotal, 15)
+	atomic.StoreInt64(&s.msyncRetryOps, 5)
 
 	s.reset()
 
@@ -5501,6 +5513,8 @@ func TestClientInstrStatsReset(t *testing.T) {
 		{"fastPathFailCount", atomic.LoadInt64(&s.fastPathFailCount)},
 		{"syncReplyWaitNs", atomic.LoadInt64(&s.syncReplyWaitNs)},
 		{"syncReplyWaitCount", atomic.LoadInt64(&s.syncReplyWaitCount)},
+		{"msyncRetryTotal", atomic.LoadInt64(&s.msyncRetryTotal)},
+		{"msyncRetryOps", atomic.LoadInt64(&s.msyncRetryOps)},
 	}
 	for _, f := range fields {
 		if f.val != 0 {

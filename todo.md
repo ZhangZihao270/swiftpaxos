@@ -4944,7 +4944,7 @@ These are all constant-factor improvements. The 2x gap with CURP-HO is structura
   - Time from fast path failure → MSyncReply received (slow path wait)
   - Count: how many strong ops succeed on fast path vs slow path
 
-- [ ] **75.2b** Log MSync retry count per strong op:
+- [x] **75.2b** Log MSync retry count per strong op:
   - How many MSync retries before delivery? (1 = no retry, 2+ = retries)
   - If CURP-HT has more retries, that explains the latency growth
 
