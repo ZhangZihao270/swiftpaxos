@@ -5243,7 +5243,16 @@ Based on diagnosis, port optimizations one at a time to isolate impact:
   - At t=128: S-P50 latency 330ms→99.7ms (baseline), 390ms→99.8ms (HT)
   - Note: CURP-HT regressed at t=1 (2698→1612, -40%) — timer/goroutine overhead at low concurrency
 
-- [ ] 77.3b: Run 3-replica comparison to verify improvement scales across cluster sizes
+- [x] 77.3b: Run 3-replica comparison to verify improvement scales across cluster sizes
+  - Results: results/eval-dist-phase77-20260308/summary-exp3.1.csv
+  - Baseline: results/eval-dist-20260307/summary-exp3.1.csv (pre-Phase 77.2)
+  - **curp-baseline**: Peak 32.0K → 48.9K (+52.6%) — D7/D8 fixes scale to 3r
+  - **CURP-HT**: Peak 54.6K → 62.7K (+14.8%) — improvements confirmed at 3r
+  - **CURP-HO**: Peak 63.5K → 65.9K (+3.8%) — minor variance, no code changes
+  - **CURP-HT/HO gap (3r)**: 86.0% → 95.1% — near-parity achieved
+  - Cross-cluster: 3r peaks are 65-80% of 5r peaks (expected: fewer replicas = less parallelism)
+  - Note: curp-baseline 3r improvement (+52.6%) is smaller than 5r (+172.3%) because
+    the 3r cluster was already less constrained by slot ordering bottleneck
 
 - [ ] 77.3c: Write summary comparing before/after for each optimization
 
