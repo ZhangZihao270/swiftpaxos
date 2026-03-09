@@ -5125,6 +5125,13 @@ Key: ↑ = growing with load, ≈ = stable
 - Leader event loop saturated with events → Propose queuing → delayed speculative MReply
 - But CURP-HO leader handles MORE events (97K vs 44K) with LOWER latency — contradicts
 
+**H5: Leader saturation from weak write Paxos traffic (NEW from 77.1d)** — MOST LIKELY
+- CURP-HT leader processes weak writes through full Paxos pipeline (Accept→AcceptAck→Commit)
+- This adds ~50% more Accept/AcceptAck/Commit events through the leader event loop
+- CURP-HO replies to weak writes immediately (before replication), leader processes fewer events
+- CURP-HO also distributes weak ops to bound replicas (CausalPropose), further offloading leader
+- Explains: CURP-HO leader handles 92K ops but only ~49% strong through Paxos; CURP-HT leader handles 49K ops but ALL through Paxos
+
 #### Phase 77.1: Instrument & Measure (Diagnosis)
 
 - [x] 77.1a: Add fast-path success rate counter to CURP-HT and CURP-HO clients
@@ -5144,7 +5151,38 @@ Key: ↑ = growing with load, ≈ = stable
   - Logs `[MSGDROP] total=N` every 1000 drops to track ongoing issues
   - If drops > 0 at high load, H3 (permanent stalls) is confirmed
 
-- [ ] 77.1d: Run instrumented CURP-HT and CURP-HO at t=8 and t=128, compare metrics
+- [x] 77.1d: Run instrumented CURP-HT and CURP-HO at t=8 and t=128, compare metrics
+  - Script: `scripts/eval-instr-77.sh`, results in `results/eval-instr-77-20260308/`
+  - **Experiment Results**:
+
+    | Metric | CURP-HT t=8 | CURP-HT t=128 | CURP-HO t=8 | CURP-HO t=128 |
+    |--------|-------------|---------------|-------------|---------------|
+    | Throughput | 21,166 | 49,320 | 22,750 | **92,033** |
+    | Fast path % | 99.9% | 100.0% | 22.2% | 0.2% |
+    | Strong Avg | 51.5ms | 328ms | 52.5ms | **118ms** |
+    | Strong P50 | 50.7ms | **318ms** | 51.1ms | **100ms** |
+    | Weak Avg | 5.3ms | 60.6ms | 0.5ms | **76.9ms** |
+    | Weak P50 | 0.26ms | **3.0ms** | 0.23ms | 71.5ms |
+    | SyncReply avg | 982ms | 1,817ms | N/A | N/A |
+    | Message drops | 0 | 0 | 0 | 0 |
+
+  - **Key Finding: H3 ruled out** — Zero message drops in all runs. Permanent stalls from dropped messages are NOT the cause.
+  - **Key Finding: CURP-HT fast path counter is misleading** — Both `acks` (3/4 quorum) and `macks` (majority) use the same `handleAcks` callback, so majority completion counts as "fast path". The 100% fast path means majority quorum always completes before SyncReply, confirming the speculative reply mechanism works.
+  - **Key Finding: SyncReply 982-1817ms confirms slot ordering bottleneck on leader** — The commit pipeline (slot assignment → execution → SyncReply) takes ~1-2 seconds at high load. But this doesn't directly hurt client latency since fast path (majority RecordAcks) completes first.
+  - **Root Cause Analysis: Why CURP-HT S-P50=318ms vs CURP-HO=100ms at t=128**
+    1. **Weak writes compete for Paxos slots in CURP-HT**: Both protocols assign Paxos slots to weak writes. But CURP-HT weak writes wait for Paxos commit (majority AcceptAcks) before replying, while CURP-HO replies immediately (before replication). This means CURP-HT's leader processes MORE weak-write Accept/AcceptAck traffic through the event loop.
+    2. **Leader event loop contention**: CURP-HT processes BOTH strong Propose AND weak WeakPropose through a single leader. CURP-HO distributes weak writes to bound replicas (CausalPropose), offloading the leader.
+    3. **Strong latency follows from leader saturation**: When the leader is saturated processing weak writes (Accept/AcceptAck/Commit for ~50% of ops), strong speculative MReply is delayed, causing S-P50 to grow.
+    4. **CURP-HO weak P50=72ms vs CURP-HT weak P50=3ms at t=128**: CURP-HT weak reads hit the nearest replica (1 RTT, sub-ms), while CURP-HO weak writes go through the full causal path. But this doesn't affect strong latency.
+
+  - **Hypothesis Refinement**:
+    - H1 (MSync recovery): NOT the steady-state cause (MSync retry=2s, S-P50=100ms). But may help as safety net.
+    - H2 (Client single-goroutine): PLAUSIBLE but secondary. Both protocols process ~same message volume per goroutine.
+    - H3 (Message drops): **RULED OUT** — zero drops.
+    - **H5 (NEW): Leader saturation from weak write Paxos traffic** — MOST LIKELY root cause.
+      - CURP-HT leader handles weak writes through Paxos (Accept→AcceptAck→Commit), consuming event loop cycles.
+      - CURP-HO leader replies immediately to weak writes and replicates asynchronously.
+      - Fix: Port CURP-HO's immediate weak reply pattern to CURP-HT (reply before commit).
 
 #### Phase 77.2: Port Optimizations (Incremental)
 
