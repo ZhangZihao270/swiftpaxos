@@ -631,6 +631,11 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 				r.keyVersions.Set(keyStr, slot)
 			}
 			r.notifyExecute(slot) // Notify waiters that slot is executed
+
+			// Set r.values immediately after execution so MSync can reply
+			// even before the descriptor cleanup phase completes.
+			r.values.Set(desc.cmdId.String(), desc.val)
+
 			go func(nextSlot int) {
 				r.deliverChan <- nextSlot
 			}(slot + 1)

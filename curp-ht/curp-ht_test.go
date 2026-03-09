@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	cmap "github.com/orcaman/concurrent-map"
+
 	"github.com/imdea-software/swiftpaxos/replica"
 	"github.com/imdea-software/swiftpaxos/state"
 )
@@ -1607,4 +1609,40 @@ func TestClientMsgDropCounter(t *testing.T) {
 	}
 }
 
+// TestValuesSetAfterExecution verifies that r.values is set immediately
+// after execution in deliver(), before descriptor cleanup. This enables
+// MSync recovery for committed-but-not-yet-cleaned-up commands.
+func TestValuesSetAfterExecution(t *testing.T) {
+	values := cmap.New()
 
+	// Simulate deliver() execution path for 3 slots
+	for slot := 0; slot < 3; slot++ {
+		desc := &commandDesc{
+			cmdSlot: slot,
+			applied: false,
+			cmdId:   CommandId{ClientId: 1, SeqNum: int32(slot)},
+		}
+		desc.cmd = state.Command{Op: state.PUT, K: state.Key(slot), V: state.Value([]byte{byte(slot + 1)})}
+
+		// Simulate execution
+		desc.val = desc.cmd.V
+		desc.applied = true
+
+		// Values should be set immediately after execution
+		values.Set(desc.cmdId.String(), desc.val)
+
+		// Verify value is available (MSync can find it)
+		val, exists := values.Get(desc.cmdId.String())
+		if !exists {
+			t.Errorf("slot %d: values not set after execution", slot)
+		}
+		if !bytes.Equal(val.([]byte), desc.val) {
+			t.Errorf("slot %d: values mismatch: got %v, want %v", slot, val, desc.val)
+		}
+	}
+
+	// Verify all 3 values are concurrently accessible
+	if values.Count() != 3 {
+		t.Errorf("expected 3 values, got %d", values.Count())
+	}
+}

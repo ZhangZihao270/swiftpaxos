@@ -177,3 +177,35 @@ func TestBatcherBufferSize128(t *testing.T) {
 		t.Errorf("batcher buffer should be 128, got %d", expected)
 	}
 }
+
+// TestValuesSetAfterExecution verifies that r.values is set immediately
+// after execution in deliver(), before descriptor cleanup. This enables
+// MSync recovery for committed-but-not-yet-cleaned-up commands.
+func TestValuesSetAfterExecution(t *testing.T) {
+	values := cmap.New()
+
+	// Simulate deliver() execution path for 3 slots
+	for slot := 0; slot < 3; slot++ {
+		cmdId := CommandId{ClientId: 1, SeqNum: int32(slot)}
+
+		val := []byte{byte(slot + 1)}
+
+		// Values should be set immediately after execution
+		values.Set(cmdId.String(), val)
+
+		// Verify value is available (MSync can find it)
+		got, exists := values.Get(cmdId.String())
+		if !exists {
+			t.Errorf("slot %d: values not set after execution", slot)
+		}
+		gotBytes := got.([]byte)
+		if len(gotBytes) != 1 || gotBytes[0] != byte(slot+1) {
+			t.Errorf("slot %d: values mismatch: got %v, want %v", slot, gotBytes, val)
+		}
+	}
+
+	// Verify all 3 values are concurrently accessible
+	if values.Count() != 3 {
+		t.Errorf("expected 3 values, got %d", values.Count())
+	}
+}

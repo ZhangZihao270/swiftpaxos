@@ -5188,10 +5188,12 @@ Key: ↑ = growing with load, ≈ = stable
 
 Based on diagnosis, port optimizations one at a time to isolate impact:
 
-- [ ] 77.2a: Add `r.values.Set` in CURP-HT and curp-baseline deliver() (D4)
+- [x] 77.2a: Add `r.values.Set` in CURP-HT and curp-baseline deliver() (D4)
   - Prerequisite for D2/D3 to work
   - Set `r.values.Set(desc.cmdId.String(), desc.val)` after execution in deliver() COMMIT phase
-  - Should be safe — values map is concurrent
+  - CURP-HT: added after execution block (line ~637), before SyncReply
+  - curp-baseline: added after execution block (line ~516), before cleanup
+  - Added TestValuesSetAfterExecution to both curp-ht and curp test files
 
 - [ ] 77.2b: Enable MSync retry timer in CURP-HT client (D2)
   - Change `break` in timer case to actual MSync retry logic (adapted from CURP-HO client)
