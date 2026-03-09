@@ -5357,8 +5357,41 @@ Based on diagnosis, port optimizations one at a time to isolate impact:
 
 #### Phase 78.3: Final Evaluation
 
-- [ ] 78.3a: Run reproducible Exp 3.1 (5r) with 3 repetitions and report min/max/median
-  - Ensure results are stable enough for paper presentation
+- [x] 78.3a: Run reproducible Exp 3.1 (5r) with 3 repetitions [26:03:09]
+  - 3 full runs × 27 benchmarks each (3 protocols × 9 thread counts)
+  - Results: results/eval-5r-phase78-run{1,2,3}/
+  - **Stability**: Avg CoV < 3% for all protocols (very stable)
+    - CURP-HO: Avg CoV=2.8%, Max CoV=5.5%
+    - CURP-HT: Avg CoV=2.9%, Max CoV=6.4%
+    - CURP-baseline: Avg CoV=1.4%, Max CoV=3.2%
+
+  **Median Throughput (ops/sec) — 5 replicas, 25ms one-way delay:**
+
+  | Threads | CURP-HO | CURP-HT | CURP-base | HT/HO | HT/base |
+  |---------|---------|---------|-----------|--------|---------|
+  | 1       | 2,922   | 2,712   | 1,477     | 92.8%  | 183.6%  |
+  | 2       | 5,736   | 5,413   | 2,952     | 94.4%  | 183.4%  |
+  | 4       | 11,439  | 10,064  | 5,860     | 88.0%  | 171.7%  |
+  | 8       | 22,266  | 20,711  | 11,611    | 93.0%  | 178.4%  |
+  | 16      | 34,276  | 34,037  | 19,882    | 99.3%  | 171.2%  |
+  | 32      | 37,664  | 40,946  | 25,052    | 108.7% | 163.4%  |
+  | 64      | 60,577  | 53,175  | 39,569    | 87.8%  | 134.4%  |
+  | 96      | 80,419  | 66,955  | 58,358    | 83.3%  | 114.7%  |
+  | 128     | 90,215  | 77,784  | 77,115    | 86.2%  | 100.9%  |
+
+  **Peak throughput (median of 3 runs):**
+  - CURP-HO: 90,215 ops/sec @ t=128 (min=89,563, max=94,776)
+  - CURP-HT: 77,784 ops/sec @ t=128 (min=76,710, max=79,925)
+  - CURP-baseline: 77,115 ops/sec @ t=128 (min=76,451, max=79,587)
+
+  **Key observations:**
+  - CURP-HT achieves 86.2% of CURP-HO throughput at peak (t=128)
+  - CURP-HT beats CURP-HO at t=32 (108.7%) — sweet spot where leader centralization helps
+  - At low concurrency (t≤16), CURP-HT ≈ 93% of CURP-HO (close parity)
+  - CURP-HT vs baseline: +83.6% at t=1, narrows to +0.9% at t=128
+  - Gap between CURP-HT and baseline closes at high concurrency because both
+    route all operations through leader Paxos; the hybrid benefit (weak reads)
+    is saturated when the leader is already bottlenecked
 
 - [ ] 78.3b: Run Exp 3.2 (weak ratio sweep) with Phase 77.2 optimizations
   - weakRatio=0,10,25,50,75,100 at t=32 (5 replicas)
