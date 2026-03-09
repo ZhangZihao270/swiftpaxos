@@ -5678,16 +5678,23 @@ Phase 83.4 had s_p50 ≈ 100ms at t=1 (all slow path). Throughput comparable to 
 
 ---
 
-### Phase 86: Full Exp 3.1 Evaluation (Post-Phase 85 Fix)
+### Phase 87: 3-Replica Validation Run (Phase 85 Code)
 
-Run the complete exp3.1 throughput-vs-latency sweep with Phase 85 code
-(speculative ComputeResult + slot ordering only for COMMIT). Single run.
+**Context**: 5-replica results (Phase 86) show anomalous behavior: fast path dies
+suddenly at t=32 and throughput never saturates. Root cause: application-level delay
+injection (`time.Sleep` + goroutine + mutex) on shared machines (2-1-2 layout)
+randomizes MReply/SyncReply arrival order and removes the Sender synchronous-flush
+bottleneck. 3-replica distributed results (Phase 60, each machine 1 replica) show
+correct behavior: gradual fast path degradation and throughput saturation at ~54K.
 
-Thread counts: 1, 2, 4, 8, 16, 32, 64, 96, 128
-Protocols: curp-baseline, curpht, curpho
+**Goal**: Validate Phase 85 code on 3-replica distributed setup to confirm correct
+protocol behavior (fast path gradual degradation, throughput saturation).
 
-- [ ] 86a: Run full exp3.1 sweep (all thread counts, all 3 protocols)
-- [ ] 86b: Analyze results — compare with Phase 76 data and Phase 85 quick run
+Setup: 3 replicas on .101/.103/.104 (1 per machine), 3 clients co-located.
+Thread counts: 1, 4, 16, 32, 64. Protocol: curpht only.
+
+- [ ] 87a: Run curpht exp3.1 on 3-replica distributed setup (t=1, 4, 16, 32, 64)
+- [ ] 87b: Compare with Phase 60 data — expect similar saturation and latency growth
 
 ---
 
