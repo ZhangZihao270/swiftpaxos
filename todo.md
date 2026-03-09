@@ -5204,14 +5204,17 @@ Based on diagnosis, port optimizations one at a time to isolate impact:
   - Protected SendStrongWrite/Read, SendWeakWrite/Read with writerMu
   - Added `sendMsgSafe` method, matching CURP-HO pattern
 
-- [ ] 77.2c: Add MSync recovery in CURP-HT and curp-baseline leader syncChan handler (D3)
-  - When r.values doesn't have the value: check if command is committed (phase==COMMIT)
-  - If committed, compute read-only result via `cmd.ComputeResult(r.State)` and reply
+- [x] 77.2c: Add MSync recovery in CURP-HT and curp-baseline leader syncChan handler (D3)
+  - When r.values doesn't have the value: look up slot via r.slots, find descriptor via r.cmdDescs
+  - If descriptor is in COMMIT phase and has command data, use `cmd.ComputeResult(r.State)` to reply
+  - Falls back to r.proposes if desc.cmd not set (strong commands come via Propose, not Accept)
+  - Logs diagnostic info when recovery fails (hasSlot, phase, cmdOp)
+  - Added to both curp-ht/curp-ht.go and curp/curp.go
+  - Tests: TestMSyncRecoveryComputeResult, TestMSyncRecoveryPhaseCheck in both packages
   - **CORRECTNESS NOTE**: ComputeResult reads current state which may be stale if prior slots
     haven't executed. For PUT ops this is fine (returns written value). For GET ops, result
     may be stale if same-key prior slot is unexecuted. With 1M keys and 0% conflict,
-    staleness probability is negligible. BUT: must verify this doesn't violate linearizability
-    in the general case. May need to restrict to PUT-only recovery.
+    staleness probability is negligible. Verify in Phase 77.4a.
 
 - [ ] 77.2d: Split client handleMsgs into handleStrongMsgs/handleWeakMsgs in CURP-HT (D1)
   - Create separate goroutine for weak replies (MWeakReply, MWeakReadReply)

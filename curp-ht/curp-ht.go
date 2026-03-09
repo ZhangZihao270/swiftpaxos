@@ -323,6 +323,53 @@ func (r *Replica) run() {
 					Slot:    slotVal,
 				}
 				r.sender.SendToClient(sync.CmdId.ClientId, rep, r.cs.syncReplyRPC)
+			} else {
+				// Value not in r.values yet. Try to recover by finding the
+				// command descriptor and computing the result if committed.
+				// This handles cases where deliver() is stuck in slot ordering
+				// but the command itself is already committed.
+				slot, hasSlot := r.slots[sync.CmdId]
+				recovered := false
+				if hasSlot {
+					slotStr := strconv.Itoa(slot)
+					if d, ok := r.cmdDescs.Get(slotStr); ok {
+						desc := d.(*commandDesc)
+						cmd := desc.cmd
+						if cmd.Op == 0 {
+							if p, pExists := r.proposes.Get(sync.CmdId.String()); pExists {
+								cmd = p.(*defs.GPropose).Command
+							}
+						}
+						if desc.phase == COMMIT && cmd.Op != 0 {
+							result := cmd.ComputeResult(r.State)
+							rep := &MSyncReply{
+								Replica: r.Id,
+								Ballot:  r.ballot,
+								CmdId:   sync.CmdId,
+								Rep:     result,
+								Slot:    int32(slot),
+							}
+							r.sender.SendToClient(sync.CmdId.ClientId, rep, r.cs.syncReplyRPC)
+							recovered = true
+						}
+					}
+				}
+				if !recovered {
+					phase := -1
+					hasDesc := false
+					cmdOp := state.Operation(0)
+					if hasSlot {
+						slotStr2 := strconv.Itoa(slot)
+						if d2, ok2 := r.cmdDescs.Get(slotStr2); ok2 {
+							hasDesc = true
+							desc2 := d2.(*commandDesc)
+							phase = desc2.phase
+							cmdOp = desc2.cmd.Op
+						}
+					}
+					r.Printf("MSync: cmd %v not recoverable (hasSlot=%v slot=%d hasDesc=%v phase=%d cmdOp=%d)\n",
+						sync.CmdId, hasSlot, slot, hasDesc, phase, cmdOp)
+				}
 			}
 
 		case m := <-r.cs.weakProposeChan:

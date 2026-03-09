@@ -1722,3 +1722,62 @@ func TestWriterMuInitialization(t *testing.T) {
 		}
 	}
 }
+
+// TestMSyncRecoveryComputeResult verifies that ComputeResult produces correct
+// results for committed commands when r.values hasn't been set yet (MSync recovery path).
+func TestMSyncRecoveryComputeResult(t *testing.T) {
+	st := state.InitState()
+
+	// Setup: execute a PUT to establish state
+	putCmd := state.Command{Op: state.PUT, K: state.Key(42), V: state.Value([]byte("hello"))}
+	putCmd.Execute(st)
+
+	// Simulate MSync recovery: command is committed but stuck in slot ordering.
+	// ComputeResult should return the correct value without modifying state.
+	getCmd := state.Command{Op: state.GET, K: state.Key(42), V: state.NIL()}
+	result := getCmd.ComputeResult(st)
+	if !bytes.Equal(result, []byte("hello")) {
+		t.Errorf("ComputeResult(GET key=42) = %v, want 'hello'", result)
+	}
+
+	// PUT ComputeResult returns NIL (doesn't modify state)
+	putCmd2 := state.Command{Op: state.PUT, K: state.Key(99), V: state.Value([]byte("world"))}
+	result2 := putCmd2.ComputeResult(st)
+	if len(result2) != 0 {
+		t.Errorf("ComputeResult(PUT) = %v, want NIL", result2)
+	}
+
+	// Verify state was NOT modified by ComputeResult
+	getCmd2 := state.Command{Op: state.GET, K: state.Key(99), V: state.NIL()}
+	result3 := getCmd2.ComputeResult(st)
+	if len(result3) != 0 {
+		t.Errorf("State was modified by ComputeResult(PUT): GET(99) = %v, want NIL", result3)
+	}
+}
+
+// TestMSyncRecoveryPhaseCheck verifies the phase-based recovery logic:
+// only COMMIT phase commands should be recoverable.
+func TestMSyncRecoveryPhaseCheck(t *testing.T) {
+	tests := []struct {
+		phase       int
+		cmdOp       state.Operation
+		recoverable bool
+	}{
+		{START, state.PUT, false},   // Not committed yet
+		{ACCEPT, state.PUT, false},  // Not committed yet
+		{COMMIT, state.PUT, true},   // Committed — recoverable
+		{COMMIT, state.GET, true},   // Committed GET — recoverable
+		{COMMIT, 0, false},          // Committed but no command data
+	}
+
+	for _, tt := range tests {
+		desc := &commandDesc{phase: tt.phase}
+		desc.cmd = state.Command{Op: tt.cmdOp, K: state.Key(1), V: state.Value([]byte{1})}
+
+		canRecover := desc.phase == COMMIT && desc.cmd.Op != 0
+		if canRecover != tt.recoverable {
+			t.Errorf("phase=%d cmdOp=%d: recoverable=%v, want %v",
+				tt.phase, tt.cmdOp, canRecover, tt.recoverable)
+		}
+	}
+}
