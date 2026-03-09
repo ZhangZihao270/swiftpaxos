@@ -5557,14 +5557,55 @@ Cross-protocol comparison becomes fairer.
   for slot ordering. [26:03:09]
 - [x] 83.1d: Run `go test ./...` — all tests pass (updated TestD7 → TestSpeculativeReplyWaitsForSlotOrdering). [26:03:09]
 
-#### Phase 83.2: Re-run Exp 3.1 (5r) with Correct Implementation
+#### Phase 83.2: Run 1 Results (deliver() fix only — INCOMPLETE)
 
-- [ ] 83.2a: Run Exp 3.1 — Run 1 (CURP-HO vs CURP-HT vs baseline, 5r, t=1..128)
-- [ ] 83.2b: Run Exp 3.1 — Run 2
-- [ ] 83.2c: Run Exp 3.1 — Run 3
-- [ ] 83.2d: Collect CSV results, compute medians
-- [ ] 83.2e: Regenerate exp3.1-5r plots (throughput-vs-avg-latency + latency-breakdown)
-- [ ] 83.2f: Compare with Phase 76 data to confirm results are consistent
+Run 1 completed but throughput did NOT decrease — MSync recovery handler bypasses slot ordering.
+
+| threads | baseline | CURP-HT | CURP-HO |
+|---------|----------|---------|---------|
+| 32 | 20,436 | 34,233 | 35,231 |
+| 64 | 40,866 | 60,290 | 59,478 |
+| 128 | 81,429 | 88,707 | 94,500 |
+
+**Root cause**: Phase 77.2c added MSync recovery handler that uses `ComputeResult(r.State)`
+without slot ordering. When deliver()'s speculative reply is blocked by slot ordering,
+client's 2s MSync timer fires → MSync handler replies with stale ComputeResult → same bug.
+Evidence: CURP-HT and CURP-HO s_p99 ≈ 2000ms (= MSync 2s timer), confirming requests
+complete via MSync recovery path. Baseline has no MSync timer (77.2b only added to HT/HO),
+so baseline s_p99=109ms — but baseline also shows linear throughput growth without saturation.
+
+#### Phase 83.3: Fix MSync Recovery Handler + Remove MSync Timer
+
+**Problem**: Phase 77.2c MSync recovery handler bypasses slot ordering. Phase 77.2b MSync
+timer enables clients to exploit this bypass. Both must be fixed.
+
+**Changes needed**:
+- `curp-ht/curp-ht.go`: Remove MSync recovery ComputeResult path from syncChan handler
+  (the `else` branch added in 77.2c). Keep the `r.values.Get` path (returns already-executed
+  results, which are correct).
+- `curp/curp.go`: Same — remove MSync recovery ComputeResult path.
+- `curp-ho/curp-ho.go`: Check and fix if same MSync recovery pattern exists.
+- `curp-ht/client.go`: Remove 77.2b MSync retry timer (revert to disabled `break`).
+  Without recovery handler, MSync timer just wastes network bandwidth.
+  The normal SyncReply path (deliver() COMMIT phase) handles retransmission.
+- `curp/client.go`: Check if MSync timer was also added here.
+
+- [x] 83.3a: Remove MSync ComputeResult recovery from curp-ht syncChan handler
+- [x] 83.3b: Remove MSync ComputeResult recovery from curp syncChan handler
+- [x] 83.3c: Remove MSync ComputeResult recovery from curp-ho syncChan handler
+- [x] 83.3d: Remove MSync retry timer from curp-ht client (revert 77.2b)
+- [x] 83.3e: Remove MSync retry timer from curp-ho client (keep writerMu for remoteSender)
+- [x] 83.3f: Run `go test ./...` — all pass
+
+#### Phase 83.4: Quick Verification (t=32, t=64 only)
+
+After 83.3 fix, run a quick test with t=32 and t=64 for all 3 protocols to verify
+throughput drops to Phase 76 levels (baseline ~25K, HT ~43K at t=32).
+
+- [ ] 83.4a: Run quick benchmark: curp-baseline t=32, t=64
+- [ ] 83.4b: Run quick benchmark: curpht t=32, t=64
+- [ ] 83.4c: Run quick benchmark: curpho t=32, t=64
+- [ ] 83.4d: Compare with Phase 76 data — expect similar throughput and latency
 
 ---
 
