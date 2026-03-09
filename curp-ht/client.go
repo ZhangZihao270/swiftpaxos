@@ -131,7 +131,8 @@ func NewClient(b *client.BufferClient, repNum, reqNum, pclients int) *Client {
 		}
 	}
 
-	go c.handleMsgs()
+	go c.handleStrongMsgs()
+	go c.handleWeakMsgs()
 
 	// Start MSync retry timer: periodically retransmit MSync for pending
 	// strong commands whose replies may have been dropped by the non-blocking
@@ -159,7 +160,9 @@ func (c *Client) initMsgSets(cmdId CommandId) {
 	}
 }
 
-func (c *Client) handleMsgs() {
+// handleStrongMsgs processes strong-path replies and the retry timer.
+// Runs in its own goroutine to avoid contending with latency-critical weak replies.
+func (c *Client) handleStrongMsgs() {
 	for {
 		select {
 		case m := <-c.cs.replyChan:
@@ -173,14 +176,6 @@ func (c *Client) handleMsgs() {
 		case m := <-c.cs.syncReplyChan:
 			rep := m.(*MSyncReply)
 			c.handleSyncReply(rep)
-
-		case m := <-c.cs.weakReplyChan:
-			rep := m.(*MWeakReply)
-			c.handleWeakReply(rep)
-
-		case m := <-c.cs.weakReadReplyChan:
-			rep := m.(*MWeakReadReply)
-			c.handleWeakReadReply(rep)
 
 		case <-c.t.c:
 			// Retry pending commands whose replies may have been dropped
@@ -260,6 +255,23 @@ func (c *Client) handleMsgs() {
 					c.sendMsgSafe(r, c.cs.syncRPC, sync)
 				}
 			}
+		}
+	}
+}
+
+// handleWeakMsgs processes weak-path replies.
+// Runs in its own goroutine separate from strong-path processing to minimize
+// latency contention between strong and weak reply processing.
+func (c *Client) handleWeakMsgs() {
+	for {
+		select {
+		case m := <-c.cs.weakReplyChan:
+			rep := m.(*MWeakReply)
+			c.handleWeakReply(rep)
+
+		case m := <-c.cs.weakReadReplyChan:
+			rep := m.(*MWeakReadReply)
+			c.handleWeakReadReply(rep)
 		}
 	}
 }

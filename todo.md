@@ -5216,9 +5216,11 @@ Based on diagnosis, port optimizations one at a time to isolate impact:
     may be stale if same-key prior slot is unexecuted. With 1M keys and 0% conflict,
     staleness probability is negligible. Verify in Phase 77.4a.
 
-- [ ] 77.2d: Split client handleMsgs into handleStrongMsgs/handleWeakMsgs in CURP-HT (D1)
-  - Create separate goroutine for weak replies (MWeakReply, MWeakReadReply)
-  - Keep strong replies (MReply, MRecordAck, MSyncReply, timer) in dedicated goroutine
+- [x] 77.2d: Split client handleMsgs into handleStrongMsgs/handleWeakMsgs in CURP-HT (D1)
+  - Renamed handleMsgs → handleStrongMsgs (MReply, MRecordAck, MSyncReply, timer)
+  - Created handleWeakMsgs goroutine (MWeakReply, MWeakReadReply)
+  - Both launched in NewClient; all shared state protected by c.mu
+  - Matches CURP-HO pattern to reduce latency contention between strong/weak reply processing
 
 - [ ] 77.2e: Port D7/D8 fixes to curp-baseline
   - Skip slot ordering for speculative MReply (only apply for COMMIT phase)

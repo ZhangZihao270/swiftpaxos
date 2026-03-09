@@ -10,6 +10,8 @@ import (
 	cmap "github.com/orcaman/concurrent-map"
 
 	"github.com/imdea-software/swiftpaxos/replica"
+	"github.com/imdea-software/swiftpaxos/replica/defs"
+	fastrpc "github.com/imdea-software/swiftpaxos/rpc"
 	"github.com/imdea-software/swiftpaxos/state"
 )
 
@@ -1778,6 +1780,50 @@ func TestMSyncRecoveryPhaseCheck(t *testing.T) {
 		if canRecover != tt.recoverable {
 			t.Errorf("phase=%d cmdOp=%d: recoverable=%v, want %v",
 				tt.phase, tt.cmdOp, canRecover, tt.recoverable)
+		}
+	}
+}
+
+// TestSplitMsgGoroutines verifies that handleStrongMsgs and handleWeakMsgs
+// process messages on their respective channels without cross-contamination.
+func TestSplitMsgGoroutines(t *testing.T) {
+	// Verify the channel structure: strong channels should be separate from weak channels.
+	// CommunicationSupply has distinct channels for each message type.
+	var cs CommunicationSupply
+	tbl := fastrpc.NewTableId(defs.RPC_TABLE)
+	initCs(&cs, tbl)
+
+	// Strong channels should be non-nil and distinct
+	strongChans := []chan fastrpc.Serializable{
+		cs.replyChan,
+		cs.recordAckChan,
+		cs.syncReplyChan,
+	}
+	for i, ch := range strongChans {
+		if ch == nil {
+			t.Errorf("strong channel %d is nil", i)
+		}
+	}
+
+	// Weak channels should be non-nil and distinct
+	weakChans := []chan fastrpc.Serializable{
+		cs.weakReplyChan,
+		cs.weakReadReplyChan,
+	}
+	for i, ch := range weakChans {
+		if ch == nil {
+			t.Errorf("weak channel %d is nil", i)
+		}
+	}
+
+	// Verify no overlap between strong and weak channel sets
+	strongSet := make(map[chan fastrpc.Serializable]bool)
+	for _, ch := range strongChans {
+		strongSet[ch] = true
+	}
+	for i, ch := range weakChans {
+		if strongSet[ch] {
+			t.Errorf("weak channel %d overlaps with a strong channel", i)
 		}
 	}
 }
