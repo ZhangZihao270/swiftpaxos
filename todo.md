@@ -4923,9 +4923,13 @@ These are all constant-factor improvements. The 2x gap with CURP-HO is structura
   - Log format: `[INSTR-HT]` / `[INSTR-HO]` for easy grep
   - Tests: `TestInstrStatsAtomicIncrement`, `TestInstrStatsReset` in both packages
 
-- [ ] **75.1b** Add instrumentation to the slow path delivery:
-  - In both protocols, measure time from leader slot assignment to MSyncReply/ORDERED sent to client
-  - This shows how long the Accept→AcceptAck→Commit pipeline takes per command
+- [x] **75.1b** Add instrumentation to the slow path delivery: [26:03:08, 17:00]
+  - Added `slotAssignedAt time.Time` field to `commandDesc` in both protocols
+  - `handlePropose`: sets `slotAssignedAt = time.Now()` on slot assignment
+  - `handleCommit`: logs `commitPipelineNs` = time from slot assignment → COMMIT phase
+  - `deliver()` at COMMIT: logs `syncReplyPipelineNs` = time from slot assignment → MSyncReply sent
+  - Ticker outputs: `commitPipe=N(X.Xms) syncReplyPipe=N(X.Xms)`
+  - Tests: updated increment/reset tests, added `TestCommandDescSlotAssignedAt`
 
 - [x] **75.1c** Log active goroutine count on leader — included in 75.1a ticker [26:03:08, 16:00]
   - `runtime.NumGoroutine()` + `r.routineCount` logged every second

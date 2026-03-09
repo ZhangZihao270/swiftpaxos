@@ -5319,6 +5319,10 @@ func TestInstrStatsAtomicIncrement(t *testing.T) {
 	atomic.AddInt64(&s.causalProposeCount, 5)
 	atomic.AddInt64(&s.proposeTimeNs, 5000)
 	atomic.AddInt64(&s.causalProposeTimeNs, 8000)
+	atomic.AddInt64(&s.commitPipelineNs, 50000000)
+	atomic.AddInt64(&s.commitPipelineCount, 2)
+	atomic.AddInt64(&s.syncReplyPipelineNs, 60000000)
+	atomic.AddInt64(&s.syncReplyPipelineCount, 1)
 
 	if atomic.LoadInt64(&s.proposeCount) != 2 {
 		t.Errorf("proposeCount: got %d, want 2", s.proposeCount)
@@ -5331,6 +5335,12 @@ func TestInstrStatsAtomicIncrement(t *testing.T) {
 	}
 	if atomic.LoadInt64(&s.causalProposeTimeNs) != 8000 {
 		t.Errorf("causalProposeTimeNs: got %d, want 8000", s.causalProposeTimeNs)
+	}
+	if atomic.LoadInt64(&s.commitPipelineCount) != 2 {
+		t.Errorf("commitPipelineCount: got %d, want 2", s.commitPipelineCount)
+	}
+	if atomic.LoadInt64(&s.syncReplyPipelineCount) != 1 {
+		t.Errorf("syncReplyPipelineCount: got %d, want 1", s.syncReplyPipelineCount)
 	}
 }
 
@@ -5349,6 +5359,10 @@ func TestInstrStatsReset(t *testing.T) {
 	atomic.AddInt64(&s.proposeTimeNs, 1000000)
 	atomic.AddInt64(&s.weakProposeTimeNs, 2000000)
 	atomic.AddInt64(&s.causalProposeTimeNs, 3000000)
+	atomic.AddInt64(&s.commitPipelineNs, 4000000)
+	atomic.AddInt64(&s.commitPipelineCount, 5)
+	atomic.AddInt64(&s.syncReplyPipelineNs, 5000000)
+	atomic.AddInt64(&s.syncReplyPipelineCount, 3)
 
 	s.reset()
 
@@ -5384,5 +5398,29 @@ func TestInstrStatsReset(t *testing.T) {
 	}
 	if atomic.LoadInt64(&s.causalProposeTimeNs) != 0 {
 		t.Errorf("causalProposeTimeNs after reset: got %d, want 0", s.causalProposeTimeNs)
+	}
+	if atomic.LoadInt64(&s.commitPipelineNs) != 0 {
+		t.Errorf("commitPipelineNs after reset: got %d, want 0", s.commitPipelineNs)
+	}
+	if atomic.LoadInt64(&s.commitPipelineCount) != 0 {
+		t.Errorf("commitPipelineCount after reset: got %d, want 0", s.commitPipelineCount)
+	}
+	if atomic.LoadInt64(&s.syncReplyPipelineNs) != 0 {
+		t.Errorf("syncReplyPipelineNs after reset: got %d, want 0", s.syncReplyPipelineNs)
+	}
+	if atomic.LoadInt64(&s.syncReplyPipelineCount) != 0 {
+		t.Errorf("syncReplyPipelineCount after reset: got %d, want 0", s.syncReplyPipelineCount)
+	}
+}
+
+// TestCommandDescSlotAssignedAt tests the slotAssignedAt field on commandDesc.
+func TestCommandDescSlotAssignedAt(t *testing.T) {
+	desc := &commandDesc{}
+	if !desc.slotAssignedAt.IsZero() {
+		t.Error("slotAssignedAt should be zero on new descriptor")
+	}
+	desc.slotAssignedAt = time.Now()
+	if desc.slotAssignedAt.IsZero() {
+		t.Error("slotAssignedAt should not be zero after assignment")
 	}
 }

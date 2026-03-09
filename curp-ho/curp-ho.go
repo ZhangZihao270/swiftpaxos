@@ -32,6 +32,12 @@ type instrStats struct {
 	proposeTimeNs       int64
 	weakProposeTimeNs   int64
 	causalProposeTimeNs int64
+
+	// Slow path pipeline timing (nanoseconds)
+	commitPipelineNs    int64 // slot assignment → COMMIT phase
+	commitPipelineCount int64
+	syncReplyPipelineNs    int64 // slot assignment → MSyncReply sent
+	syncReplyPipelineCount int64
 }
 
 func (s *instrStats) reset() {
@@ -46,6 +52,10 @@ func (s *instrStats) reset() {
 	atomic.StoreInt64(&s.proposeTimeNs, 0)
 	atomic.StoreInt64(&s.weakProposeTimeNs, 0)
 	atomic.StoreInt64(&s.causalProposeTimeNs, 0)
+	atomic.StoreInt64(&s.commitPipelineNs, 0)
+	atomic.StoreInt64(&s.commitPipelineCount, 0)
+	atomic.StoreInt64(&s.syncReplyPipelineNs, 0)
+	atomic.StoreInt64(&s.syncReplyPipelineCount, 0)
 }
 
 type Replica struct {
@@ -157,6 +167,9 @@ type commandDesc struct {
 
 	isWeak  bool // Mark if this is a weak command
 	applied bool // Track if command has been applied to state machine
+
+	// Instrumentation: timestamp when slot was assigned (Phase 75.1b)
+	slotAssignedAt time.Time
 
 	// Cached string keys to avoid repeated conversions
 	slotStr  string // cached strconv.Itoa(cmdSlot)
@@ -312,6 +325,10 @@ func (r *Replica) run() {
 				ptNs := atomic.LoadInt64(&r.stats.proposeTimeNs)
 				wptNs := atomic.LoadInt64(&r.stats.weakProposeTimeNs)
 				cptNs := atomic.LoadInt64(&r.stats.causalProposeTimeNs)
+				cpNs := atomic.LoadInt64(&r.stats.commitPipelineNs)
+				cpCnt := atomic.LoadInt64(&r.stats.commitPipelineCount)
+				srpNs := atomic.LoadInt64(&r.stats.syncReplyPipelineNs)
+				srpCnt := atomic.LoadInt64(&r.stats.syncReplyPipelineCount)
 
 				var avgPropUs, avgWpropUs, avgCpropUs float64
 				if pc > 0 {
@@ -323,10 +340,17 @@ func (r *Replica) run() {
 				if cpc > 0 {
 					avgCpropUs = float64(cptNs) / float64(cpc) / 1000.0
 				}
+				var avgCommitPipeMs, avgSyncReplyPipeMs float64
+				if cpCnt > 0 {
+					avgCommitPipeMs = float64(cpNs) / float64(cpCnt) / 1e6
+				}
+				if srpCnt > 0 {
+					avgSyncReplyPipeMs = float64(srpNs) / float64(srpCnt) / 1e6
+				}
 
 				goroutines := runtime.NumGoroutine()
-				log.Printf("[INSTR-HO] propose=%d(%.1fus) weakPropose=%d(%.1fus) causalPropose=%d(%.1fus) weakRead=%d accept=%d commit=%d sync=%d deliver=%d goroutines=%d routineCount=%d",
-					pc, avgPropUs, wpc, avgWpropUs, cpc, avgCpropUs, wrc, ac, cc, sc, dc, goroutines, r.routineCount)
+				log.Printf("[INSTR-HO] propose=%d(%.1fus) weakPropose=%d(%.1fus) causalPropose=%d(%.1fus) weakRead=%d accept=%d commit=%d sync=%d deliver=%d goroutines=%d routineCount=%d commitPipe=%d(%.1fms) syncReplyPipe=%d(%.1fms)",
+					pc, avgPropUs, wpc, avgWpropUs, cpc, avgCpropUs, wrc, ac, cc, sc, dc, goroutines, r.routineCount, cpCnt, avgCommitPipeMs, srpCnt, avgSyncReplyPipeMs)
 				r.stats.reset()
 			}
 		}()
@@ -515,6 +539,7 @@ func (r *Replica) handlePropose(msg *defs.GPropose, desc *commandDesc, slot int,
 	}
 	desc.cmdSlot = slot
 	desc.dep = dep
+	desc.slotAssignedAt = time.Now()
 	if dep != -1 {
 		depDesc := r.getCmdDesc(dep, nil, -1)
 		if depDesc != nil {
@@ -642,6 +667,11 @@ func (r *Replica) handleCommit(msg *MCommit, desc *commandDesc) {
 
 		desc.phase = COMMIT
 		if r.isLeader {
+			// Instrumentation: measure slot assignment → COMMIT pipeline
+			if !desc.slotAssignedAt.IsZero() {
+				atomic.AddInt64(&r.stats.commitPipelineNs, int64(time.Since(desc.slotAssignedAt)))
+				atomic.AddInt64(&r.stats.commitPipelineCount, 1)
+			}
 			r.committed.Set(strconv.Itoa(desc.cmdSlot), struct{}{})
 			r.notifyCommit(desc.cmdSlot) // Notify waiters that slot is committed
 		}
@@ -1089,6 +1119,11 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 						Rep:     desc.val,
 					}
 					r.sender.SendToClient(desc.propose.ClientId, rep, r.cs.syncReplyRPC)
+					// Instrumentation: measure slot assignment → MSyncReply sent
+					if !desc.slotAssignedAt.IsZero() {
+						atomic.AddInt64(&r.stats.syncReplyPipelineNs, int64(time.Since(desc.slotAssignedAt)))
+						atomic.AddInt64(&r.stats.syncReplyPipelineCount, 1)
+					}
 				}
 			}
 			// For weak commands on leader: skip cleanup here. The async function
