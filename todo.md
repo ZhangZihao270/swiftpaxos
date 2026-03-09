@@ -5641,24 +5641,40 @@ have a dep set, (3) benchmark uses conflicts=0 / keySpace=1M.
 
 #### 85.1: Revert Phase 83.1 — restore `desc.phase == COMMIT &&` in slot ordering
 
-- [ ] 85.1a: `curp/curp.go` deliver() — add `desc.phase == COMMIT &&` back to slot
-  ordering check. Also change speculative `Execute` → `ComputeResult` (Phase 76 baseline
-  used Execute which pollutes state; align with curp-ht's correct approach).
-- [ ] 85.1b: `curp-ht/curp-ht.go` deliver() — add `desc.phase == COMMIT &&` back to
-  slot ordering check. ComputeResult already correct, no change needed.
-- [ ] 85.1c: `curp-ho/curp-ho.go` deliver() — add `desc.phase == COMMIT &&` back to
-  slot ordering check. ComputeResult already correct, no change needed.
-- [ ] 85.1d: Run `go test ./...` — all tests pass.
+- [x] 85.1a: `curp/curp.go` deliver() — added `desc.phase == COMMIT &&` to slot ordering.
+  Speculative path already uses ComputeResult (correct, no change needed).
+- [x] 85.1b: `curp-ht/curp-ht.go` deliver() — added `desc.phase == COMMIT &&` to slot ordering.
+- [x] 85.1c: `curp-ho/curp-ho.go` deliver() — added `desc.phase == COMMIT &&` to slot ordering.
+- [x] 85.1d: Run `go test ./...` — all tests pass.
+  Updated TestSpeculativeReplyWaitsForSlotOrdering → TestSpeculativeReplySkipsSlotOrdering.
+  Added TestCommitWaitsForSlotOrdering to verify COMMIT still enforces slot ordering.
 
 #### 85.2: Quick Verification (t=1, t=32, t=64)
 
 Run quick benchmark for all 3 protocols to verify fast path is restored.
 Expected: S-P50 ≈ 50ms (1 RTT fast path), not 100ms (slow path).
 
-- [ ] 85.2a: Run quick benchmark: curp-baseline t=1, t=32, t=64
-- [ ] 85.2b: Run quick benchmark: curpht t=1, t=32, t=64
-- [ ] 85.2c: Run quick benchmark: curpho t=1, t=32, t=64
-- [ ] 85.2d: Compare S-P50 with Phase 76 data — should be ~50ms at low load
+- [x] 85.2a: Run quick benchmark: curp-baseline t=1, t=32, t=64
+- [x] 85.2b: Run quick benchmark: curpht t=1, t=32, t=64
+- [x] 85.2c: Run quick benchmark: curpho t=1, t=32, t=64
+- [x] 85.2d: Compare S-P50 with Phase 76 data
+
+**Phase 85.2 Results** (results/eval-5r-phase85-quick-20260309):
+
+| Protocol | t | Throughput | s_p50 | w_p50 |
+|----------|---|-----------|-------|-------|
+| baseline | 1 | 1,480 | 50.9ms | N/A |
+| baseline | 32 | 22,816 | 99.7ms | N/A |
+| baseline | 64 | 39,918 | 99.7ms | N/A |
+| curpht | 1 | 2,724 | 51.0ms | 0.2ms |
+| curpht | 32 | 36,235 | 98.0ms | 0.8ms |
+| curpht | 64 | 53,542 | 99.7ms | 25.1ms |
+| curpho | 1 | 2,851 | 56.1ms | 0.2ms |
+| curpho | 32 | 38,363 | 99.7ms | 2.3ms |
+| curpho | 64 | 59,568 | 99.7ms | 43.6ms |
+
+**Analysis**: Fast path restored — s_p50 ≈ 51ms at t=1 (1-RTT), matching Phase 76.
+Phase 83.4 had s_p50 ≈ 100ms at t=1 (all slow path). Throughput comparable to Phase 76.
 
 ---
 

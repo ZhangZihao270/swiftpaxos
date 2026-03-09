@@ -240,11 +240,12 @@ func newTestReplica() *Replica {
 	return r
 }
 
-// TestSpeculativeReplyWaitsForSlotOrdering verifies that speculative replies
-// (leader, phase != COMMIT) DO wait for slot ordering. This ensures
-// ComputeResult reads up-to-date committed state for linearizability.
-// (Phase 83: reverts Phase 77.2e D7 which incorrectly skipped slot ordering.)
-func TestSpeculativeReplyWaitsForSlotOrdering(t *testing.T) {
+// TestSpeculativeReplySkipsSlotOrdering verifies that speculative replies
+// (leader, phase != COMMIT) do NOT wait for slot ordering. This preserves
+// the fast path — the dep mechanism (leaderUnsync → Ok=FALSE) protects
+// against stale reads for conflicting keys.
+// (Phase 85: reverts Phase 83.1 which incorrectly added slot ordering to speculative path.)
+func TestSpeculativeReplySkipsSlotOrdering(t *testing.T) {
 	r := newTestReplica()
 
 	cmdId := CommandId{ClientId: 1, SeqNum: 0}
@@ -272,16 +273,51 @@ func TestSpeculativeReplyWaitsForSlotOrdering(t *testing.T) {
 		seq:          true,
 	}
 
-	// Slot 0 is NOT executed — slot ordering should block speculative reply
+	// Slot 0 is NOT executed — but speculative reply should still be sent
 	r.deliver(desc, 1)
 
-	// Speculative reply should NOT be sent because slot 0 hasn't executed
+	// Speculative reply should be sent (slot ordering skipped for non-COMMIT)
 	select {
 	case msg := <-r.sender:
 		_ = msg
-		t.Error("Speculative reply should wait for slot ordering, but was sent")
+		// Correct: speculative reply sent without waiting for slot ordering
 	default:
-		// Correct: no reply sent because slot ordering blocks
+		t.Error("Speculative reply should skip slot ordering, but was blocked")
+	}
+}
+
+// TestCommitWaitsForSlotOrdering verifies that COMMIT phase delivery
+// still enforces slot ordering — only speculative replies skip it.
+func TestCommitWaitsForSlotOrdering(t *testing.T) {
+	r := newTestReplica()
+
+	cmdId := CommandId{ClientId: 1, SeqNum: 0}
+	propose := &defs.GPropose{
+		Propose: &defs.Propose{
+			ClientId: 1,
+			Command:  state.Command{Op: state.PUT, K: state.Key(42), V: state.Value([]byte("val"))},
+		},
+	}
+	r.proposes.Set(cmdId.String(), propose)
+
+	desc := &commandDesc{
+		cmdId:        cmdId,
+		cmd:          propose.Command,
+		phase:        COMMIT, // COMMIT phase — slot ordering enforced
+		cmdSlot:      1,      // slot > 0
+		slotStr:      "1",
+		dep:          -1,
+		afterPayload: hook.NewOptCondF(func() bool { return true }),
+		msgs:         make(chan interface{}, 128),
+		seq:          true,
+	}
+
+	// Slot 0 is NOT executed — COMMIT delivery should be blocked
+	r.deliver(desc, 1)
+
+	// desc.applied should be false because slot ordering blocked execution
+	if desc.applied {
+		t.Error("COMMIT deliver should wait for slot ordering, but desc.applied=true")
 	}
 }
 

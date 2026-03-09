@@ -856,10 +856,11 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 			return
 		}
 
-		// Slot ordering: wait for previous slot to execute before proceeding.
-		// Applies to ALL phases (including speculative replies) to ensure
-		// ComputeResult reads up-to-date committed state for correctness.
-		if slot > 0 && !r.executed.Has(strconv.Itoa(slot-1)) {
+		// Slot ordering: wait for previous slot to execute before committing.
+		// Only applies to COMMIT phase — speculative replies skip slot ordering
+		// to preserve the fast path (dep mechanism protects against stale reads
+		// for conflicting keys; non-conflicting keys are safe by definition).
+		if desc.phase == COMMIT && slot > 0 && !r.executed.Has(strconv.Itoa(slot-1)) {
 			return
 		}
 
