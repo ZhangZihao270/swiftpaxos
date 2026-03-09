@@ -5678,6 +5678,19 @@ Phase 83.4 had s_p50 ≈ 100ms at t=1 (all slow path). Throughput comparable to 
 
 ---
 
+### Phase 86: Full Exp 3.1 Evaluation (Post-Phase 85 Fix)
+
+Run the complete exp3.1 throughput-vs-latency sweep with Phase 85 code
+(speculative ComputeResult + slot ordering only for COMMIT). Single run.
+
+Thread counts: 1, 2, 4, 8, 16, 32, 64, 96, 128
+Protocols: curp-baseline, curpht, curpho
+
+- [ ] 86a: Run full exp3.1 sweep (all thread counts, all 3 protocols)
+- [ ] 86b: Analyze results — compare with Phase 76 data and Phase 85 quick run
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
