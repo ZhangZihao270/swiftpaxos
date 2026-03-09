@@ -5195,10 +5195,14 @@ Based on diagnosis, port optimizations one at a time to isolate impact:
   - curp-baseline: added after execution block (line ~516), before cleanup
   - Added TestValuesSetAfterExecution to both curp-ht and curp test files
 
-- [ ] 77.2b: Enable MSync retry timer in CURP-HT client (D2)
-  - Change `break` in timer case to actual MSync retry logic (adapted from CURP-HO client)
-  - Send MSync to ALL replicas for pending strong commands
-  - Timer interval: 2s (same as CURP-HO)
+- [x] 77.2b: Enable MSync retry timer in CURP-HT client (D2)
+  - Replaced disabled `break` in timer case with full MSync retry logic (adapted from CURP-HO)
+  - Timer started at 2s interval in NewClient, sends MSync to ALL replicas for pending commands
+  - Covers both strong (strongPendingKeys) and weak write (weakPendingValues) commands
+  - Added force-delivery after 5 stalled retries (10s), switches to 100ms fast timer
+  - Added `writerMu []sync.Mutex` per-replica for thread-safe SendMsg (timer vs benchmark)
+  - Protected SendStrongWrite/Read, SendWeakWrite/Read with writerMu
+  - Added `sendMsgSafe` method, matching CURP-HO pattern
 
 - [ ] 77.2c: Add MSync recovery in CURP-HT and curp-baseline leader syncChan handler (D3)
   - When r.values doesn't have the value: check if command is committed (phase==COMMIT)
