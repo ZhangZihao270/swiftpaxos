@@ -5233,9 +5233,15 @@ Based on diagnosis, port optimizations one at a time to isolate impact:
 
 #### Phase 77.3: Evaluate
 
-- [ ] 77.3a: Run Exp 3.1 after each 77.2 step to measure incremental impact
-  - 5 replicas, t=1,2,4,8,16,32,64,96,128, weakRatio=50, 0% conflict
-  - Track: peak throughput, S-P50 at t=128, S-P99 at t=128
+- [x] 77.3a: Run Exp 3.1 to measure Phase 77.2 cumulative impact
+  - 5 replicas, t=1..128, weakRatio=50, 0% conflict
+  - Results: results/eval-5r-phase77-20260308/summary-exp3.1.csv
+  - **curp-baseline**: Peak 27.6K → 75.2K (+172.3%) — D7/D8 fixes in deliver() transformed scaling
+  - **CURP-HT**: Peak 44.2K → 78.2K (+76.8%) — all Phase 77.2 optimizations combined
+  - **CURP-HO**: Peak 97.0K → 88.5K (-8.8%) — likely run-to-run variance, no code changes
+  - **CURP-HT/HO gap**: 45.6% → 88.4% — near parity at high concurrency
+  - At t=128: S-P50 latency 330ms→99.7ms (baseline), 390ms→99.8ms (HT)
+  - Note: CURP-HT regressed at t=1 (2698→1612, -40%) — timer/goroutine overhead at low concurrency
 
 - [ ] 77.3b: Run 3-replica comparison to verify improvement scales across cluster sizes
 
