@@ -5745,10 +5745,38 @@ performance but eliminates the shared-host delay injection artifact.
 Setup: 5 replicas on 5 machines, 5 clients co-located, networkDelay=25ms.
 Thread counts: 1, 4, 16, 32, 64. Protocol: curpht only.
 
-- [ ] 88a: Create 5-machine config (benchmark-5r-5m.conf) with .125/.126
-- [ ] 88b: Deploy binary to .125 and .126
-- [ ] 88c: Run curpht exp3.1 (t=1, 4, 16, 32, 64)
-- [ ] 88d: Compare with Phase 87 (3-replica) and Phase 86 (5r shared) results
+- [x] 88a: Create 5-machine config (benchmark-5r-5m.conf) with .125/.126
+- [x] 88b: Deploy binary to .125 and .126
+- [x] 88c: Run curpht exp3.1 (t=1, 4, 16, 32, 64)
+- [x] 88d: Compare with Phase 87 (3-replica) and Phase 86 (5r shared) results
+
+**Phase 88 Results** (5 replicas on 5 machines, 5 clients, zipfSkew=0, weakRatio=50):
+
+| threads | throughput | s_avg   | s_p50  | s_p99   | w_avg  | w_p50 | w_p99  |
+|---------|-----------|---------|--------|---------|--------|-------|--------|
+| 1       | 1,867     | 60.93   | 66.09  | 78.67   | 5.09   | 0.17  | 122.98 |
+| 4       | 9,311     | 59.49   | 66.65  | 96.45   | 5.16   | 0.25  | 121.58 |
+| 16      | 28,436    | 66.80   | 68.98  | 119.26  | 6.59   | 0.44  | 147.03 |
+| 32      | 37,290    | 98.35   | 96.82  | 541.26  | 7.92   | 0.98  | 125.73 |
+| 64      | 53,243    | 124.85  | 99.65  | 964.21  | 23.43  | 4.36  | 175.40 |
+
+**Comparison: Phase 88 (5r/5m) vs Phase 87 (3r/3m) vs Phase 86 (5r/3m shared)**:
+
+| threads | Ph88 5r/5m tp | Ph87 3r/3m tp | Ph86 5r/3m tp | Ph88 s_p50 | Ph87 s_p50 | Ph86 s_p50 |
+|---------|--------------|--------------|--------------|------------|------------|------------|
+| 1       | 1,867        | 1,648        | 2,740        | 66.09      | 51.19      | 50.70      |
+| 4       | 9,311        | 6,458        | 10,727       | 66.65      | 50.95      | 50.89      |
+| 16      | 28,436       | 24,920       | 30,639       | 68.98      | 50.76      | 61.48      |
+| 32      | 37,290       | 40,464       | 37,129       | 96.82      | 61.33      | 96.96      |
+| 64      | 53,243       | 41,526       | 53,409       | 99.65      | 99.64      | 118.59     |
+
+**Analysis**: 5r/5m shows NO fast path at any thread count — s_p50 ≈ 66ms even at
+t=1 (should be ~51ms for 1-RTT fast path). This is higher than the expected 50ms
+half-RTT. The extra ~16ms suggests .125/.126 (8-core Xeon L5420, ~2008 era) add
+processing latency that delays MReply beyond the SyncReply, killing the fast path.
+Throughput scales well (53K at t=64, matching Phase 86), confirming the commit path
+works correctly. The 3-replica setup (Phase 87) remains the cleanest validation of
+fast path behavior since all machines are homogeneous (64-core).
 
 ---
 
