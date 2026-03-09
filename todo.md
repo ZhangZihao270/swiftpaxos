@@ -5393,9 +5393,51 @@ Based on diagnosis, port optimizations one at a time to isolate impact:
     route all operations through leader Paxos; the hybrid benefit (weak reads)
     is saturated when the leader is already bottlenecked
 
-- [ ] 78.3b: Run Exp 3.2 (weak ratio sweep) with Phase 77.2 optimizations
-  - weakRatio=0,10,25,50,75,100 at t=32 (5 replicas)
-  - Characterize how CURP-HT vs CURP-HO vs baseline scale with weak ratio
+- [x] 78.3b: Run Exp 3.2 (weak ratio sweep) with Phase 77.2 optimizations [26:03:09]
+  - weakRatio=0,10,25,50,75,100 at t=32 (5 replicas, 25ms one-way delay)
+  - Results: results/eval-5r-exp3.2-phase78-20260309/
+  - Script: scripts/eval-exp3.2-5r-phase78.sh
+
+  **Total Throughput (ops/sec) at t=32:**
+
+  | Weak% | CURP-HO | CURP-HT | Baseline | HT/HO |
+  |-------|---------|---------|----------|--------|
+  | 0%    | 22,722  | 25,658  | 24,192   | 112.9% |
+  | 10%   | 24,908  | 28,098  | 26,089   | 112.8% |
+  | 25%   | 28,895  | 32,541  | 25,072   | 112.6% |
+  | 50%   | 39,501  | 41,356  | 25,917   | 104.7% |
+  | 75%   | 61,061  | 66,994  | 26,190   | 109.7% |
+  | 100%  | 313,998 | 379,306 | 24,567   | 120.8% |
+
+  **Scaling (speedup vs w=0% baseline):**
+
+  | Weak% | HO speedup | HT speedup |
+  |-------|------------|------------|
+  | 0%    | 1.00x      | 1.00x      |
+  | 25%   | 1.27x      | 1.27x      |
+  | 50%   | 1.74x      | 1.61x      |
+  | 75%   | 2.69x      | 2.61x      |
+  | 100%  | 13.82x     | 14.78x     |
+
+  **Strong operation latency (avg ms):**
+  - CURP-HO: ~100ms stable at w=0-75%, drops to 58ms at w=100%
+  - CURP-HT: ~90ms stable at w=0-50%, drops to 74ms at w=75%, 57ms at w=100%
+  - Baseline: ~90ms flat across all sweep points (as expected, ignores weak ratio)
+
+  **Weak operation latency (avg ms):**
+  - CURP-HO: 1.5ms at w=10%, grows to 18ms at w=75%, drops to 9ms at w=100%
+  - CURP-HT: 5.9ms at w=10%, grows to 20ms at w=75%, drops to 7ms at w=100%
+  - HO has lower weak latency at low-mid weak ratios (direct broadcast vs leader path)
+
+  **Key observations:**
+  - CURP-HT **outperforms** CURP-HO at every weak ratio at t=32 (5-16% higher)
+  - Both hybrid protocols scale proportionally with weak ratio — more weak = more throughput
+  - Baseline is flat (~25K) regardless of weak ratio — cannot benefit from weak operations
+  - At w=100%, both reach 300K+ ops/sec (13-15x speedup) — weak ops bypass consensus
+  - CURP-HT has higher weak latency than CURP-HO at low ratios (5.9ms vs 1.5ms at w=10%)
+    because weak writes go through leader Paxos, but this doesn't hurt total throughput
+  - The t=32 sweet spot from Exp 3.1 is confirmed: CURP-HT's leader centralization
+    provides better throughput at moderate concurrency
 
 ---
 
