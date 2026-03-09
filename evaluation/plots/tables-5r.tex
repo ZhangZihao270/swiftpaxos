@@ -1,18 +1,18 @@
 % Auto-generated LaTeX tables for SwiftPaxos 5-replica evaluation
-% Generated from 5-replica distributed experiment data (RTT = 50ms)
+% Phase 78 data: Exp 3.1 median of 3 runs, Exp 3.2 phase78.3b (t=32)
 
 \begin{table}[t]
 \centering
-\caption{Peak throughput comparison (5 replicas, RTT = 50\,ms, 95/5 R/W, 50\% weak, Zipfian).}
+\caption{Peak throughput comparison (5 replicas, RTT = 50\,ms, 95/5 R/W, 50\% weak, Zipfian). Exp 3.1 values are median of 3 runs.}
 \label{tab:peak-throughput-5r}
 \begin{tabular}{lrrrrr}
 \toprule
 Protocol & Peak (Kops/s) & Threads & Strong P50 (ms) & Weak P50 (ms) & vs.\ Baseline \\
 \midrule
-CURP-HO & 91.3K & 128$\times$5 & 100 & 73 & 3.3$\times$ \\
-CURP-HT & 47.5K & 96$\times$5 & 283 & 0.62 & 1.7$\times$ \\
-Raft-HT & 45.5K & 64$\times$5 & 213 & 0.15 & 1.6$\times$ \\
-CURP (baseline) & 27.8K & 128$\times$5 & 332 & --- & 1.0$\times$ \\
+CURP-HO & 90.2K & 128$\times$5 & 100 & 72 & 1.2$\times$ \\
+CURP-HT & 77.8K & 128$\times$5 & 100 & 112 & 1.0$\times$ \\
+Raft-HT & 45.5K & 64$\times$5 & 213 & 0.15 & 0.6$\times$ \\
+CURP (baseline) & 77.1K & 128$\times$5 & 100 & --- & 1.0$\times$ \\
 Raft & 18.0K & 32$\times$5 & 138 & --- & --- \\
 \bottomrule
 \end{tabular}
@@ -20,31 +20,31 @@ Raft & 18.0K & 32$\times$5 & 138 & --- & --- \\
 
 \begin{table}[t]
 \centering
-\caption{T-property validation: strong P50 latency across weak ratios (5 replicas, RTT = 50\,ms, 95/5 R/W, $t$=8).}
+\caption{Strong P50 latency across weak ratios (5 replicas, RTT = 50\,ms, 95/5 R/W, $t$=32).}
 \label{tab:t-property-5r}
-\begin{tabular}{lrrrrrl}
+\begin{tabular}{lrrrrrrl}
 \toprule
-Protocol & $w$=0\% & $w$=25\% & $w$=50\% & $w$=75\% & $w$=100\% & T satisfied? \\
+Protocol & $w$=0\% & $w$=10\% & $w$=25\% & $w$=50\% & $w$=75\% & $w$=100\% & T satisfied? \\
 \midrule
-Raft-HT & 84 & 84 & 85 & 86 & 3042 & Yes \\
-CURP-HT & 52 & 51 & 51 & 51 & 53 & Yes \\
-CURP-HO & 51 & 52 & 53 & 57 & 59 & Yes \\
+CURP (baseline) & 100 & 96 & 100 & 99 & 98 & 100 & Yes \\
+CURP-HT & 100 & 100 & 98 & 92 & 72 & 57 & Moderate \\
+CURP-HO & 100 & 100 & 100 & 100 & 87 & 57 & Yes \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \begin{table}[t]
 \centering
-\caption{Latency at moderate load ($t$=32, 5 replicas, RTT = 50\,ms, 95/5 R/W, 50\% weak).}
+\caption{Latency at moderate load ($t$=32, 5 replicas, RTT = 50\,ms, 95/5 R/W, 50\% weak). Exp 3.1 values are median of 3 runs.}
 \label{tab:latency-moderate-5r}
 \begin{tabular}{lrrrr}
 \toprule
 Protocol & Throughput & Strong P50 & Strong P99 & Weak P50 \\
 \midrule
-CURP-HO & 37.2K & 100\,ms & 246\,ms & 2\,ms \\
-CURP-HT & 43.2K & 96\,ms & 248\,ms & 0.31\,ms \\
+CURP-HO & 37.7K & 100\,ms & 285\,ms & 3\,ms \\
+CURP-HT & 40.9K & 86\,ms & 281\,ms & 0.76\,ms \\
 Raft-HT & 38.2K & 123\,ms & 220\,ms & 0.14\,ms \\
-CURP (baseline) & 24.3K & 91\,ms & 238\,ms & ---\,ms \\
+CURP (baseline) & 25.1K & 100\,ms & 198\,ms & ---\,ms \\
 Raft & 18.0K & 138\,ms & 215\,ms & ---\,ms \\
 \bottomrule
 \end{tabular}
@@ -58,16 +58,16 @@ Raft & 18.0K & 138\,ms & 215\,ms & ---\,ms \\
 \toprule
 Protocol & Type & P1 & P25 & P50 & P75 & P99 & P99.9 \\
 \midrule
-CURP-HO & Strong & 24 & 97 & 100 & 100 & 208 & 480 \\
- & Weak & 0.04 & 0.27 & 0.81 & 4 & 79 & 100 \\
+CURP-HO & Strong & 29 & 96 & 100 & 100 & 247 & 604 \\
+ & Weak & 0.05 & 0.29 & 1 & 5 & 62 & 101 \\
 \midrule
-CURP-HT & Strong & 51 & 76 & 95 & 119 & 222 & 373 \\
- & Weak & 0.04 & 0.14 & 0.27 & 0.57 & 200 & 592 \\
+CURP-HT & Strong & 3 & 73 & 80 & 100 & 191 & 495 \\
+ & Weak & 0.04 & 0.20 & 0.41 & 2 & 638 & 1051 \\
 \midrule
 Raft-HT & Strong & 64 & 104 & 116 & 151 & 213 & 238 \\
  & Weak & 0.04 & 0.08 & 0.14 & 0.23 & 78 & 129 \\
 \midrule
-CURP (baseline) & Strong & 51 & 76 & 91 & 113 & 231 & 442 \\
+CURP (baseline) & Strong & 4 & 93 & 100 & 100 & 177 & 326 \\
 \midrule
 Raft & Strong & 77 & 113 & 136 & 156 & 207 & 244 \\
 \bottomrule

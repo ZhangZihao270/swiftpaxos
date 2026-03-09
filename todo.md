@@ -5460,6 +5460,23 @@ Based on diagnosis, port optimizations one at a time to isolate impact:
   - Figures: exp3.1 throughput-latency (P50, P99), exp3.2 latency + throughput,
     CDF latency (2-panel), CDF strong-only, CDF weak breakdown, CDF T-property
 
+### Phase 80: LaTeX Tables and Script Cleanup
+
+#### Phase 80.1: Paper Tables and Untracked Scripts
+
+- [x] 80.1a: Update gen-latex-tables-5r.py for Phase 78 data [26:03:09]
+  - Exp 3.1: Uses load_multi_run_csv() with median of 3 Phase 78 runs
+  - Exp 3.2: Uses Phase 78.3b data (curp-baseline, t=32, w=0/10/25/50/75/100)
+  - CDF: Uses Phase 78 run1 for CURP, old data for Raft-HT/Raft (Exp 1.1)
+  - T-property table: Updated for 6 weak ratios including w=10%
+
+- [x] 80.1b: Regenerate LaTeX tables [26:03:09]
+  - Generated tables-5r.tex and cdf-5r-summary.csv
+  - Peak: CURP-HO 90.2K, CURP-HT 77.8K, baseline 77.1K (median of 3 runs)
+
+- [x] 80.1c: Commit untracked eval/plot scripts [26:03:09]
+  - eval-conflict-dist.sh, eval-conflict-w50-dist.sh, plot-conflict.py
+
 ---
 
 ## Legend

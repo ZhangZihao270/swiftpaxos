@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Generate LaTeX tables from 5-replica experiment CSV data.
+Uses Phase 78 data (multi-run median for Exp 3.1, Phase 78.3b for Exp 3.2).
 Outputs to evaluation/plots/tables-5r.tex (and prints to stdout).
 """
 
@@ -9,7 +10,7 @@ import json
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from plot_style import load_csv, get_val, base_dir
+from plot_style import load_csv, load_multi_run_csv, get_val, base_dir
 
 def fmt_k(v):
     if v >= 1000:
@@ -39,7 +40,7 @@ def table_peak_throughput(exp11_rows, exp31_rows):
     lines = []
     lines.append(r'\begin{table}[t]')
     lines.append(r'\centering')
-    lines.append(r'\caption{Peak throughput comparison (5 replicas, RTT = 50\,ms, 95/5 R/W, 50\% weak, Zipfian).}')
+    lines.append(r'\caption{Peak throughput comparison (5 replicas, RTT = 50\,ms, 95/5 R/W, 50\% weak, Zipfian). Exp 3.1 values are median of 3 runs.}')
     lines.append(r'\label{tab:peak-throughput-5r}')
     lines.append(r'\begin{tabular}{lrrrrr}')
     lines.append(r'\toprule')
@@ -84,19 +85,19 @@ def table_t_property(exp32_rows):
     lines = []
     lines.append(r'\begin{table}[t]')
     lines.append(r'\centering')
-    lines.append(r'\caption{T-property validation: strong P50 latency across weak ratios (5 replicas, RTT = 50\,ms, 95/5 R/W, $t$=8).}')
+    lines.append(r'\caption{Strong P50 latency across weak ratios (5 replicas, RTT = 50\,ms, 95/5 R/W, $t$=32).}')
     lines.append(r'\label{tab:t-property-5r}')
-    lines.append(r'\begin{tabular}{lrrrrrl}')
+    lines.append(r'\begin{tabular}{lrrrrrrl}')
     lines.append(r'\toprule')
-    lines.append(r'Protocol & $w$=0\% & $w$=25\% & $w$=50\% & $w$=75\% & $w$=100\% & T satisfied? \\')
+    lines.append(r'Protocol & $w$=0\% & $w$=10\% & $w$=25\% & $w$=50\% & $w$=75\% & $w$=100\% & T satisfied? \\')
     lines.append(r'\midrule')
 
-    for proto, label in [('raftht', 'Raft-HT'), ('curpht', 'CURP-HT'), ('curpho', 'CURP-HO')]:
+    for proto, label in [('curp-baseline', 'CURP (baseline)'), ('curpht', 'CURP-HT'), ('curpho', 'CURP-HO')]:
         filtered = [r for r in exp32_rows if r['protocol'] == proto]
         filtered.sort(key=lambda r: int(r['weak_ratio']))
         vals = [float(r['s_p50']) for r in filtered]
         # Exclude w100 from T property check (no strong ops at w100)
-        check_vals = vals[:4]  # w0, w25, w50, w75
+        check_vals = vals[:5]  # w0, w10, w25, w50, w75
         mean_val = sum(check_vals) / len(check_vals)
         max_dev = max(abs(v - mean_val) / mean_val for v in check_vals)
         t_satisfied = 'Yes' if max_dev < 0.15 else 'Moderate'
@@ -113,7 +114,7 @@ def table_latency_at_moderate(exp11_rows, exp31_rows):
     lines = []
     lines.append(r'\begin{table}[t]')
     lines.append(r'\centering')
-    lines.append(r'\caption{Latency at moderate load ($t$=32, 5 replicas, RTT = 50\,ms, 95/5 R/W, 50\% weak).}')
+    lines.append(r'\caption{Latency at moderate load ($t$=32, 5 replicas, RTT = 50\,ms, 95/5 R/W, 50\% weak). Exp 3.1 values are median of 3 runs.}')
     lines.append(r'\label{tab:latency-moderate-5r}')
     lines.append(r'\begin{tabular}{lrrrr}')
     lines.append(r'\toprule')
@@ -146,13 +147,16 @@ def table_latency_at_moderate(exp11_rows, exp31_rows):
     return '\n'.join(lines)
 
 def load_cdf_latencies_5r(base):
-    results_dir = os.path.join(base, 'results', 'eval-5r-20260308')
+    # Phase 78 run1 for CDF latencies
+    results_dir = os.path.join(base, 'results', 'eval-5r-phase78-run1')
+    exp11_dir = os.path.join(base, 'results', 'eval-5r-20260308')
     data = {}
-    for proto, exp in [
-        ('curpho', 'exp3.1'), ('curpht', 'exp3.1'), ('curp-baseline', 'exp3.1'),
-        ('raftht', 'exp1.1'), ('raft', 'exp1.1'),
+    for proto, exp_base in [
+        ('curpho', results_dir), ('curpht', results_dir), ('curp-baseline', results_dir),
+        ('raftht', exp11_dir), ('raft', exp11_dir),
     ]:
-        path = os.path.join(results_dir, exp, proto, 't32', 'latencies.json')
+        exp = 'exp3.1' if proto in ('curpho', 'curpht', 'curp-baseline') else 'exp1.1'
+        path = os.path.join(exp_base, exp, proto, 't32', 'latencies.json')
         if os.path.exists(path):
             with open(path) as f:
                 data[proto] = json.load(f)
@@ -238,15 +242,23 @@ def export_cdf_summary_csv(cdf_data, out_path):
 
 def main():
     base = base_dir()
-    results_dir = os.path.join(base, 'results', 'eval-5r-20260308')
-    exp11_csv = os.path.join(results_dir, 'summary-exp1.1.csv')
-    exp31_csv = os.path.join(results_dir, 'summary-exp3.1.csv')
-    exp32_csv = os.path.join(results_dir, 'summary-exp3.2.csv')
-    out_dir = os.path.join(base, 'evaluation', 'plots')
 
-    exp11_rows = load_csv(exp11_csv)
-    exp31_rows = load_csv(exp31_csv)
+    # Phase 78 multi-run median for Exp 3.1
+    exp31_csv_paths = [
+        os.path.join(base, 'results', f'eval-5r-phase78-run{i}', 'summary-exp3.1.csv')
+        for i in range(1, 4)
+    ]
+    exp31_rows = load_multi_run_csv(exp31_csv_paths)
+
+    # Phase 78.3b for Exp 3.2
+    exp32_csv = os.path.join(base, 'results', 'eval-5r-exp3.2-phase78-20260309', 'summary-exp3.2.csv')
     exp32_rows = load_csv(exp32_csv)
+
+    # Old data for Exp 1.1 (raftht/raft — not re-run in Phase 78)
+    exp11_csv = os.path.join(base, 'results', 'eval-5r-20260308', 'summary-exp1.1.csv')
+    exp11_rows = load_csv(exp11_csv) if os.path.exists(exp11_csv) else []
+
+    out_dir = os.path.join(base, 'evaluation', 'plots')
 
     cdf_data = load_cdf_latencies_5r(base)
     if cdf_data:
@@ -254,7 +266,7 @@ def main():
 
     tables = []
     tables.append('% Auto-generated LaTeX tables for SwiftPaxos 5-replica evaluation')
-    tables.append('% Generated from 5-replica distributed experiment data (RTT = 50ms)')
+    tables.append('% Phase 78 data: Exp 3.1 median of 3 runs, Exp 3.2 phase78.3b (t=32)')
     tables.append('')
     tables.append(table_peak_throughput(exp11_rows, exp31_rows))
     tables.append('')
