@@ -78,6 +78,7 @@ type commandDesc struct {
 	seq    bool
 
 	accepted    bool
+	applied     bool
 	pendingCall func()
 }
 
@@ -527,7 +528,9 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 			return
 		}
 
-		if slot > 0 {
+		// For COMMIT phase, check slot ordering before execution
+		// For speculative replies (leader, phase != COMMIT), skip this check
+		if desc.phase == COMMIT && slot > 0 {
 			if desc.seq {
 				// Sequential mode (event loop): poll, don't block
 				if !r.executed.Has(r.int32ToString(int32(slot - 1))) {
@@ -552,20 +555,13 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 			r.sync(desc.cmdId, desc.cmd)
 		}
 
-		if desc.val == nil {
-			desc.val = desc.cmd.Execute(r.State)
-			r.executed.Set(desc.slotStr, struct{}{})
-			r.notifyExecute(slot)
-
-			// Set r.values immediately after execution so MSync can reply
-			// even before the descriptor cleanup phase completes.
-			r.values.Set(desc.cmdId.String(), desc.val)
-
-			go func(nextSlot int) {
-				r.deliverChan <- nextSlot
-			}(slot + 1)
+		// Speculative execution: compute result WITHOUT modifying state
+		if desc.val == nil && desc.phase != COMMIT {
+			// Before commit: use ComputeResult (read-only)
+			desc.val = desc.cmd.ComputeResult(r.State)
 		}
 
+		// Speculative reply to client (leader only, before commit)
 		if r.isLeader && desc.phase != COMMIT {
 			rep := &MReply{
 				Replica: r.Id,
@@ -578,12 +574,26 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 			} else {
 				rep.Ok = TRUE
 			}
-			if rep.Ok == TRUE || r.contactClients {
-				// if !r.contactClients then the client gets reply
-				// from the leader or the closes replica after the command
-				// gets committed and executed
-				r.sender.SendToClient(desc.propose.ClientId, rep, r.cs.replyRPC)
-			}
+			// Always send reply to client so they can complete via macks quorum
+			// even when rep.Ok == FALSE (pending dependency). Without this,
+			// the client hangs waiting for a leader reply that never comes.
+			r.sender.SendToClient(desc.propose.ClientId, rep, r.cs.replyRPC)
+		}
+
+		// After commit: actually execute and modify state
+		if desc.phase == COMMIT && !desc.applied {
+			desc.val = desc.cmd.Execute(r.State)
+			desc.applied = true
+			r.executed.Set(desc.slotStr, struct{}{})
+			r.notifyExecute(slot)
+
+			// Set r.values immediately after execution so MSync can reply
+			// even before the descriptor cleanup phase completes.
+			r.values.Set(desc.cmdId.String(), desc.val)
+
+			go func(nextSlot int) {
+				r.deliverChan <- nextSlot
+			}(slot + 1)
 		}
 
 		if desc.phase == COMMIT {
@@ -608,7 +618,6 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 				r.history[slot].phase = desc.phase
 				r.history[slot].cmd = desc.cmd
 				desc.active = false
-				r.values.Set(desc.cmdId.String(), desc.val)
 				r.cmdDescs.Remove(desc.slotStr)
 				r.freeDesc(desc)
 				return

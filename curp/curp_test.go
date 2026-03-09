@@ -7,6 +7,9 @@ import (
 
 	cmap "github.com/orcaman/concurrent-map"
 
+	"github.com/imdea-software/swiftpaxos/hook"
+	"github.com/imdea-software/swiftpaxos/replica"
+	"github.com/imdea-software/swiftpaxos/replica/defs"
 	"github.com/imdea-software/swiftpaxos/state"
 )
 
@@ -245,6 +248,30 @@ func TestMSyncRecoveryComputeResult(t *testing.T) {
 	}
 }
 
+// newTestReplica creates a minimal Replica suitable for deliver() tests.
+func newTestReplica() *Replica {
+	baseRep := &replica.Replica{
+		Exec:  true,
+		State: state.InitState(),
+	}
+	r := &Replica{
+		Replica:     baseRep,
+		isLeader:    true,
+		ballot:      0,
+		delivered:   cmap.New(),
+		executed:    cmap.New(),
+		committed:   cmap.New(),
+		proposes:    cmap.New(),
+		values:      cmap.New(),
+		cmdDescs:    cmap.New(),
+		sender:      make(replica.Sender, 128),
+		deliverChan: make(chan int, 128),
+		closedChan:  make(chan struct{}),
+	}
+	close(r.closedChan)
+	return r
+}
+
 // TestMSyncRecoveryPhaseCheck verifies the phase-based recovery logic:
 // only COMMIT phase commands should be recoverable.
 func TestMSyncRecoveryPhaseCheck(t *testing.T) {
@@ -269,5 +296,183 @@ func TestMSyncRecoveryPhaseCheck(t *testing.T) {
 			t.Errorf("phase=%d cmdOp=%d: recoverable=%v, want %v",
 				tt.phase, tt.cmdOp, canRecover, tt.recoverable)
 		}
+	}
+}
+
+// TestD7SpeculativeReplySkipsSlotOrdering verifies that speculative replies
+// (leader, phase != COMMIT) do NOT wait for slot ordering. Before D7 fix,
+// all phases were gated behind slot ordering, causing unnecessary latency.
+func TestD7SpeculativeReplySkipsSlotOrdering(t *testing.T) {
+	r := newTestReplica()
+
+	cmdId := CommandId{ClientId: 1, SeqNum: 0}
+	propose := &defs.GPropose{
+		Propose: &defs.Propose{
+			ClientId: 1,
+			Command:  state.Command{Op: state.GET, K: state.Key(42), V: state.NIL()},
+		},
+	}
+	r.proposes.Set(cmdId.String(), propose)
+
+	// PUT something first so GET returns a value
+	putCmd := state.Command{Op: state.PUT, K: state.Key(42), V: state.Value([]byte("val"))}
+	putCmd.Execute(r.State)
+
+	desc := &commandDesc{
+		cmdId:        cmdId,
+		cmd:          propose.Command,
+		phase:        ACCEPT, // NOT COMMIT — speculative
+		cmdSlot:      1,      // slot > 0
+		slotStr:      "1",
+		dep:          -1,
+		afterPayload: hook.NewOptCondF(func() bool { return true }),
+		msgs:         make(chan interface{}, 128),
+		seq:          true,
+	}
+
+	// Slot 0 is NOT executed — if slot ordering were enforced,
+	// deliver() would return early without sending a reply
+	r.deliver(desc, 1)
+
+	// D7: speculative reply should still be sent despite slot 0 not executed
+	select {
+	case msg := <-r.sender:
+		_ = msg
+	default:
+		t.Error("D7: speculative reply should be sent without waiting for slot ordering")
+	}
+}
+
+// TestD8AlwaysSendMReply verifies that MReply is sent even when Ok==FALSE
+// (pending dependency). Before D8 fix, only Ok==TRUE replies were sent,
+// causing client hangs when the fast path needed a leader reply.
+func TestD8AlwaysSendMReply(t *testing.T) {
+	r := newTestReplica()
+
+	cmdId := CommandId{ClientId: 1, SeqNum: 0}
+	propose := &defs.GPropose{
+		Propose: &defs.Propose{
+			ClientId: 1,
+			Command:  state.Command{Op: state.GET, K: state.Key(1), V: state.NIL()},
+		},
+	}
+	r.proposes.Set(cmdId.String(), propose)
+
+	desc := &commandDesc{
+		cmdId:        cmdId,
+		cmd:          propose.Command,
+		phase:        ACCEPT,
+		cmdSlot:      0,
+		slotStr:      "0",
+		dep:          5, // dependency on slot 5
+		afterPayload: hook.NewOptCondF(func() bool { return true }),
+		msgs:         make(chan interface{}, 128),
+		seq:          true,
+	}
+	// dep=5 is NOT in committed map, so Ok should be FALSE
+
+	r.deliver(desc, 0)
+
+	// D8: reply should still be sent despite Ok==FALSE
+	select {
+	case msg := <-r.sender:
+		_ = msg
+	default:
+		t.Error("D8: MReply should be sent even when Ok==FALSE")
+	}
+}
+
+// TestAppliedPreventsDoubleExecution verifies that the applied flag prevents
+// Execute from being called twice on the same descriptor.
+func TestAppliedPreventsDoubleExecution(t *testing.T) {
+	r := newTestReplica()
+	r.history = make([]commandStaticDesc, HISTORY_SIZE)
+
+	cmdId := CommandId{ClientId: 1, SeqNum: 0}
+	propose := &defs.GPropose{
+		Propose: &defs.Propose{
+			ClientId: 1,
+			Command:  state.Command{Op: state.PUT, K: state.Key(10), V: state.Value([]byte("first"))},
+		},
+	}
+	r.proposes.Set(cmdId.String(), propose)
+
+	desc := &commandDesc{
+		cmdId:        cmdId,
+		cmd:          propose.Command,
+		phase:        COMMIT,
+		cmdSlot:      0,
+		slotStr:      "0",
+		dep:          -1,
+		applied:      false,
+		afterPayload: hook.NewOptCondF(func() bool { return true }),
+		msgs:         make(chan interface{}, 128),
+		seq:          true,
+	}
+
+	r.deliver(desc, 0)
+
+	// Verify first execution happened
+	if !desc.applied {
+		t.Fatal("desc.applied should be true after deliver()")
+	}
+	val, exists := r.values.Get(cmdId.String())
+	if !exists {
+		t.Fatal("values should be set after execution")
+	}
+
+	// Now change the command to write a different value and re-deliver
+	desc.cmd = state.Command{Op: state.PUT, K: state.Key(10), V: state.Value([]byte("second"))}
+	// Reset delivered so deliver() doesn't early-return
+	r.delivered = cmap.New()
+
+	r.deliver(desc, 0)
+
+	// Value should still be "first" — applied guard prevented re-execution
+	val2, _ := r.values.Get(cmdId.String())
+	if !bytes.Equal(val.([]byte), val2.([]byte)) {
+		t.Errorf("applied guard failed: value changed from %v to %v", val, val2)
+	}
+}
+
+// TestSpeculativeUsesComputeResult verifies that speculative execution uses
+// ComputeResult (read-only) instead of Execute (modifies state).
+func TestSpeculativeUsesComputeResult(t *testing.T) {
+	r := newTestReplica()
+
+	// PUT key=1 first
+	putCmd := state.Command{Op: state.PUT, K: state.Key(1), V: state.Value([]byte("orig"))}
+	putCmd.Execute(r.State)
+
+	cmdId := CommandId{ClientId: 1, SeqNum: 0}
+	// Speculative PUT should use ComputeResult (returns NIL, doesn't modify state)
+	putCmd2 := state.Command{Op: state.PUT, K: state.Key(1), V: state.Value([]byte("new"))}
+	propose := &defs.GPropose{
+		Propose: &defs.Propose{
+			ClientId: 1,
+			Command:  putCmd2,
+		},
+	}
+	r.proposes.Set(cmdId.String(), propose)
+
+	desc := &commandDesc{
+		cmdId:        cmdId,
+		cmd:          putCmd2,
+		phase:        ACCEPT, // speculative
+		cmdSlot:      0,
+		slotStr:      "0",
+		dep:          -1,
+		afterPayload: hook.NewOptCondF(func() bool { return true }),
+		msgs:         make(chan interface{}, 128),
+		seq:          true,
+	}
+
+	r.deliver(desc, 0)
+
+	// State should NOT be modified by speculative PUT
+	getCmd := state.Command{Op: state.GET, K: state.Key(1), V: state.NIL()}
+	result := getCmd.Execute(r.State)
+	if !bytes.Equal(result, []byte("orig")) {
+		t.Errorf("speculative PUT modified state: GET(1) = %q, want 'orig'", result)
 	}
 }

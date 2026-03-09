@@ -5222,10 +5222,14 @@ Based on diagnosis, port optimizations one at a time to isolate impact:
   - Both launched in NewClient; all shared state protected by c.mu
   - Matches CURP-HO pattern to reduce latency contention between strong/weak reply processing
 
-- [ ] 77.2e: Port D7/D8 fixes to curp-baseline
-  - Skip slot ordering for speculative MReply (only apply for COMMIT phase)
-  - Always send MReply even when Ok=FALSE (client can fall back to slow path via macks)
-  - These are the biggest bottlenecks in curp-baseline
+- [x] 77.2e: Port D7/D8 fixes to curp-baseline
+  - D7: Restructured deliver() to separate speculative (ComputeResult) from COMMIT (Execute)
+  - Slot ordering now only applies to COMMIT phase; speculative replies sent immediately
+  - D8: Always send MReply to client even when Ok=FALSE (pending dependency)
+  - Added `applied` field to commandDesc to prevent double execution
+  - Removed duplicate r.values.Set from sequential cleanup path
+  - Tests: TestD7SpeculativeReplySkipsSlotOrdering, TestD8AlwaysSendMReply,
+    TestAppliedPreventsDoubleExecution, TestSpeculativeUsesComputeResult
 
 #### Phase 77.3: Evaluate
 
