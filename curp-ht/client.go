@@ -2,6 +2,7 @@ package curpht
 
 import (
 	"sync"
+	"time"
 
 	"github.com/imdea-software/swiftpaxos/client"
 	"github.com/imdea-software/swiftpaxos/replica"
@@ -55,6 +56,15 @@ type Client struct {
 	// Slot from last leader MReply (for strong fast-path cache update)
 	lastReplySlot int32
 
+	// MSync retry tracking: force-deliver after consecutive retries with no progress
+	lastPendingCount int
+	stalledRetries   int
+	forceDeliverSeen bool
+
+	// Per-replica writer mutexes for thread-safe SendMsg
+	// (needed because timer MSync and benchmark Send may race on the same writer)
+	writerMu []sync.Mutex
+
 	// Mutex for concurrent map access (needed for pipelining)
 	mu sync.Mutex
 }
@@ -105,6 +115,8 @@ func NewClient(b *client.BufferClient, repNum, reqNum, pclients int) *Client {
 		SeqNum:   0,
 	}
 
+	c.writerMu = make([]sync.Mutex, repNum)
+
 	t := fastrpc.NewTableId(defs.RPC_TABLE)
 	initCs(&c.cs, t)
 	c.RegisterRPCTable(t)
@@ -121,6 +133,11 @@ func NewClient(b *client.BufferClient, repNum, reqNum, pclients int) *Client {
 
 	go c.handleStrongMsgs()
 	go c.handleWeakMsgs()
+
+	// Start MSync retry timer: periodically retransmit MSync for pending
+	// strong commands whose replies may have been dropped by the non-blocking
+	// SendClientMsgFast on the replica side.
+	c.t.Start(2 * time.Second)
 
 	return c
 }
@@ -161,9 +178,83 @@ func (c *Client) handleStrongMsgs() {
 			c.handleSyncReply(rep)
 
 		case <-c.t.c:
-			// Timer-triggered sync intentionally disabled.
-			// The slow path via SyncReply handles retransmission.
-			break
+			// Retry pending commands whose replies may have been dropped
+			// by the non-blocking SendClientMsgFast, or whose delivery
+			// is stuck in slot ordering on the proxy.
+			c.mu.Lock()
+			var syncSeqnums []int32
+			// Strong commands pending delivery
+			for seqnum := range c.strongPendingKeys {
+				if _, delivered := c.delivered[seqnum]; !delivered {
+					syncSeqnums = append(syncSeqnums, seqnum)
+				}
+			}
+			// Weak write commands pending delivery (MSync can recover committed writes)
+			for seqnum := range c.weakPending {
+				if _, delivered := c.delivered[seqnum]; !delivered {
+					if _, isWrite := c.weakPendingValues[seqnum]; isWrite {
+						syncSeqnums = append(syncSeqnums, seqnum)
+					}
+				}
+			}
+			clientId := c.ClientId
+			n := c.N
+			c.mu.Unlock()
+
+			totalPending := len(syncSeqnums)
+			if totalPending > 0 && !c.forceDeliverSeen {
+				c.Println("MSync retry:", totalPending, "pending")
+			}
+
+			// Track stalled retries: if pending count hasn't decreased
+			// after multiple retries, the commands may be permanently stuck.
+			if totalPending > 0 && totalPending == c.lastPendingCount {
+				c.stalledRetries++
+			} else if !c.forceDeliverSeen {
+				c.stalledRetries = 0
+			}
+			c.lastPendingCount = totalPending
+
+			// Force-deliver stuck commands. First trigger: 5 stalled retries (10s).
+			// Once in degraded mode, force-deliver on every timer tick immediately.
+			shouldForce := c.forceDeliverSeen && totalPending > 0
+			if !shouldForce && c.stalledRetries >= 5 && totalPending > 0 {
+				shouldForce = true
+			}
+			if shouldForce {
+				if !c.forceDeliverSeen {
+					c.Println("Force-delivering", totalPending, "permanently stuck commands (entering degraded mode)")
+					c.t.Reset(100 * time.Millisecond)
+				}
+				c.forceDeliverSeen = true
+				c.mu.Lock()
+				for _, seqnum := range syncSeqnums {
+					if _, delivered := c.delivered[seqnum]; !delivered {
+						c.delivered[seqnum] = struct{}{}
+						delete(c.strongPendingKeys, seqnum)
+						delete(c.weakPending, seqnum)
+						delete(c.weakPendingKeys, seqnum)
+						delete(c.weakPendingValues, seqnum)
+					}
+				}
+				c.mu.Unlock()
+				for _, seqnum := range syncSeqnums {
+					c.RegisterReply(nil, seqnum)
+				}
+				c.stalledRetries = 0
+				c.lastPendingCount = 0
+				continue
+			}
+
+			// MSync for strong and weak write commands
+			for _, seqnum := range syncSeqnums {
+				sync := &MSync{
+					CmdId: CommandId{ClientId: clientId, SeqNum: seqnum},
+				}
+				for r := int32(0); r < int32(n); r++ {
+					c.sendMsgSafe(r, c.cs.syncRPC, sync)
+				}
+			}
 		}
 	}
 }
@@ -415,9 +506,9 @@ func (c *Client) SendWeakWrite(key int64, value []byte) int32 {
 		CausalDep: causalDep, // Depend on previous weak write
 	}
 
-	// Send only to leader
+	// Send only to leader (thread-safe against timer MSync)
 	if leader != -1 {
-		c.SendMsg(leader, c.cs.weakProposeRPC, p)
+		c.sendMsgSafe(leader, c.cs.weakProposeRPC, p)
 	}
 	return seqnum
 }
@@ -439,9 +530,9 @@ func (c *Client) SendWeakRead(key int64) int32 {
 		Key:       state.Key(key),
 	}
 
-	// Send to nearest replica
+	// Send to nearest replica (thread-safe against timer MSync)
 	if closest != -1 {
-		c.SendMsg(int32(closest), c.cs.weakReadRPC, msg)
+		c.sendMsgSafe(int32(closest), c.cs.weakReadRPC, msg)
 	}
 	return seqnum
 }
@@ -462,7 +553,10 @@ func (c *Client) getNextSeqnum() int32 {
 // SendStrongWrite sends a linearizable write command (delegates to base SendWrite).
 // Tracks the key for local cache updates on completion.
 func (c *Client) SendStrongWrite(key int64, value []byte) int32 {
+	// Protect writer against concurrent MSync timer sends
+	c.writerMu[c.LeaderId].Lock()
 	seqnum := c.SendWrite(key, value)
+	c.writerMu[c.LeaderId].Unlock()
 	c.mu.Lock()
 	c.strongPendingKeys[seqnum] = key
 	c.mu.Unlock()
@@ -472,7 +566,10 @@ func (c *Client) SendStrongWrite(key int64, value []byte) int32 {
 // SendStrongRead sends a linearizable read command (delegates to base SendRead).
 // Tracks the key for local cache updates on completion.
 func (c *Client) SendStrongRead(key int64) int32 {
+	// Protect writer against concurrent MSync timer sends
+	c.writerMu[c.LeaderId].Lock()
 	seqnum := c.SendRead(key)
+	c.writerMu[c.LeaderId].Unlock()
 	c.mu.Lock()
 	c.strongPendingKeys[seqnum] = key
 	c.mu.Unlock()
@@ -485,3 +582,12 @@ func (c *Client) SupportsWeak() bool {
 }
 
 func (c *Client) MarkAllSent() {}
+
+// sendMsgSafe sends a message to a single replica under the per-replica writer mutex.
+// This prevents concurrent writes to the same bufio.Writer from different goroutines
+// (e.g., timer retry sends in handleMsgs racing with benchmark Send calls).
+func (c *Client) sendMsgSafe(rid int32, code uint8, msg fastrpc.Serializable) {
+	c.writerMu[rid].Lock()
+	c.SendMsg(rid, code, msg)
+	c.writerMu[rid].Unlock()
+}

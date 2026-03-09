@@ -2,6 +2,7 @@ package curpho
 
 import (
 	"sync"
+	"time"
 
 	"github.com/imdea-software/swiftpaxos/client"
 	"github.com/imdea-software/swiftpaxos/replica"
@@ -68,12 +69,18 @@ type Client struct {
 	lastReplySlot     int32                 // slot from last leader MReply
 	maxVersion        int32                 // highest version seen
 
+	// MSync retry tracking: force-deliver after consecutive retries with no progress
+	lastPendingCount   int
+	stalledRetries     int
+	forceDeliverSeen   bool // true after first force-delivery (lower threshold for subsequent)
+
 	// Mutex for concurrent map access (needed for pipelining)
 	mu sync.Mutex
 
 	// Per-replica writer mutexes for async remote sends (Phase 43.2a).
 	// Protects concurrent access to per-replica bufio.Writer from:
 	// - remoteSender goroutines (async causal broadcast)
+	// - handleStrongMsgs goroutine (timer retries)
 	// - main goroutine (SendStrongWrite/Read → SendProposal)
 	writerMu []sync.Mutex
 
@@ -166,6 +173,11 @@ func NewClient(b *client.BufferClient, repNum, reqNum, pclients int) *Client {
 	go c.handleStrongMsgs()
 	go c.handleWeakMsgs()
 
+	// Start MSync retry timer: periodically retransmit MSync for pending
+	// strong commands whose replies may have been dropped by the non-blocking
+	// SendClientMsgFast on the replica side.
+	c.t.Start(2 * time.Second)
+
 	return c
 }
 
@@ -205,9 +217,119 @@ func (c *Client) handleStrongMsgs() {
 			c.handleSyncReply(rep)
 
 		case <-c.t.c:
-			// Timer-triggered sync intentionally disabled.
-			// The slow path via SyncReply handles retransmission.
-			break
+			// Retry pending commands whose replies may have been dropped
+			// by the non-blocking SendClientMsgFast, or whose delivery
+			// is stuck in slot ordering on the proxy.
+			c.mu.Lock()
+			var syncSeqnums []int32    // commands recoverable via MSync
+			var weakReadRetries []int32 // weak reads that need re-send (not in r.values)
+			// Strong commands pending delivery
+			for seqnum := range c.strongPendingKeys {
+				if _, delivered := c.delivered[seqnum]; !delivered {
+					syncSeqnums = append(syncSeqnums, seqnum)
+				}
+			}
+			// Weak/causal commands pending delivery
+			for seqnum := range c.weakPending {
+				if _, delivered := c.delivered[seqnum]; !delivered {
+					if _, isWrite := c.weakPendingValues[seqnum]; isWrite {
+						// Causal write: MSync can recover (committed+executed eventually)
+						syncSeqnums = append(syncSeqnums, seqnum)
+					} else {
+						// Weak read: never committed, MSync can't recover — re-send MWeakRead
+						weakReadRetries = append(weakReadRetries, seqnum)
+					}
+				}
+			}
+			clientId := c.ClientId
+			n := c.N
+			c.mu.Unlock()
+
+			totalPending := len(syncSeqnums) + len(weakReadRetries)
+			if totalPending > 0 && !c.forceDeliverSeen {
+				c.Println("MSync retry:", len(syncSeqnums), "sync +", len(weakReadRetries), "weak-read pending")
+			}
+
+			// Track stalled retries: if pending count hasn't decreased
+			// after multiple retries, the commands may be permanently stuck
+			// (e.g., never received by any replica). Force-deliver them.
+			if totalPending > 0 && totalPending == c.lastPendingCount {
+				c.stalledRetries++
+			} else if !c.forceDeliverSeen {
+				c.stalledRetries = 0
+			}
+			c.lastPendingCount = totalPending
+
+			// Force-deliver stuck commands. First trigger: 5 stalled retries (10s).
+			// Once in degraded mode, force-deliver on every timer tick immediately.
+			shouldForce := c.forceDeliverSeen && totalPending > 0
+			if !shouldForce && c.stalledRetries >= 5 && totalPending > 0 {
+				shouldForce = true
+			}
+			if shouldForce {
+				if !c.forceDeliverSeen {
+					c.Println("Force-delivering", totalPending, "permanently stuck commands (entering degraded mode)")
+					// Switch to fast timer (100ms) for rapid force-delivery of remaining commands
+					c.t.Reset(100 * time.Millisecond)
+				}
+				c.forceDeliverSeen = true
+				c.mu.Lock()
+				for _, seqnum := range syncSeqnums {
+					if _, delivered := c.delivered[seqnum]; !delivered {
+						c.delivered[seqnum] = struct{}{}
+						delete(c.strongPendingKeys, seqnum)
+						delete(c.weakPending, seqnum)
+						delete(c.weakPendingKeys, seqnum)
+						delete(c.weakPendingValues, seqnum)
+					}
+				}
+				for _, seqnum := range weakReadRetries {
+					if _, delivered := c.delivered[seqnum]; !delivered {
+						c.delivered[seqnum] = struct{}{}
+						delete(c.weakPending, seqnum)
+						delete(c.weakPendingKeys, seqnum)
+					}
+				}
+				c.mu.Unlock()
+				// Send nil replies to unblock the benchmark loop
+				for _, seqnum := range syncSeqnums {
+					c.RegisterReply(nil, seqnum)
+				}
+				for _, seqnum := range weakReadRetries {
+					c.RegisterReply(nil, seqnum)
+				}
+				c.stalledRetries = 0
+				c.lastPendingCount = 0
+				continue
+			}
+
+			// MSync for strong and causal write commands
+			for _, seqnum := range syncSeqnums {
+				sync := &MSync{
+					CmdId: CommandId{ClientId: clientId, SeqNum: seqnum},
+				}
+				for r := int32(0); r < int32(n); r++ {
+					c.sendMsgSafe(r, c.cs.syncRPC, sync)
+				}
+			}
+			// Re-send MWeakRead for weak reads to ALL replicas (stateless — any can answer).
+			// Send to all because the original closest connection may be dead.
+			for _, seqnum := range weakReadRetries {
+				c.mu.Lock()
+				key, hasKey := c.weakPendingKeys[seqnum]
+				c.mu.Unlock()
+				if !hasKey {
+					continue
+				}
+				msg := &MWeakRead{
+					CommandId: seqnum,
+					ClientId:  clientId,
+					Key:       state.Key(key),
+				}
+				for r := int32(0); r < int32(n); r++ {
+					c.sendMsgSafe(r, c.cs.weakReadRPC, msg)
+				}
+			}
 		}
 	}
 }

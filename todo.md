@@ -5574,27 +5574,21 @@ Evidence: CURP-HT and CURP-HO s_p99 ≈ 2000ms (= MSync 2s timer), confirming re
 complete via MSync recovery path. Baseline has no MSync timer (77.2b only added to HT/HO),
 so baseline s_p99=109ms — but baseline also shows linear throughput growth without saturation.
 
-#### Phase 83.3: Fix MSync Recovery Handler + Remove MSync Timer
+#### Phase 83.3: Fix MSync Recovery Handler (Keep Timer for Liveness)
 
-**Problem**: Phase 77.2c MSync recovery handler bypasses slot ordering. Phase 77.2b MSync
-timer enables clients to exploit this bypass. Both must be fixed.
+**Problem**: Phase 77.2c MSync recovery handler uses `ComputeResult(r.State)` without
+slot ordering, bypassing the Phase 83.1 deliver() fix. This is the only bug — the MSync
+timer itself is needed for liveness (recovers from dropped `SendClientMsgFast` messages).
 
-**Changes needed**:
-- `curp-ht/curp-ht.go`: Remove MSync recovery ComputeResult path from syncChan handler
-  (the `else` branch added in 77.2c). Keep the `r.values.Get` path (returns already-executed
-  results, which are correct).
-- `curp/curp.go`: Same — remove MSync recovery ComputeResult path.
-- `curp-ho/curp-ho.go`: Check and fix if same MSync recovery pattern exists.
-- `curp-ht/client.go`: Remove 77.2b MSync retry timer (revert to disabled `break`).
-  Without recovery handler, MSync timer just wastes network bandwidth.
-  The normal SyncReply path (deliver() COMMIT phase) handles retransmission.
-- `curp/client.go`: Check if MSync timer was also added here.
+**Fix**: Remove ComputeResult recovery path from replica syncChan handler only.
+Keep `r.values.Get` path (returns already-executed, slot-ordered results).
+Keep client MSync timer — it now correctly waits for slot-ordered execution via `r.values`.
 
 - [x] 83.3a: Remove MSync ComputeResult recovery from curp-ht syncChan handler
 - [x] 83.3b: Remove MSync ComputeResult recovery from curp syncChan handler
 - [x] 83.3c: Remove MSync ComputeResult recovery from curp-ho syncChan handler
-- [x] 83.3d: Remove MSync retry timer from curp-ht client (revert 77.2b)
-- [x] 83.3e: Remove MSync retry timer from curp-ho client (keep writerMu for remoteSender)
+- [x] 83.3d: Keep MSync retry timer in clients (needed for liveness)
+- [x] 83.3e: Remove replica-side tests for ComputeResult recovery path
 - [x] 83.3f: Run `go test ./...` — all pass
 
 #### Phase 83.4: Quick Verification (t=32, t=64 only)

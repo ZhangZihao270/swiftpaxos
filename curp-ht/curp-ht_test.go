@@ -1650,6 +1650,71 @@ func TestValuesSetAfterExecution(t *testing.T) {
 	}
 }
 
+// TestMSyncRetryFields verifies the MSync retry tracking fields
+// are initialized correctly and the force-delivery logic works.
+func TestMSyncRetryFields(t *testing.T) {
+	// Verify default values
+	c := &Client{
+		delivered:         make(map[int32]struct{}),
+		strongPendingKeys: make(map[int32]int64),
+		weakPending:       make(map[int32]struct{}),
+		weakPendingValues: make(map[int32]state.Value),
+	}
+
+	if c.lastPendingCount != 0 {
+		t.Errorf("lastPendingCount should start at 0, got %d", c.lastPendingCount)
+	}
+	if c.stalledRetries != 0 {
+		t.Errorf("stalledRetries should start at 0, got %d", c.stalledRetries)
+	}
+	if c.forceDeliverSeen {
+		t.Error("forceDeliverSeen should start as false")
+	}
+
+	// Simulate pending commands
+	c.strongPendingKeys[1] = 100
+	c.strongPendingKeys[2] = 200
+	c.weakPending[3] = struct{}{}
+	c.weakPendingValues[3] = state.Value([]byte{1})
+
+	// Count undelivered
+	var pending int
+	for seqnum := range c.strongPendingKeys {
+		if _, delivered := c.delivered[seqnum]; !delivered {
+			pending++
+		}
+	}
+	for seqnum := range c.weakPending {
+		if _, delivered := c.delivered[seqnum]; !delivered {
+			if _, isWrite := c.weakPendingValues[seqnum]; isWrite {
+				pending++
+			}
+		}
+	}
+	if pending != 3 {
+		t.Errorf("expected 3 pending, got %d", pending)
+	}
+
+	// Deliver one
+	c.delivered[1] = struct{}{}
+	pending = 0
+	for seqnum := range c.strongPendingKeys {
+		if _, delivered := c.delivered[seqnum]; !delivered {
+			pending++
+		}
+	}
+	for seqnum := range c.weakPending {
+		if _, delivered := c.delivered[seqnum]; !delivered {
+			if _, isWrite := c.weakPendingValues[seqnum]; isWrite {
+				pending++
+			}
+		}
+	}
+	if pending != 2 {
+		t.Errorf("expected 2 pending after delivery, got %d", pending)
+	}
+}
+
 // TestWriterMuInitialization verifies writerMu is sized correctly.
 func TestWriterMuInitialization(t *testing.T) {
 	for _, n := range []int{3, 5, 7} {
