@@ -5324,6 +5324,36 @@ Based on diagnosis, port optimizations one at a time to isolate impact:
 - [x] 77.4b: Run existing test suite: `go test ./...`
   - All packages pass: client, config, curp, curp-ho, curp-ht, epaxos, raft, raft-ht, defs, state
 
+### Phase 78: Verify Low-Concurrency Regression & Final Evaluation
+
+#### Phase 78.1: Verify t=1 Regression
+
+- [x] 78.1a: Re-run 5r CURP-HT t=1 to verify regression
+  - Re-ran 3 times: 2698, 2721, 2190 ops/sec
+  - Phase 77 measurement (1612) was an outlier — run-to-run variance at t=1 is high
+  - 3r comparison confirms: 1592→1611 (+1.2%), no regression
+  - **Conclusion**: No code fix needed. The -40% "regression" was measurement noise.
+
+#### Phase 78.2: Analyze Remaining HT/HO Gap
+
+- [ ] 78.2a: Profile CURP-HT leader CPU at t=128 to identify weak write Paxos overhead
+  - H5 hypothesis: CURP-HT routes all weak writes through leader Paxos, adding CPU load
+  - CURP-HO's causal broadcast sends weak writes directly to all replicas, bypassing leader
+  - Profile with Go pprof to quantify leader-side Paxos overhead from weak writes
+
+- [ ] 78.2b: Compare leader message rates between CURP-HT and CURP-HO at t=128
+  - Count messages processed by leader per second for both protocols
+  - Quantify how much of the gap comes from extra Paxos rounds for weak writes
+
+#### Phase 78.3: Final Evaluation
+
+- [ ] 78.3a: Run reproducible Exp 3.1 (5r) with 3 repetitions and report min/max/median
+  - Ensure results are stable enough for paper presentation
+
+- [ ] 78.3b: Run Exp 3.2 (weak ratio sweep) with Phase 77.2 optimizations
+  - weakRatio=0,10,25,50,75,100 at t=32 (5 replicas)
+  - Characterize how CURP-HT vs CURP-HO vs baseline scale with weak ratio
+
 ---
 
 ## Legend
