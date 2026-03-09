@@ -5424,3 +5424,87 @@ func TestCommandDescSlotAssignedAt(t *testing.T) {
 		t.Error("slotAssignedAt should not be zero after assignment")
 	}
 }
+
+// ============================================================================
+// Phase 75.2a: Client-side Strong Op Instrumentation Tests
+// ============================================================================
+
+// TestClientInstrStatsAtomicIncrement tests that clientInstrStats counters increment atomically.
+func TestClientInstrStatsAtomicIncrement(t *testing.T) {
+	var s clientInstrStats
+
+	atomic.AddInt64(&s.fastPathCount, 5)
+	atomic.AddInt64(&s.slowPathCount, 3)
+	atomic.AddInt64(&s.firstAckNs, 1000)
+	atomic.AddInt64(&s.firstAckCount, 2)
+	atomic.AddInt64(&s.fastPathNs, 50000)
+	atomic.AddInt64(&s.fastPathFailNs, 70000)
+	atomic.AddInt64(&s.fastPathFailCount, 1)
+	atomic.AddInt64(&s.syncReplyWaitNs, 90000)
+	atomic.AddInt64(&s.syncReplyWaitCount, 1)
+
+	if atomic.LoadInt64(&s.fastPathCount) != 5 {
+		t.Error("fastPathCount mismatch")
+	}
+	if atomic.LoadInt64(&s.slowPathCount) != 3 {
+		t.Error("slowPathCount mismatch")
+	}
+	if atomic.LoadInt64(&s.firstAckNs) != 1000 {
+		t.Error("firstAckNs mismatch")
+	}
+	if atomic.LoadInt64(&s.firstAckCount) != 2 {
+		t.Error("firstAckCount mismatch")
+	}
+	if atomic.LoadInt64(&s.fastPathNs) != 50000 {
+		t.Error("fastPathNs mismatch")
+	}
+	if atomic.LoadInt64(&s.fastPathFailNs) != 70000 {
+		t.Error("fastPathFailNs mismatch")
+	}
+	if atomic.LoadInt64(&s.fastPathFailCount) != 1 {
+		t.Error("fastPathFailCount mismatch")
+	}
+	if atomic.LoadInt64(&s.syncReplyWaitNs) != 90000 {
+		t.Error("syncReplyWaitNs mismatch")
+	}
+	if atomic.LoadInt64(&s.syncReplyWaitCount) != 1 {
+		t.Error("syncReplyWaitCount mismatch")
+	}
+}
+
+// TestClientInstrStatsReset tests that clientInstrStats reset() zeroes all counters.
+func TestClientInstrStatsReset(t *testing.T) {
+	var s clientInstrStats
+
+	atomic.StoreInt64(&s.fastPathCount, 10)
+	atomic.StoreInt64(&s.slowPathCount, 7)
+	atomic.StoreInt64(&s.firstAckNs, 5000)
+	atomic.StoreInt64(&s.firstAckCount, 3)
+	atomic.StoreInt64(&s.fastPathNs, 60000)
+	atomic.StoreInt64(&s.fastPathFailNs, 80000)
+	atomic.StoreInt64(&s.fastPathFailCount, 2)
+	atomic.StoreInt64(&s.syncReplyWaitNs, 100000)
+	atomic.StoreInt64(&s.syncReplyWaitCount, 4)
+
+	s.reset()
+
+	fields := []struct {
+		name string
+		val  int64
+	}{
+		{"fastPathCount", atomic.LoadInt64(&s.fastPathCount)},
+		{"slowPathCount", atomic.LoadInt64(&s.slowPathCount)},
+		{"firstAckNs", atomic.LoadInt64(&s.firstAckNs)},
+		{"firstAckCount", atomic.LoadInt64(&s.firstAckCount)},
+		{"fastPathNs", atomic.LoadInt64(&s.fastPathNs)},
+		{"fastPathFailNs", atomic.LoadInt64(&s.fastPathFailNs)},
+		{"fastPathFailCount", atomic.LoadInt64(&s.fastPathFailCount)},
+		{"syncReplyWaitNs", atomic.LoadInt64(&s.syncReplyWaitNs)},
+		{"syncReplyWaitCount", atomic.LoadInt64(&s.syncReplyWaitCount)},
+	}
+	for _, f := range fields {
+		if f.val != 0 {
+			t.Errorf("%s should be 0 after reset, got %d", f.name, f.val)
+		}
+	}
+}

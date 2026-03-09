@@ -4938,7 +4938,7 @@ These are all constant-factor improvements. The 2x gap with CURP-HO is structura
 
 #### Phase 75.2: Add Client-Side Instrumentation
 
-- [ ] **75.2a** In both `curp-ht/client.go` and `curp-ho/client.go`, track strong op phase timing:
+- [x] **75.2a** In both `curp-ht/client.go` and `curp-ho/client.go`, track strong op phase timing:
   - Time from Propose sent → first RecordAck received (network RTT)
   - Time from Propose sent → fast path success/failure detected
   - Time from fast path failure → MSyncReply received (slow path wait)
