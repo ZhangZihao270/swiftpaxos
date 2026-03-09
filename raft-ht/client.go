@@ -19,7 +19,7 @@ type cacheEntry struct {
 // ALL replies (strong + weak) are received through the RPC table — no WaitReplies.
 // Strong ops: leader sends RaftReply via SendToClient (type-prefixed).
 // Weak writes: leader sends MWeakReply via SendToClient (1-RTT early reply).
-// Weak reads: nearest replica sends MWeakReadReply via SendToClient (local).
+// Weak reads: leader sends MWeakReply via SendToClient (1-RTT, same path as weak writes).
 type Client struct {
 	*client.BufferClient
 
@@ -86,10 +86,10 @@ func (c *Client) handleMsgs() {
 			rep := m.(*MWeakReply)
 			c.handleWeakReply(rep)
 
-		// Weak read replies (from nearest replica)
+		// Weak read replies (legacy — no longer sent, reads go through weakPropose)
 		case m := <-c.cs.weakReadReplyChan:
 			rep := m.(*MWeakReadReply)
-			c.handleWeakReadReply(rep)
+			_ = rep
 		}
 	}
 }
@@ -116,7 +116,8 @@ func (c *Client) handleRaftReply(rep *RaftReply) {
 	c.RegisterReply(c.val, rep.CmdId.SeqNum)
 }
 
-// handleWeakReply handles weak write reply from leader (immediate, before commit)
+// handleWeakReply handles weak reply from leader (immediate, before commit).
+// Used for both weak writes (Value=nil) and weak reads (Value=read result).
 func (c *Client) handleWeakReply(rep *MWeakReply) {
 	c.mu.Lock()
 
@@ -129,18 +130,24 @@ func (c *Client) handleWeakReply(rep *MWeakReply) {
 	// Resend to the updated leader.
 	if rep.Slot < 0 {
 		leader := c.leader
-		c.mu.Unlock()
 		p := &MWeakPropose{
 			CommandId: rep.CmdId.SeqNum,
 			ClientId:  rep.CmdId.ClientId,
 		}
 		if key, hasKey := c.weakPendingKeys[rep.CmdId.SeqNum]; hasKey {
-			p.Command.Op = state.PUT
-			p.Command.K = state.Key(key)
 			if val, hasVal := c.weakPendingValues[rep.CmdId.SeqNum]; hasVal {
+				// Weak write: resend PUT
+				p.Command.Op = state.PUT
+				p.Command.K = state.Key(key)
 				p.Command.V = val
+			} else {
+				// Weak read: resend GET
+				p.Command.Op = state.GET
+				p.Command.K = state.Key(key)
+				p.Command.V = state.NIL()
 			}
 		}
+		c.mu.Unlock()
 		c.SendMsg(leader, c.cs.weakProposeRPC, p)
 		return
 	}
@@ -150,63 +157,37 @@ func (c *Client) handleWeakReply(rep *MWeakReply) {
 		return
 	}
 
-	// Update local cache with the write value + slot
+	// Update local cache with the value + slot
 	if key, hasKey := c.weakPendingKeys[rep.CmdId.SeqNum]; hasKey {
 		if val, hasVal := c.weakPendingValues[rep.CmdId.SeqNum]; hasVal {
+			// Weak write: use the value we sent
 			c.localCache[key] = cacheEntry{value: val, version: rep.Slot}
 			if rep.Slot > c.maxVersion {
 				c.maxVersion = rep.Slot
 			}
 			delete(c.weakPendingValues, rep.CmdId.SeqNum)
+		} else if rep.Value != nil {
+			// Weak read: use the value returned by leader
+			c.localCache[key] = cacheEntry{value: rep.Value, version: rep.Slot}
+			if rep.Slot > c.maxVersion {
+				c.maxVersion = rep.Slot
+			}
 		}
 		delete(c.weakPendingKeys, rep.CmdId.SeqNum)
 	}
 
-	c.val = nil // weak write reply has no value payload (just confirmation + slot)
-	c.delivered[rep.CmdId.SeqNum] = struct{}{}
-	delete(c.weakPending, rep.CmdId.SeqNum)
-	c.mu.Unlock()
-	c.RegisterReply(c.val, rep.CmdId.SeqNum)
-}
-
-// handleWeakReadReply handles weak read reply from nearest replica.
-// Merges replica response with local cache using max-version rule.
-func (c *Client) handleWeakReadReply(rep *MWeakReadReply) {
-	c.mu.Lock()
-	if _, exists := c.delivered[rep.CmdId.SeqNum]; exists {
-		c.mu.Unlock()
-		return
-	}
-
-	// Merge with local cache
-	key, _ := c.weakPendingKeys[rep.CmdId.SeqNum]
-	replicaVal := state.Value(rep.Rep)
-	replicaVer := rep.Version
-
-	cached, hasCached := c.localCache[key]
-	var finalVal state.Value
-	var finalVer int32
-	if hasCached && cached.version > replicaVer {
-		// Cache has fresher value
-		finalVal = cached.value
-		finalVer = cached.version
+	// For weak reads, use the returned value; for weak writes, nil
+	if rep.Value != nil {
+		c.val = rep.Value
 	} else {
-		// Replica has fresher or equal value
-		finalVal = replicaVal
-		finalVer = replicaVer
+		c.val = nil
 	}
-	c.localCache[key] = cacheEntry{value: finalVal, version: finalVer}
-	if finalVer > c.maxVersion {
-		c.maxVersion = finalVer
-	}
-
-	c.val = finalVal
 	c.delivered[rep.CmdId.SeqNum] = struct{}{}
 	delete(c.weakPending, rep.CmdId.SeqNum)
-	delete(c.weakPendingKeys, rep.CmdId.SeqNum)
 	c.mu.Unlock()
 	c.RegisterReply(c.val, rep.CmdId.SeqNum)
 }
+
 
 // SendWeakWrite sends a weak consistency write to the leader.
 // Leader assigns log slot and replies immediately (1 WAN RTT).
@@ -236,25 +217,30 @@ func (c *Client) SendWeakWrite(key int64, value []byte) int32 {
 	return seqnum
 }
 
-// SendWeakRead sends a weak consistency read to the nearest replica.
-// Returns (value, version), client merges with local cache.
+// SendWeakRead sends a weak consistency read to the leader.
+// The leader appends the GET to the log, reads the current state, replies immediately,
+// then replicates asynchronously (same path as weak writes for fairness).
 func (c *Client) SendWeakRead(key int64) int32 {
 	seqnum := c.BufferClient.GetNextSeqnum()
 
 	c.mu.Lock()
 	c.weakPending[seqnum] = struct{}{}
 	c.weakPendingKeys[seqnum] = key
-	closest := c.ClosestId
+	leader := c.leader
 	c.mu.Unlock()
 
-	msg := &MWeakRead{
+	p := &MWeakPropose{
 		CommandId: seqnum,
 		ClientId:  c.ClientId,
-		Key:       state.Key(key),
+		Command: state.Command{
+			Op: state.GET,
+			K:  state.Key(key),
+			V:  state.NIL(),
+		},
 	}
 
-	if closest != -1 {
-		c.SendMsg(int32(closest), c.cs.weakReadRPC, msg)
+	if leader != -1 {
+		c.SendMsg(leader, c.cs.weakProposeRPC, p)
 	}
 	return seqnum
 }
