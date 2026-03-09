@@ -5549,13 +5549,13 @@ Cross-protocol comparison becomes fairer.
 
 #### Phase 83.1: Fix deliver() in All CURP Protocols
 
-- [ ] 83.1a: Fix `curp-ho/curp-ho.go` — remove `desc.phase == COMMIT &&` condition from
-  slot ordering check in deliver(). Speculative reply must wait for previous slots to execute.
-- [ ] 83.1b: Fix `curp/curp.go` — revert Phase 77.2e D7 change: restore original slot ordering
-  that applies to all phases (revert to pre-Phase 77 behavior).
-- [ ] 83.1c: Fix `curp-ht/curp-ht.go` — same fix as 83.1b, ensure speculative reply waits
-  for slot ordering.
-- [ ] 83.1d: Run `go test ./...` to verify all tests pass after fix.
+- [x] 83.1a: Fix `curp-ho/curp-ho.go` — remove `desc.phase == COMMIT &&` condition from
+  slot ordering check in deliver(). Speculative reply must wait for previous slots to execute. [26:03:09]
+- [x] 83.1b: Fix `curp/curp.go` — revert Phase 77.2e D7 change: restore original slot ordering
+  that applies to all phases (revert to pre-Phase 77 behavior). [26:03:09]
+- [x] 83.1c: Fix `curp-ht/curp-ht.go` — same fix as 83.1b, ensure speculative reply waits
+  for slot ordering. [26:03:09]
+- [x] 83.1d: Run `go test ./...` — all tests pass (updated TestD7 → TestSpeculativeReplyWaitsForSlotOrdering). [26:03:09]
 
 #### Phase 83.2: Re-run Exp 3.1 (5r) with Correct Implementation
 

@@ -528,9 +528,10 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 			return
 		}
 
-		// For COMMIT phase, check slot ordering before execution
-		// For speculative replies (leader, phase != COMMIT), skip this check
-		if desc.phase == COMMIT && slot > 0 {
+		// Slot ordering: wait for previous slot to execute before proceeding.
+		// Applies to ALL phases (including speculative replies) to ensure
+		// ComputeResult reads up-to-date committed state for correctness.
+		if slot > 0 {
 			if desc.seq {
 				// Sequential mode (event loop): poll, don't block
 				if !r.executed.Has(r.int32ToString(int32(slot - 1))) {

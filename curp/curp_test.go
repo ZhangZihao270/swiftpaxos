@@ -299,10 +299,11 @@ func TestMSyncRecoveryPhaseCheck(t *testing.T) {
 	}
 }
 
-// TestD7SpeculativeReplySkipsSlotOrdering verifies that speculative replies
-// (leader, phase != COMMIT) do NOT wait for slot ordering. Before D7 fix,
-// all phases were gated behind slot ordering, causing unnecessary latency.
-func TestD7SpeculativeReplySkipsSlotOrdering(t *testing.T) {
+// TestSpeculativeReplyWaitsForSlotOrdering verifies that speculative replies
+// (leader, phase != COMMIT) DO wait for slot ordering. This ensures
+// ComputeResult reads up-to-date committed state for linearizability.
+// (Phase 83: reverts Phase 77.2e D7 which incorrectly skipped slot ordering.)
+func TestSpeculativeReplyWaitsForSlotOrdering(t *testing.T) {
 	r := newTestReplica()
 
 	cmdId := CommandId{ClientId: 1, SeqNum: 0}
@@ -330,16 +331,16 @@ func TestD7SpeculativeReplySkipsSlotOrdering(t *testing.T) {
 		seq:          true,
 	}
 
-	// Slot 0 is NOT executed — if slot ordering were enforced,
-	// deliver() would return early without sending a reply
+	// Slot 0 is NOT executed — slot ordering should block speculative reply
 	r.deliver(desc, 1)
 
-	// D7: speculative reply should still be sent despite slot 0 not executed
+	// Speculative reply should NOT be sent because slot 0 hasn't executed
 	select {
 	case msg := <-r.sender:
 		_ = msg
+		t.Error("Speculative reply should wait for slot ordering, but was sent")
 	default:
-		t.Error("D7: speculative reply should be sent without waiting for slot ordering")
+		// Correct: no reply sent because slot ordering blocks
 	}
 }
 
