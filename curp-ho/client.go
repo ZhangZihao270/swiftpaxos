@@ -43,6 +43,7 @@ type Client struct {
 
 	lastCmdId CommandId
 
+	fastPaths   int
 	slowPaths   int
 	alreadySlow map[CommandId]struct{}
 
@@ -421,6 +422,7 @@ func (c *Client) handleSyncReply(rep *MSyncReply) {
 
 	c.val = state.Value(rep.Rep)
 	c.delivered[rep.CmdId.SeqNum] = struct{}{}
+	c.slowPaths++
 
 	// Clear write set entries up to this committed seqnum
 	for ws := range c.writeSet {
@@ -440,7 +442,7 @@ func (c *Client) handleSyncReply(rep *MSyncReply) {
 	delete(c.weakPendingValues, rep.CmdId.SeqNum)
 	c.mu.Unlock()
 	c.RegisterReply(c.val, rep.CmdId.SeqNum)
-	c.Println("Slow Paths:", c.slowPaths)
+	c.Println("Fast/Slow Paths:", c.fastPaths, "/", c.slowPaths)
 }
 
 // handleFastPathAcks handles the fast path (super quorum) with two checks:
@@ -485,6 +487,7 @@ func (c *Client) handleFastPathAcks(leaderMsg interface{}, msgs []interface{}) {
 	}
 
 	c.delivered[cmdId.SeqNum] = struct{}{}
+	c.fastPaths++
 	// Clear write set entries up to this delivered seqnum
 	for ws := range c.writeSet {
 		if ws.ClientId == c.ClientId && ws.SeqNum < cmdId.SeqNum {
@@ -499,7 +502,7 @@ func (c *Client) handleFastPathAcks(leaderMsg interface{}, msgs []interface{}) {
 	}
 	c.mu.Unlock()
 	c.RegisterReply(c.val, cmdId.SeqNum)
-	c.Println("Slow Paths:", c.slowPaths)
+	c.Println("Fast/Slow Paths:", c.fastPaths, "/", c.slowPaths)
 }
 
 // handleSlowPathAcks handles the slow path (majority quorum).
@@ -517,9 +520,10 @@ func (c *Client) handleSlowPathAcks(leaderMsg interface{}, msgs []interface{}) {
 	}
 
 	c.delivered[seqNum] = struct{}{}
+	c.slowPaths++
 	c.mu.Unlock()
 	c.RegisterReply(c.val, seqNum)
-	c.Println("Slow Paths:", c.slowPaths)
+	c.Println("Fast/Slow Paths:", c.fastPaths, "/", c.slowPaths)
 }
 
 // handleWeakReply handles weak command reply from leader

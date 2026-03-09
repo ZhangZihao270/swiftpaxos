@@ -35,6 +35,7 @@ type Client struct {
 
 	lastCmdId CommandId
 
+	fastPaths   int
 	slowPaths   int
 	alreadySlow map[CommandId]struct{}
 
@@ -240,6 +241,7 @@ func (c *Client) handleSyncReply(rep *MSyncReply) {
 
 	c.val = state.Value(rep.Rep)
 	c.delivered[rep.CmdId.SeqNum] = struct{}{}
+	c.slowPaths++
 
 	// Update local cache from strong slow-path result
 	if key, hasKey := c.strongPendingKeys[rep.CmdId.SeqNum]; hasKey {
@@ -257,7 +259,7 @@ func (c *Client) handleSyncReply(rep *MSyncReply) {
 
 	c.mu.Unlock()
 	c.RegisterReply(c.val, rep.CmdId.SeqNum)
-	c.Println("Slow Paths:", c.slowPaths)
+	c.Println("Fast/Slow Paths:", c.fastPaths, "/", c.slowPaths)
 }
 
 func (c *Client) handleAcks(leaderMsg interface{}, msgs []interface{}) {
@@ -274,6 +276,7 @@ func (c *Client) handleAcks(leaderMsg interface{}, msgs []interface{}) {
 	}
 
 	c.delivered[seqNum] = struct{}{}
+	c.fastPaths++
 
 	// Update local cache from strong fast-path result
 	if key, hasKey := c.strongPendingKeys[seqNum]; hasKey {
@@ -291,7 +294,7 @@ func (c *Client) handleAcks(leaderMsg interface{}, msgs []interface{}) {
 
 	c.mu.Unlock()
 	c.RegisterReply(c.val, seqNum)
-	c.Println("Slow Paths:", c.slowPaths)
+	c.Println("Fast/Slow Paths:", c.fastPaths, "/", c.slowPaths)
 }
 
 // handleWeakReply handles weak write commit reply from leader (post-commit, includes Slot)

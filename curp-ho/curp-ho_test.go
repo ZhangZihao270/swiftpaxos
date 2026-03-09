@@ -5305,4 +5305,27 @@ func TestSendRequestStruct(t *testing.T) {
 	}
 }
 
+// TestClientFastSlowPathCounters tests that fast/slow path counters are properly initialized
+// and can be incremented independently.
+func TestClientFastSlowPathCounters(t *testing.T) {
+	c := &Client{}
+	if c.fastPaths != 0 {
+		t.Errorf("fastPaths should start at 0, got %d", c.fastPaths)
+	}
+	if c.slowPaths != 0 {
+		t.Errorf("slowPaths should start at 0, got %d", c.slowPaths)
+	}
+
+	c.fastPaths++
+	c.fastPaths++
+	c.slowPaths++
+
+	if c.fastPaths != 2 {
+		t.Errorf("fastPaths: got %d, want 2", c.fastPaths)
+	}
+	if c.slowPaths != 1 {
+		t.Errorf("slowPaths: got %d, want 1", c.slowPaths)
+	}
+}
+
 

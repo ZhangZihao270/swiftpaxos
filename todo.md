@@ -5127,10 +5127,11 @@ Key: ↑ = growing with load, ≈ = stable
 
 #### Phase 77.1: Instrument & Measure (Diagnosis)
 
-- [ ] 77.1a: Add fast-path success rate counter to CURP-HT and CURP-HO clients
-  - Count how many strong ops complete via fast path (acks) vs slow path (SyncReply/macks)
-  - Log at end of benchmark: "Fast path: X%, Slow path: Y%"
-  - This tells us whether Ok=FALSE is common at high load
+- [x] 77.1a: Add fast-path success rate counter to CURP-HT and CURP-HO clients
+  - Added `fastPaths int` field alongside existing `slowPaths int` in both Client structs
+  - CURP-HT: fastPaths++ in handleAcks, slowPaths++ in handleSyncReply
+  - CURP-HO: fastPaths++ in handleFastPathAcks success, slowPaths++ in handleSyncReply and handleSlowPathAcks
+  - Log line: "Fast/Slow Paths: X / Y" on every strong op completion
 
 - [ ] 77.1b: Add SyncReply timing in CURP-HT leader deliver()
   - Log timestamp delta from slot assignment to SyncReply sent
