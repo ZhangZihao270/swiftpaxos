@@ -5479,6 +5479,68 @@ Based on diagnosis, port optimizations one at a time to isolate impact:
 
 ---
 
+### Phase 81: Fair Read Path — All Reads Through Log + Replication
+
+**Motivation**: Current Raft-HT weak reads bypass the log entirely (local `stateMu.RLock()` read),
+while vanilla Raft sends ALL reads through log → broadcast → commit → execute. This makes the
+Raft vs Raft-HT comparison unfair: Raft-HT's 47.5% weak reads (95% R/W × 50% weak) have zero
+consensus overhead, artificially inflating its throughput advantage.
+
+Similarly, CURP-HO and CURP-HT weak reads may bypass consensus. All protocols should treat reads
+identically for a fair comparison: **every read goes through log replication**, regardless of
+strong/weak classification.
+
+**Scope**: Modify weak read path in Raft-HT, CURP-HT, and CURP-HO so that weak reads are
+appended to the log and replicated like any other operation. The only difference for weak ops
+remains the **client-perceived latency** (leader replies before commit for weak writes).
+
+#### Phase 81.1: Raft-HT — Route Weak Reads Through Log
+
+- [ ] 81.1a: Modify Raft-HT weak read path
+  - Current: `weakReadLoop` → `processWeakRead` → local `stateMu.RLock()` read → reply
+  - New: weak reads sent to leader → `handleWeakPropose` (or new handler) → append to log →
+    broadcastAppendEntries → reply immediately (before commit, like weak writes)
+  - On commit: executeCommands applies the read (GET op) and discards result
+  - Key: weak read still returns quickly (1 RTT to leader), but the read IS logged + replicated
+  - Remove `weakReadLoop` goroutine and `weakReadChan` if no longer needed
+
+- [ ] 81.1b: Verify Raft-HT tests pass
+  - `go test -v ./raft-ht/`
+  - Confirm weak reads still return correct values
+  - Confirm strong ops unaffected
+
+#### Phase 81.2: CURP-HT / CURP-HO — Audit Weak Read Path
+
+- [ ] 81.2a: Audit CURP-HT weak read path
+  - Check if weak reads bypass consensus (like Raft-HT) or already go through log
+  - If bypassing: modify to go through consensus (same pattern as 81.1a)
+
+- [ ] 81.2b: Audit CURP-HO weak read path
+  - Same audit as 81.2a for CURP-HO
+
+- [ ] 81.2c: Run CURP tests
+  - `go test -v ./curp-ht/ && go test -v ./curp-ho/`
+
+#### Phase 81.3: Re-run Exp 1.1 (Raft-HT vs Raft, 5 replicas)
+
+- [ ] 81.3a: Re-run Exp 1.1 with fair read path
+  - `bash scripts/eval-exp1.1-5r-dist.sh results/eval-5r-phase81`
+  - Same config: 95/5 R/W, 50% weak, Zipfian, 5 replicas, pendings=15
+  - Thread counts: 1, 2, 4, 8, 16, 32, 64, 96, 128
+  - Expected: Raft-HT peak throughput will decrease (weak reads now cost consensus)
+  - Raft unchanged (all reads already go through log)
+
+- [ ] 81.3b: Regenerate Exp 1.1 plots
+  - Update plot-exp1.1-5r.py data path to Phase 81 results
+  - Generate throughput-avg-latency + latency-breakdown figures
+
+- [ ] 81.3c: Analyze results and compare with Phase 78 Raft-HT data
+  - Key question: how much does Raft-HT throughput drop when weak reads go through log?
+  - If Raft-HT still significantly beats Raft → the advantage is real (from weak write path)
+  - If gap narrows substantially → original advantage was inflated by unfair read shortcut
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
