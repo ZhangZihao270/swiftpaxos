@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -5302,5 +5303,86 @@ func TestSendRequestStruct(t *testing.T) {
 	}
 	if req.msg == nil {
 		t.Error("msg should not be nil")
+	}
+}
+
+// ============================================================================
+// Phase 75.1: Instrumentation Tests
+// ============================================================================
+
+// TestInstrStatsAtomicIncrement tests that instrStats counters increment atomically.
+func TestInstrStatsAtomicIncrement(t *testing.T) {
+	var s instrStats
+
+	atomic.AddInt64(&s.proposeCount, 1)
+	atomic.AddInt64(&s.proposeCount, 1)
+	atomic.AddInt64(&s.causalProposeCount, 5)
+	atomic.AddInt64(&s.proposeTimeNs, 5000)
+	atomic.AddInt64(&s.causalProposeTimeNs, 8000)
+
+	if atomic.LoadInt64(&s.proposeCount) != 2 {
+		t.Errorf("proposeCount: got %d, want 2", s.proposeCount)
+	}
+	if atomic.LoadInt64(&s.causalProposeCount) != 5 {
+		t.Errorf("causalProposeCount: got %d, want 5", s.causalProposeCount)
+	}
+	if atomic.LoadInt64(&s.proposeTimeNs) != 5000 {
+		t.Errorf("proposeTimeNs: got %d, want 5000", s.proposeTimeNs)
+	}
+	if atomic.LoadInt64(&s.causalProposeTimeNs) != 8000 {
+		t.Errorf("causalProposeTimeNs: got %d, want 8000", s.causalProposeTimeNs)
+	}
+}
+
+// TestInstrStatsReset tests that reset() zeroes all counters.
+func TestInstrStatsReset(t *testing.T) {
+	var s instrStats
+
+	atomic.AddInt64(&s.proposeCount, 10)
+	atomic.AddInt64(&s.weakProposeCount, 20)
+	atomic.AddInt64(&s.causalProposeCount, 30)
+	atomic.AddInt64(&s.weakReadCount, 40)
+	atomic.AddInt64(&s.acceptCount, 50)
+	atomic.AddInt64(&s.commitCount, 60)
+	atomic.AddInt64(&s.syncCount, 70)
+	atomic.AddInt64(&s.deliverCount, 80)
+	atomic.AddInt64(&s.proposeTimeNs, 1000000)
+	atomic.AddInt64(&s.weakProposeTimeNs, 2000000)
+	atomic.AddInt64(&s.causalProposeTimeNs, 3000000)
+
+	s.reset()
+
+	if atomic.LoadInt64(&s.proposeCount) != 0 {
+		t.Errorf("proposeCount after reset: got %d, want 0", s.proposeCount)
+	}
+	if atomic.LoadInt64(&s.weakProposeCount) != 0 {
+		t.Errorf("weakProposeCount after reset: got %d, want 0", s.weakProposeCount)
+	}
+	if atomic.LoadInt64(&s.causalProposeCount) != 0 {
+		t.Errorf("causalProposeCount after reset: got %d, want 0", s.causalProposeCount)
+	}
+	if atomic.LoadInt64(&s.weakReadCount) != 0 {
+		t.Errorf("weakReadCount after reset: got %d, want 0", s.weakReadCount)
+	}
+	if atomic.LoadInt64(&s.acceptCount) != 0 {
+		t.Errorf("acceptCount after reset: got %d, want 0", s.acceptCount)
+	}
+	if atomic.LoadInt64(&s.commitCount) != 0 {
+		t.Errorf("commitCount after reset: got %d, want 0", s.commitCount)
+	}
+	if atomic.LoadInt64(&s.syncCount) != 0 {
+		t.Errorf("syncCount after reset: got %d, want 0", s.syncCount)
+	}
+	if atomic.LoadInt64(&s.deliverCount) != 0 {
+		t.Errorf("deliverCount after reset: got %d, want 0", s.deliverCount)
+	}
+	if atomic.LoadInt64(&s.proposeTimeNs) != 0 {
+		t.Errorf("proposeTimeNs after reset: got %d, want 0", s.proposeTimeNs)
+	}
+	if atomic.LoadInt64(&s.weakProposeTimeNs) != 0 {
+		t.Errorf("weakProposeTimeNs after reset: got %d, want 0", s.weakProposeTimeNs)
+	}
+	if atomic.LoadInt64(&s.causalProposeTimeNs) != 0 {
+		t.Errorf("causalProposeTimeNs after reset: got %d, want 0", s.causalProposeTimeNs)
 	}
 }

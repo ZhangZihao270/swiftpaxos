@@ -1,8 +1,11 @@
 package curpho
 
 import (
+	"log"
+	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/imdea-software/swiftpaxos/config"
@@ -13,6 +16,37 @@ import (
 	"github.com/imdea-software/swiftpaxos/state"
 	"github.com/orcaman/concurrent-map"
 )
+
+// instrStats tracks per-second instrumentation metrics for the leader's event loop.
+type instrStats struct {
+	proposeCount       int64 // strong propose count
+	weakProposeCount   int64 // weak propose count (leader weak writes)
+	causalProposeCount int64 // causal propose count (all replicas)
+	weakReadCount      int64 // weak read count
+	acceptCount        int64 // accept message count
+	commitCount        int64 // commit message count
+	syncCount          int64 // sync request count
+	deliverCount       int64 // deliver event count
+
+	// Cumulative processing time (nanoseconds)
+	proposeTimeNs       int64
+	weakProposeTimeNs   int64
+	causalProposeTimeNs int64
+}
+
+func (s *instrStats) reset() {
+	atomic.StoreInt64(&s.proposeCount, 0)
+	atomic.StoreInt64(&s.weakProposeCount, 0)
+	atomic.StoreInt64(&s.causalProposeCount, 0)
+	atomic.StoreInt64(&s.weakReadCount, 0)
+	atomic.StoreInt64(&s.acceptCount, 0)
+	atomic.StoreInt64(&s.commitCount, 0)
+	atomic.StoreInt64(&s.syncCount, 0)
+	atomic.StoreInt64(&s.deliverCount, 0)
+	atomic.StoreInt64(&s.proposeTimeNs, 0)
+	atomic.StoreInt64(&s.weakProposeTimeNs, 0)
+	atomic.StoreInt64(&s.causalProposeTimeNs, 0)
+}
 
 type Replica struct {
 	*replica.Replica
@@ -87,6 +121,9 @@ type Replica struct {
 
 	// Track per-key version (slot of last write) for weak read responses
 	keyVersions cmap.ConcurrentMap
+
+	// Instrumentation stats (Phase 75)
+	stats instrStats
 }
 
 // pendingWrite tracks an uncommitted write for speculative read computation
@@ -255,14 +292,56 @@ func (r *Replica) run() {
 
 	go r.WaitForClientConnections()
 
+	// Instrumentation: log per-second stats on leader
+	if r.isLeader {
+		go func() {
+			ticker := time.NewTicker(1 * time.Second)
+			defer ticker.Stop()
+			for range ticker.C {
+				if r.Shutdown {
+					return
+				}
+				pc := atomic.LoadInt64(&r.stats.proposeCount)
+				wpc := atomic.LoadInt64(&r.stats.weakProposeCount)
+				cpc := atomic.LoadInt64(&r.stats.causalProposeCount)
+				wrc := atomic.LoadInt64(&r.stats.weakReadCount)
+				ac := atomic.LoadInt64(&r.stats.acceptCount)
+				cc := atomic.LoadInt64(&r.stats.commitCount)
+				sc := atomic.LoadInt64(&r.stats.syncCount)
+				dc := atomic.LoadInt64(&r.stats.deliverCount)
+				ptNs := atomic.LoadInt64(&r.stats.proposeTimeNs)
+				wptNs := atomic.LoadInt64(&r.stats.weakProposeTimeNs)
+				cptNs := atomic.LoadInt64(&r.stats.causalProposeTimeNs)
+
+				var avgPropUs, avgWpropUs, avgCpropUs float64
+				if pc > 0 {
+					avgPropUs = float64(ptNs) / float64(pc) / 1000.0
+				}
+				if wpc > 0 {
+					avgWpropUs = float64(wptNs) / float64(wpc) / 1000.0
+				}
+				if cpc > 0 {
+					avgCpropUs = float64(cptNs) / float64(cpc) / 1000.0
+				}
+
+				goroutines := runtime.NumGoroutine()
+				log.Printf("[INSTR-HO] propose=%d(%.1fus) weakPropose=%d(%.1fus) causalPropose=%d(%.1fus) weakRead=%d accept=%d commit=%d sync=%d deliver=%d goroutines=%d routineCount=%d",
+					pc, avgPropUs, wpc, avgWpropUs, cpc, avgCpropUs, wrc, ac, cc, sc, dc, goroutines, r.routineCount)
+				r.stats.reset()
+			}
+		}()
+	}
+
 	var cmdId CommandId
 	for !r.Shutdown {
 		select {
 		case int := <-r.deliverChan:
+			atomic.AddInt64(&r.stats.deliverCount, 1)
 			r.getCmdDesc(int, "deliver", -1)
 
 		case propose := <-r.ProposeChan:
 			if r.isLeader {
+				t0 := time.Now()
 				proposeCmdId := CommandId{ClientId: propose.ClientId, SeqNum: propose.CommandId}
 				dep := r.leaderUnsyncStrong(propose.Command, r.lastCmdSlot, proposeCmdId)
 				desc := r.getCmdDescSeq(r.lastCmdSlot, propose, dep, true) // why Seq?
@@ -271,6 +350,8 @@ func (r *Replica) run() {
 						propose.ClientId, propose.CommandId)
 				}
 				r.lastCmdSlot++
+				atomic.AddInt64(&r.stats.proposeTimeNs, int64(time.Since(t0)))
+				atomic.AddInt64(&r.stats.proposeCount, 1)
 			} else {
 				cmdId.ClientId = propose.ClientId
 				cmdId.SeqNum = propose.CommandId
@@ -296,6 +377,7 @@ func (r *Replica) run() {
 			}
 
 		case m := <-r.cs.acceptChan:
+			atomic.AddInt64(&r.stats.acceptCount, 1)
 			acc := m.(*MAccept)
 			if r.values.Has(acc.CmdId.String()) {
 				continue
@@ -304,6 +386,7 @@ func (r *Replica) run() {
 			r.getCmdDesc(acc.CmdSlot, acc, -1)
 
 		case m := <-r.cs.acceptAckChan:
+			atomic.AddInt64(&r.stats.acceptCount, 1)
 			ack := m.(*MAcceptAck)
 			r.getCmdDesc(ack.CmdSlot, ack, -1)
 
@@ -323,10 +406,12 @@ func (r *Replica) run() {
 			}
 
 		case m := <-r.cs.commitChan:
+			atomic.AddInt64(&r.stats.commitCount, 1)
 			commit := m.(*MCommit)
 			r.getCmdDesc(commit.CmdSlot, commit, -1)
 
 		case m := <-r.cs.syncChan:
+			atomic.AddInt64(&r.stats.syncCount, 1)
 			sync := m.(*MSync)
 			val, exists := r.values.Get(sync.CmdId.String())
 			if exists {
@@ -393,17 +478,24 @@ func (r *Replica) run() {
 
 		case m := <-r.cs.weakProposeChan:
 			if r.isLeader {
+				t0 := time.Now()
 				weakPropose := m.(*MWeakPropose)
 				r.handleWeakPropose(weakPropose)
+				atomic.AddInt64(&r.stats.weakProposeTimeNs, int64(time.Since(t0)))
+				atomic.AddInt64(&r.stats.weakProposeCount, 1)
 			}
 			// Non-Leader ignores weak propose (should not receive it)
 
 		case m := <-r.cs.causalProposeChan:
+			t0 := time.Now()
 			causalPropose := m.(*MCausalPropose)
 			r.handleCausalPropose(causalPropose)
+			atomic.AddInt64(&r.stats.causalProposeTimeNs, int64(time.Since(t0)))
+			atomic.AddInt64(&r.stats.causalProposeCount, 1)
 			// ALL replicas handle causal proposes (witness pool + reply)
 
 		case m := <-r.cs.weakReadChan:
+			atomic.AddInt64(&r.stats.weakReadCount, 1)
 			weakRead := m.(*MWeakRead)
 			r.handleWeakRead(weakRead)
 		}

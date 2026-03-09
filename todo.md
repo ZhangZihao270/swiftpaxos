@@ -4894,6 +4894,94 @@ These are all constant-factor improvements. The 2x gap with CURP-HO is structura
 
 ---
 
+### Phase 75: Investigate CURP-HT Strong Latency Scaling vs CURP-HO
+
+**Problem**: In Exp 3.1 (5-replica, w=50), CURP-HT S-P50 grows unboundedly under load while CURP-HO S-P50 stays flat at 100ms. This is unexpected — both protocols share the same slow path (MSync), same batcher, same event loop structure, and CURP-HT's leader processes FEWER messages. Yet CURP-HT's leader queues more.
+
+| threads | CURP-HO S-P50 | CURP-HT S-P50 |
+|---------|--------------|--------------|
+| 8 | 51ms | 51ms |
+| 32 | 100ms | 96ms |
+| 64 | 100ms | **197ms** |
+| 96 | 100ms | **283ms** |
+| 128 | 100ms | **373ms** |
+
+**Key observations that rule out previous theories**:
+- "Bursty arrival" theory is wrong: CURP-HO weak reads are also local (<1ms at low load)
+- "Leader overload" theory is wrong: CURP-HT leader receives ~25K msg/s while CURP-HO leader receives ~91K msg/s
+- Batch replication: both use batcher.go with same design
+- T-property paradox: CURP-HO S-P50 is MORE stable under load than CURP-HT, despite CURP-HT being designed for T-property
+
+---
+
+#### Phase 75.1: Add Leader-Side Instrumentation
+
+- [x] **75.1a** In both `curp-ht/curp-ht.go` and `curp-ho/curp-ho.go`, add timing to `handlePropose`: [26:03:08, 16:00]
+  - Added `instrStats` struct with atomic counters for all event types
+  - 1-second ticker goroutine on leader logs: event counts, avg processing time (us), goroutine count
+  - Timing wraps leader propose and weak/causal propose handlers
+  - Log format: `[INSTR-HT]` / `[INSTR-HO]` for easy grep
+  - Tests: `TestInstrStatsAtomicIncrement`, `TestInstrStatsReset` in both packages
+
+- [ ] **75.1b** Add instrumentation to the slow path delivery:
+  - In both protocols, measure time from leader slot assignment to MSyncReply/ORDERED sent to client
+  - This shows how long the Accept→AcceptAck→Commit pipeline takes per command
+
+- [x] **75.1c** Log active goroutine count on leader — included in 75.1a ticker [26:03:08, 16:00]
+  - `runtime.NumGoroutine()` + `r.routineCount` logged every second
+
+---
+
+#### Phase 75.2: Add Client-Side Instrumentation
+
+- [ ] **75.2a** In both `curp-ht/client.go` and `curp-ho/client.go`, track strong op phase timing:
+  - Time from Propose sent → first RecordAck received (network RTT)
+  - Time from Propose sent → fast path success/failure detected
+  - Time from fast path failure → MSyncReply received (slow path wait)
+  - Count: how many strong ops succeed on fast path vs slow path
+
+- [ ] **75.2b** Log MSync retry count per strong op:
+  - How many MSync retries before delivery? (1 = no retry, 2+ = retries)
+  - If CURP-HT has more retries, that explains the latency growth
+
+---
+
+#### Phase 75.3: Run Instrumented Experiments
+
+- [ ] **75.3a** Build instrumented binary and deploy to .101/.103/.104
+- [ ] **75.3b** Run CURP-HT at t=8 (baseline, fast path works) and t=64 (high load, S-P50 diverges)
+- [ ] **75.3c** Run CURP-HO at t=8 and t=64 for comparison
+- [ ] **75.3d** Collect and compare instrumentation logs
+
+---
+
+#### Phase 75.4: Analyze Root Cause
+
+Compare CURP-HT vs CURP-HO at t=64 on these metrics:
+
+- [ ] **75.4a** Event loop queuing delay: Is the CURP-HT leader's event loop slower to process Propose messages?
+- [ ] **75.4b** Accept→Commit pipeline latency: Does CURP-HT's pipeline take longer per command?
+- [ ] **75.4c** Goroutine count: Does CURP-HT accumulate more goroutines, causing scheduling overhead?
+- [ ] **75.4d** Fast path success rate: Do both protocols fail fast path at similar rates? Or does CURP-HT fail more due to shared slot space with weak writes?
+- [ ] **75.4e** MSync retries: Does CURP-HT require more MSync retries per strong op?
+- [ ] **75.4f** Write up findings and determine if fix is possible
+
+---
+
+**Hypotheses to test (ranked by likelihood)**:
+
+1. **Shared slot space contention**: CURP-HT's `leaderUnsync` tracks both strong ops AND weak writes in the same unsynced map. Weak writes at the leader create conflicts that force more strong ops to slow path, or delay their ordering. CURP-HO uses a separate `leaderUnsyncCausal` for weak ops.
+
+2. **asyncReplicateWeak goroutine contention**: Each weak write spawns a goroutine that waits for commitNotify. At high load, hundreds of weak write goroutines waiting for commit compete with strong op goroutines for scheduling and channel notification.
+
+3. **MSync retry storm**: CURP-HT's MSync timer/retry mechanism might be less efficient, causing clients to retry more often, which adds load to the leader.
+
+4. **Event loop message priority**: CURP-HT's event loop handles both `proposeChan` and `weakProposeChan` via `select`. Under high load, Go's select is random — weak proposes can starve strong propose processing.
+
+5. **Descriptor cleanup / concurrent map contention**: CURP-HT's cmdDescs map has entries for both strong and weak ops. More entries → more lock contention in the concurrent map.
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
