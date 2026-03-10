@@ -56,11 +56,6 @@ type Client struct {
 	// Slot from last leader MReply (for strong fast-path cache update)
 	lastReplySlot int32
 
-	// MSync retry tracking: force-deliver after consecutive retries with no progress
-	lastPendingCount int
-	stalledRetries   int
-	forceDeliverSeen bool
-
 	// Per-replica writer mutexes for thread-safe SendMsg
 	// (needed because timer MSync and benchmark Send may race on the same writer)
 	writerMu []sync.Mutex
@@ -201,49 +196,8 @@ func (c *Client) handleStrongMsgs() {
 			n := c.N
 			c.mu.Unlock()
 
-			totalPending := len(syncSeqnums)
-			if totalPending > 0 && !c.forceDeliverSeen {
-				c.Println("MSync retry:", totalPending, "pending")
-			}
-
-			// Track stalled retries: if pending count hasn't decreased
-			// after multiple retries, the commands may be permanently stuck.
-			if totalPending > 0 && totalPending == c.lastPendingCount {
-				c.stalledRetries++
-			} else if !c.forceDeliverSeen {
-				c.stalledRetries = 0
-			}
-			c.lastPendingCount = totalPending
-
-			// Force-deliver stuck commands. First trigger: 5 stalled retries (10s).
-			// Once in degraded mode, force-deliver on every timer tick immediately.
-			shouldForce := c.forceDeliverSeen && totalPending > 0
-			if !shouldForce && c.stalledRetries >= 5 && totalPending > 0 {
-				shouldForce = true
-			}
-			if shouldForce {
-				if !c.forceDeliverSeen {
-					c.Println("Force-delivering", totalPending, "permanently stuck commands (entering degraded mode)")
-					c.t.Reset(100 * time.Millisecond)
-				}
-				c.forceDeliverSeen = true
-				c.mu.Lock()
-				for _, seqnum := range syncSeqnums {
-					if _, delivered := c.delivered[seqnum]; !delivered {
-						c.delivered[seqnum] = struct{}{}
-						delete(c.strongPendingKeys, seqnum)
-						delete(c.weakPending, seqnum)
-						delete(c.weakPendingKeys, seqnum)
-						delete(c.weakPendingValues, seqnum)
-					}
-				}
-				c.mu.Unlock()
-				for _, seqnum := range syncSeqnums {
-					c.RegisterReply(nil, seqnum)
-				}
-				c.stalledRetries = 0
-				c.lastPendingCount = 0
-				continue
+			if len(syncSeqnums) > 0 {
+				c.Println("MSync retry:", len(syncSeqnums), "pending")
 			}
 
 			// MSync for strong and weak write commands

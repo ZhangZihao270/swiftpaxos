@@ -1650,25 +1650,14 @@ func TestValuesSetAfterExecution(t *testing.T) {
 	}
 }
 
-// TestMSyncRetryFields verifies the MSync retry tracking fields
-// are initialized correctly and the force-delivery logic works.
-func TestMSyncRetryFields(t *testing.T) {
-	// Verify default values
+// TestMSyncRetryPendingCount verifies that the pending command counting
+// logic correctly tracks undelivered strong and weak write commands.
+func TestMSyncRetryPendingCount(t *testing.T) {
 	c := &Client{
 		delivered:         make(map[int32]struct{}),
 		strongPendingKeys: make(map[int32]int64),
 		weakPending:       make(map[int32]struct{}),
 		weakPendingValues: make(map[int32]state.Value),
-	}
-
-	if c.lastPendingCount != 0 {
-		t.Errorf("lastPendingCount should start at 0, got %d", c.lastPendingCount)
-	}
-	if c.stalledRetries != 0 {
-		t.Errorf("stalledRetries should start at 0, got %d", c.stalledRetries)
-	}
-	if c.forceDeliverSeen {
-		t.Error("forceDeliverSeen should start as false")
 	}
 
 	// Simulate pending commands

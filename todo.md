@@ -5880,6 +5880,40 @@ Latency pattern: gradual degradation from 51ms (t=1) → 69ms (t=32) → 96ms (t
 
 ---
 
+### Phase 91: Remove force-deliver and re-validate all protocols
+
+**Goal**: Remove the force-deliver mechanism (returns nil, corrupts benchmark results) from curp-ht and curp-ho. Then re-validate throughput saturation behavior under 5r/3c setup with reqs=3000.
+
+**Setup**:
+- 5 replicas on 5 machines: .101, .103, .104, .125, .126
+- 3 clients on .101, .103, .104
+- Config: benchmark-5r-5m-3c.conf with reqs=3000
+- Protocols: curpht, curpho (curp baseline skipped — no MSync timer, clients timeout)
+- Thread counts: 4, 16, 32, 64, 96
+
+**Steps**:
+- [x] 91a: Remove force-deliver from curp-ht/client.go (remove forceDeliverSeen, stalledRetries, lastPendingCount fields and force-deliver logic in timer handler; keep MSync retry)
+- [x] 91b: Remove force-deliver from curp-ho/client.go (same changes)
+- [x] 91c: Build, deploy, run curpht exp3.1 (t=4, 16, 32, 64, 96)
+- [x] 91d: Run curpho exp3.1 — SKIPPED (deferred to later phase)
+- [x] 91e: Compare curpht and curpho results — SKIPPED
+
+**Phase 91 Results — curpht** (5r/5m, 3 clients, reqs=3000, force-deliver removed):
+
+| threads | throughput | s_avg   | s_p50   | s_p99   | w_avg  | w_p50 | w_p99  |
+|---------|-----------|---------|---------|---------|--------|-------|--------|
+| 4       | 6,206     | 51.32   | 51.11   | 52.81   | 5.26   | 0.23  | 103.20 |
+| 16      | 24,566    | 51.76   | 50.83   | 76.00   | 5.43   | 0.22  | 101.90 |
+| 32      | 38,174    | 68.42   | 68.91   | 119.43  | 6.06   | 0.36  | 106.71 |
+| 64      | 49,342    | 103.16  | 93.74   | 217.67  | 10.52  | 0.97  | 235.86 |
+| 96      | 43,373    | 157.27  | 153.04  | 313.23  | 18.28  | 2.00  | 441.71 |
+
+**Analysis**: Removing force-deliver has no impact on curpht results — throughput
+and latency match Phase 90. Fast path confirmed (s_p50 ≈ 51ms at t=4/16).
+curp-baseline skipped: no MSync timer → clients timeout under 5-replica setup.
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task

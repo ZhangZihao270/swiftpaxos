@@ -63,7 +63,6 @@ type HybridClient interface {
 	SupportsWeak() bool
 
 	// MarkAllSent signals that all commands have been sent (drain mode).
-	// Used by protocols with MSync retry to force-deliver permanently stuck commands.
 	MarkAllSent()
 }
 
