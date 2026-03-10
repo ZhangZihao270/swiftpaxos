@@ -6085,8 +6085,14 @@ case slot := <-r.deliverChan:
 - Timeout count
 
 **Tasks**:
-- [ ] 93a: Create config files for each protocol (reuse/adapt existing `/tmp/benchmark-*-3k.conf`)
-- [ ] 93b: Create eval script (`/tmp/eval-phase93.sh`) — loop 3 protocols × 9 thread counts via `run-multi-client.sh`
+- [x] 93a: Config files verified — existing `/tmp/benchmark-{curp,curpht,curpho}-3k.conf` have correct settings [26:03:10]
+  - All 3 configs: 5 replicas, 3 clients, reqs=3000, networkDelay=25, commandSize=100
+  - curp-baseline: weakRatio=0, writes=5
+  - curpht/curpho: weakRatio=50, writes=5, weakWrites=5
+- [x] 93b: Created `scripts/eval-phase93.sh` — loops 3 protocols × 9 thread counts [26:03:10]
+  - Uses per-protocol temp configs (avoids shared config corruption)
+  - Supports resume (skips existing results), protocol filter, configurable retries
+  - Thread counts: 1, 2, 4, 8, 16, 32, 64, 96, 128
 - [ ] 93c: Run all 27 benchmarks, collect results
 - [ ] 93d: Produce comparison table and analysis in todo.md
 
