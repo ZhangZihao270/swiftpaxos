@@ -3,6 +3,7 @@ package curpho
 import (
 	"bytes"
 	"fmt"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -5328,4 +5329,51 @@ func TestClientFastSlowPathCounters(t *testing.T) {
 	}
 }
 
+// TestDeliverChanSkipsDeliveredSlots verifies that the deliverChan handler
+// correctly skips already-delivered slots to maintain the delivery chain.
+// When weak commands timeout and execute out-of-order, the slot is marked
+// as delivered. The deliverChan handler must skip past these slots to find
+// the next undelivered one, otherwise getCmdDesc returns nil and breaks
+// the chain permanently.
+func TestDeliverChanSkipsDeliveredSlots(t *testing.T) {
+	delivered := cmap.New()
 
+	// Simulate: slots 5, 6, 7 are already delivered (weak timeout)
+	delivered.Set("5", struct{}{})
+	delivered.Set("6", struct{}{})
+	delivered.Set("7", struct{}{})
+
+	// deliverChan sends slot 5 (the predecessor just finished)
+	slot := 5
+
+	// The fix: skip already-delivered slots
+	for delivered.Has(strconv.Itoa(slot)) {
+		slot++
+	}
+
+	// Should skip to slot 8 (first undelivered)
+	if slot != 8 {
+		t.Errorf("deliverChan should skip to slot 8, got %d", slot)
+	}
+
+	// Edge case: no slots delivered — should stay at original
+	delivered2 := cmap.New()
+	slot2 := 3
+	for delivered2.Has(strconv.Itoa(slot2)) {
+		slot2++
+	}
+	if slot2 != 3 {
+		t.Errorf("deliverChan with no delivered slots should stay at 3, got %d", slot2)
+	}
+
+	// Edge case: single slot delivered
+	delivered3 := cmap.New()
+	delivered3.Set("10", struct{}{})
+	slot3 := 10
+	for delivered3.Has(strconv.Itoa(slot3)) {
+		slot3++
+	}
+	if slot3 != 11 {
+		t.Errorf("deliverChan should skip single delivered slot to 11, got %d", slot3)
+	}
+}

@@ -258,8 +258,18 @@ func (r *Replica) run() {
 	var cmdId CommandId
 	for !r.Shutdown {
 		select {
-		case int := <-r.deliverChan:
-			r.getCmdDesc(int, "deliver", -1)
+		case slot := <-r.deliverChan:
+			// Skip already-delivered slots to maintain the delivery chain.
+			// When weak commands timeout waiting for slot ordering (1s timeout
+			// in asyncReplicateWeak), they execute out-of-order and mark the
+			// slot as delivered. When the preceding slot finishes and sends
+			// deliverChan <- nextSlot, we must skip past delivered slots to
+			// find the next undelivered one, otherwise getCmdDesc returns nil
+			// and the chain breaks permanently.
+			for r.delivered.Has(strconv.Itoa(slot)) {
+				slot++
+			}
+			r.getCmdDesc(slot, "deliver", -1)
 
 		case propose := <-r.ProposeChan:
 			if r.isLeader {
