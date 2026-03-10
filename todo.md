@@ -5841,12 +5841,13 @@ fast path behavior since all machines are homogeneous (64-core).
 - 3 clients on .101, .103, .104
 - Config: benchmark-5r-5m-3c.conf with reqs=3000
 - curpht only, weakRatio=50, writes=5, weakWrites=5
-- Thread counts: 1, 4, 16, 32, 64
+- Thread counts: 1, 4, 16, 32, 64, 128
 
 **Steps**:
 - [x] 90a: Create config (or modify Phase 89 config) with reqs=3000
 - [x] 90b: Create eval script scripts/eval-phase90.sh
 - [x] 90c: Run curpht exp3.1 (t=1, 4, 16, 32, 64)
+- [x] 90e: Run curpht exp3.1 (t=128)
 - [x] 90d: Compare with Phase 89 results
 
 **Phase 90 Results** (5 replicas/5 machines, 3 clients, reqs=3000):
@@ -5858,6 +5859,7 @@ fast path behavior since all machines are homogeneous (64-core).
 | 16      | 24,737    | 51.81   | 50.83  | 76.02   | 5.37   | 0.23  | 101.78 |
 | 32      | 37,938    | 68.38   | 68.95  | 111.34  | 6.16   | 0.35  | 108.12 |
 | 64      | 49,020    | 104.36  | 95.51  | 227.18  | 11.73  | 1.51  | 205.22 |
+| 128     | 43,894    | 172.37  | 155.14 | 1288.97 | 28.95  | 14.97 | 371.16 |
 
 **Comparison: Phase 90 (reqs=3000) vs Phase 89 (reqs=10000)**:
 
@@ -5867,11 +5869,14 @@ fast path behavior since all machines are homogeneous (64-core).
 | 16      | 24,737   | —        | 50.83      | —          |
 | 32      | 37,938   | 35,457   | 68.95      | 72.34      |
 | 64      | 49,020   | 38,894   | 95.51      | 92.97      |
+| 128     | 43,894   | 52,969   | 155.14     | 99.78      |
 
-**Analysis**: Fast path confirmed at t=1–16 (s_p50 ≈ 51ms). Throughput at t=64 is
-49K vs Phase 89's 38.9K — shorter runs (reqs=3000) avoid sustained saturation,
-giving higher apparent throughput. Latency pattern matches: gradual degradation
-from 51ms (t=1) → 69ms (t=32) → 96ms (t=64). Results consistent with Phase 87/89.
+**Analysis**: Fast path confirmed at t=1–16 (s_p50 ≈ 51ms). Throughput peaks at
+49K (t=64) then drops to 43.9K at t=128 — throughput regression under extreme
+concurrency with short runs (reqs=3000). With reqs=10000 (Phase 89), t=128 reached
+53K. The short run doesn't allow enough time for the pipeline to warm up at t=128.
+Latency pattern: gradual degradation from 51ms (t=1) → 69ms (t=32) → 96ms (t=64)
+→ 155ms (t=128). Results consistent with Phase 87/89.
 
 ---
 
