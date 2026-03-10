@@ -748,6 +748,7 @@ func (r *Replica) newDesc() *commandDesc {
 	desc.successor = -1
 	desc.successorL = sync.Mutex{}
 	desc.accepted = false
+	desc.applied = false
 
 	desc.afterPayload = desc.afterPayload.ReinitCondF(func() bool {
 		// For weak commands on non-leaders, desc.cmd is set from the Accept message

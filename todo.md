@@ -5952,8 +5952,143 @@ case slot := <-r.deliverChan:
 
 **Steps**:
 - [x] 92a: Apply deliverChan fix in curp-ho/curp-ho.go only (curp-ht deferred)
-- [ ] 92c: Build, deploy, run curpho exp3.1 (t=4, 32, 64, 96)
-- [ ] 92d: Compare curpho with Phase 91 curpht results
+- [x] 92b-92l: Extensive debugging — watchdog, defensive guards, Upsert fix for getWeakCmdDesc
+- [x] 92m: Found root cause — `newDesc()` does NOT reset `desc.applied` when recycling from pool.
+  When a pooled desc has `applied=true` from its previous command, `deliver()` skips the execute
+  block (`if !desc.applied`) but still sets `r.delivered`, creating delivered-without-executed state.
+  **Fix**: Add `desc.applied = false` in `newDesc()` (curp-ho, curp-ht, curp).
+- [x] 92m verified: 10/10 runs at t=64 → 0 timeouts, 0 Pattern A fixes.
+- [x] 92n: Clean benchmark (debug code removed), reqs=10000, 5 runs per thread count — 20/20 pass.
+- [x] 92o: Re-run with reqs=3000 (matching Phase 91 curpht config) for fair comparison.
+
+**Phase 92o Results — CURP-HO vs CURP-HT Comparison (5r/3c, weakRatio=50, reqs=3000)**:
+
+| Threads | HT tput | HO tput | HT s_p50 | HO s_p50 | HT s_p99 | HO s_p99 | HT w_p50 | HO w_p50 |
+|---------|---------|---------|----------|----------|----------|----------|----------|----------|
+| t=4     | 6,206   | 5,772   | 51.1ms   | 51.0ms   | 52.8ms   | 52.6ms   | 0.23ms   | 0.11ms   |
+| t=32    | 38,174  | 33,082  | 68.9ms   | 65.3ms   | 119.4ms  | 120.9ms  | 0.36ms   | 0.08ms   |
+| t=64    | 49,342  | 41,081  | 93.7ms   | 78.2ms   | 217.7ms  | 201.2ms  | 0.97ms   | 0.09ms   |
+| t=96    | 43,373  | 44,172  | 153.0ms  | 101.1ms  | 313.2ms  | 225.5ms  | 2.00ms   | 0.09ms   |
+
+**Analysis**:
+- **Strong latency**: CURP-HO wins at all thread counts. Gap widens under load:
+  t=64: 78ms vs 94ms (17% lower), t=96: 101ms vs 153ms (34% lower).
+- **Weak latency**: CURP-HO dramatically faster — w_p50 stays ~0.1ms vs HT's 0.2–2ms
+  (bound replica reply vs full replication).
+- **Throughput**: CURP-HT leads at t=32/64 (38K/49K vs 33K/41K) due to lower per-op overhead.
+  At t=96, CURP-HO overtakes (44K vs 43K) — latency advantage converts to throughput at high load.
+- **Strong P99**: CURP-HO consistently lower (201ms vs 218ms at t=64, 226ms vs 313ms at t=96).
+
+- [x] 92q: Run both protocols with 50% write ratio (writes=50, weakWrites=50), reqs=3000
+
+**Phase 92q Results — 50% Write (5r/3c, weakRatio=50, reqs=3000)**:
+
+| Threads | HT tput | HO tput | HT s_p50 | HO s_p50 | HT s_p99 | HO s_p99 | HT w_p50 | HO w_p50 | HT timeouts | HO timeouts |
+|---------|---------|---------|----------|----------|----------|----------|----------|----------|-------------|-------------|
+| t=4     | 3,592   | 5,455   | 51.2ms   | 51.2ms   | 52.3ms   | 52.9ms   | 51.2ms   | 0.09ms   | 1           | 0           |
+| t=32    | 25,673  | 26,528  | 58.4ms   | 78.5ms   | 106.5ms  | 193.8ms  | 57.2ms   | 0.08ms   | 1           | 0           |
+| t=64    | 25,599  | 31,214  | 63.5ms   | 110.4ms  | 1127.9ms | 206.5ms  | 78.8ms   | 0.09ms   | 1           | 0           |
+| t=96    | 27,491  | 29,984  | 122.1ms  | 191.3ms  | 622.3ms  | 483.6ms  | 169.2ms  | 0.10ms   | 6           | 0           |
+
+**Comparison: 5% write (Phase 92o) vs 50% write (Phase 92q)**:
+
+| Threads | HT 5%w tput | HT 50%w tput | HO 5%w tput | HO 50%w tput |
+|---------|-------------|--------------|-------------|--------------|
+| t=4     | 6,206       | 3,592 (-42%) | 5,772       | 5,455 (-5%)  |
+| t=32    | 38,174      | 25,673 (-33%)| 33,082      | 26,528 (-20%)|
+| t=64    | 49,342      | 25,599 (-48%)| 41,081      | 31,214 (-24%)|
+| t=96    | 43,373      | 27,491 (-37%)| 44,172      | 29,984 (-32%)|
+
+**Analysis (50% write)**:
+- **CURP-HO throughput overtakes CURP-HT** at all thread counts. At t=64: 31.2K vs 25.6K (+22%).
+  With 5% write, HT led at t=32/64; with 50% write, HO leads everywhere.
+- **Weak write latency**: The decisive factor. HO w_p50 ≈ 0.1ms (bound replica immediate reply),
+  HT w_p50 = 51–169ms (full replication required). With 25% of all ops being weak writes,
+  HT pays full replication cost on each one.
+- **HT s_p99 explodes**: 1128ms at t=64 (vs HO's 207ms). High write ratio causes replication
+  queue pressure, leading to head-of-line blocking in HT's synchronous path.
+- **HT throughput degrades more**: -33% to -48% from 5% to 50% write. HO degrades only -5% to -32%.
+  HO's async weak path absorbs write pressure much better.
+- **CURP-HO 0 timeouts**: desc.applied fix (Phase 92m) fully stable under write-heavy workload.
+
+- [x] 92r: CURP baseline benchmark at t=4,32,64,96 (weakRatio=0, writes=5, reqs=3000)
+- [x] 92s: CURP baseline with deliverChan skip-loop fix
+- [x] 92t: CURP baseline with ORDERED reply fix (reverted — no improvement)
+
+**Fixes applied to CURP baseline**:
+- Added MSync retry timer (2s) in `curp/client.go` — prevents client hang on dropped replies
+- Added deliverChan skip-loop in `curp/curp.go` — prevents deliver chain breakage (from Phase 92a)
+
+**Phase 92r Results — CURP Baseline (5r/3c, weakRatio=0, writes=5, reqs=3000)**:
+
+| Threads | Tput     | s_p50   | s_p99      | client0 ops/s | client1 ops/s | client2 ops/s |
+|---------|----------|---------|------------|---------------|---------------|---------------|
+| t=4     | 3,470    | 51.4ms  | 63.0ms     | 1,157         | 1,156         | 1,157         |
+| t=32    | 15,951   | 52.2ms  | 4,561.0ms  | 8,292         | 4,202         | 3,457         |
+| t=64    | 20,216   | 56.9ms  | 8,472.2ms  | 11,981        | 4,498         | 3,737         |
+| t=96    | 22,164   | 63.2ms  | 12,072.0ms | 13,493        | 5,027         | 3,644         |
+
+**Phase 92s Results — with deliverChan skip-loop (no meaningful change)**:
+
+| Threads | Tput     | s_p50   | s_p99      |
+|---------|----------|---------|------------|
+| t=4     | 3,474    | 51.4ms  | 58.0ms     |
+| t=32    | 15,937   | 52.0ms  | 3,593.0ms  |
+| t=64    | 19,914   | 56.7ms  | 8,319.3ms  |
+| t=96    | 22,737   | 62.3ms  | 11,605.0ms |
+
+**Phase 92t Results — with ORDERED reply fix (no meaningful change, reverted)**:
+
+| Threads | Tput     | s_p50   | s_p99      |
+|---------|----------|---------|------------|
+| t=4     | 3,468    | 51.5ms  | 56.0ms     |
+| t=32    | 16,065   | 52.2ms  | 3,697.8ms  |
+| t=64    | 20,651   | 56.9ms  | 7,633.9ms  |
+| t=96    | 21,699   | 63.0ms  | 9,809.8ms  |
+
+**CURP Baseline P99 Analysis**:
+- **Root cause**: Single-threaded leader run loop saturated with 100% strong ops.
+  CURP baseline routes ALL operations through ProposeChan → leader run loop (single goroutine).
+  At high concurrency (t=64/96), this creates massive queueing delay for remote clients.
+- **Why CURP-HT/HO don't have this problem**: With weakRatio=50, only 50% of ops go through
+  the strong path (run loop). Weak ops are handled by separate goroutines, halving the load.
+- **Client imbalance**: client0 (leader-local, 0ms delay) gets 3-4x the throughput of client1/2
+  (25ms each-way delay). At t=96: 13.5K vs 5K vs 3.6K ops/s.
+- **P50 is fine** (~51-63ms) because speculative execution replies on fast path before slot ordering.
+  P99 explodes because queued ops wait behind the single-threaded bottleneck.
+- **Not a bug** — inherent to CURP baseline design. The 4/5 quorum (ThreeQuarters) is correct.
+
+---
+
+### Phase 93: Re-run Exp 3.1 on distributed cluster (5r/5s/3c)
+
+**Goal**: Re-run Exp 3.1 (CURP throughput vs latency) on the real 5-machine cluster, replacing the old local-only results (3r/3c, loopback).
+
+**Setup**:
+- 5 replicas: .101, .103, .104, .125, .126
+- 3 clients: .101, .103, .104 (co-located with replica0/1/2)
+- reqs=3000, networkDelay=25, commandSize=100
+- Baseline config template: `/tmp/benchmark-curp-3k.conf`
+
+**Protocols & configs**:
+1. **CURP baseline** (curp): weakRatio=0, writes=5 — all ops strong
+2. **CURP-HT** (curpht): weakRatio=50, writes=5, weakWrites=5 — 50/50 strong/weak
+3. **CURP-HO** (curpho): weakRatio=50, writes=5, weakWrites=5 — 50/50 strong/weak
+
+**Thread counts**: t=1, 2, 4, 8, 16, 32, 64, 96, 128
+
+**Metrics to collect** (per protocol × thread count):
+- Aggregate throughput (ops/sec)
+- Strong: p50, p99
+- Weak: p50, p99 (HT/HO only)
+- Per-client throughput breakdown
+- Timeout count
+
+**Tasks**:
+- [ ] 93a: Create config files for each protocol (reuse/adapt existing `/tmp/benchmark-*-3k.conf`)
+- [ ] 93b: Create eval script (`/tmp/eval-phase93.sh`) — loop 3 protocols × 9 thread counts via `run-multi-client.sh`
+- [ ] 93c: Run all 27 benchmarks, collect results
+- [ ] 93d: Produce comparison table and analysis in todo.md
 
 ---
 

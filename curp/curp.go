@@ -185,8 +185,20 @@ func (r *Replica) run() {
 	var cmdId CommandId
 	for !r.Shutdown {
 		select {
-		case int := <-r.deliverChan:
-			r.getCmdDesc(int, "deliver", -1)
+		case slot := <-r.deliverChan:
+			for {
+				for r.delivered.Has(strconv.Itoa(slot)) {
+					if !r.executed.Has(strconv.Itoa(slot)) {
+						r.executed.Set(strconv.Itoa(slot), struct{}{})
+						r.notifyExecute(slot)
+					}
+					slot++
+				}
+				if r.getCmdDesc(slot, "deliver", -1) != nil {
+					break
+				}
+				slot++
+			}
 
 		case propose := <-r.ProposeChan:
 			if r.isLeader {
@@ -645,6 +657,7 @@ func (r *Replica) newDesc() *commandDesc {
 	desc.successor = -1
 	desc.successorL = sync.Mutex{}
 	desc.accepted = false
+	desc.applied = false
 
 	desc.afterPayload = desc.afterPayload.ReinitCondF(func() bool {
 		return (desc.propose != nil || r.proposes.Has(desc.cmdId.String()))

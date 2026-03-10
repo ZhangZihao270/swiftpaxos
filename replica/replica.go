@@ -478,7 +478,9 @@ func (r *Replica) waitForPeerConnections(done chan bool) {
 		r.Fatal(r.PeerAddrList[r.Id], err)
 	}
 	r.Listener = l
-	for i := r.Id + 1; i < int32(r.N); i++ {
+	expected := int32(r.N) - r.Id - 1
+	var connected int32
+	for connected < expected {
 		conn, err := r.Listener.Accept()
 		if err != nil {
 			r.Println("Accept error:", err)
@@ -486,9 +488,21 @@ func (r *Replica) waitForPeerConnections(done chan bool) {
 		}
 		if _, err := io.ReadFull(conn, bs); err != nil {
 			r.Println("Connection establish error:", err)
+			conn.Close()
 			continue
 		}
 		id := int32(binary.LittleEndian.Uint32(bs))
+		if id < 0 || id >= int32(r.N) || id == r.Id {
+			r.Printf("IN Rejecting invalid peer id %d", id)
+			conn.Close()
+			continue
+		}
+		if r.Peers[id] != nil {
+			r.Printf("IN Duplicate connection from %d, replacing", id)
+			r.Peers[id].Close()
+		} else {
+			connected++
+		}
 		r.Peers[id] = conn
 		r.PeerReaders[id] = bufio.NewReader(conn)
 		r.PeerWriters[id] = bufio.NewWriter(conn)

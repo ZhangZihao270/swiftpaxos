@@ -2,6 +2,7 @@ package curp
 
 import (
 	"sync"
+	"time"
 
 	"github.com/imdea-software/swiftpaxos/client"
 	"github.com/imdea-software/swiftpaxos/replica"
@@ -31,6 +32,10 @@ type Client struct {
 
 	slowPaths   int
 	alreadySlow map[CommandId]struct{}
+
+	mu       sync.Mutex
+	writerMu []sync.Mutex
+	pending  map[int32]struct{} // seqnums of pending (undelivered) commands
 }
 
 var (
@@ -65,6 +70,9 @@ func NewClient(b *client.BufferClient, repNum, reqNum, pclients int) *Client {
 
 		slowPaths:   0,
 		alreadySlow: make(map[CommandId]struct{}),
+
+		writerMu: make([]sync.Mutex, repNum),
+		pending:  make(map[int32]struct{}),
 	}
 
 	c.lastCmdId = CommandId{
@@ -87,6 +95,10 @@ func NewClient(b *client.BufferClient, repNum, reqNum, pclients int) *Client {
 	}
 
 	go c.handleMsgs()
+
+	// Start MSync retry timer: periodically retransmit MSync for pending
+	// commands whose replies may have been dropped by SendClientMsgFast.
+	c.t.Start(2 * time.Second)
 
 	return c
 }
@@ -125,9 +137,32 @@ func (c *Client) handleMsgs() {
 			c.handleSyncReply(rep)
 
 		case <-c.t.c:
-			// Timer-triggered sync intentionally disabled (see CURP paper §4.2).
-			// The slow path via SyncReply handles retransmission.
-			break
+			// Retry pending commands whose replies may have been dropped
+			// by the non-blocking SendClientMsgFast.
+			c.mu.Lock()
+			var syncSeqnums []int32
+			for seqnum := range c.pending {
+				if _, delivered := c.delivered[seqnum]; !delivered {
+					syncSeqnums = append(syncSeqnums, seqnum)
+				}
+			}
+			clientId := c.ClientId
+			n := c.N
+			c.mu.Unlock()
+
+			if len(syncSeqnums) > 0 {
+				c.Println("MSync retry:", len(syncSeqnums), "pending")
+			}
+			for _, seqnum := range syncSeqnums {
+				sync := &MSync{
+					CmdId: CommandId{ClientId: clientId, SeqNum: seqnum},
+				}
+				for r := int32(0); r < int32(n); r++ {
+					c.writerMu[r].Lock()
+					c.SendMsg(r, c.cs.syncRPC, sync)
+					c.writerMu[r].Unlock()
+				}
+			}
 		}
 	}
 }
@@ -190,6 +225,9 @@ func (c *Client) handleSyncReply(rep *MSyncReply) {
 
 	c.val = state.Value(rep.Rep)
 	c.delivered[rep.CmdId.SeqNum] = struct{}{}
+	c.mu.Lock()
+	delete(c.pending, rep.CmdId.SeqNum)
+	c.mu.Unlock()
 	c.RegisterReply(c.val, rep.CmdId.SeqNum)
 	c.Println("Slow Paths:", c.slowPaths)
 }
@@ -199,12 +237,16 @@ func (c *Client) handleAcks(leaderMsg interface{}, msgs []interface{}) {
 		return
 	}
 
-	if _, exists := c.delivered[leaderMsg.(*MRecordAck).CmdId.SeqNum]; exists {
+	seqNum := leaderMsg.(*MRecordAck).CmdId.SeqNum
+	if _, exists := c.delivered[seqNum]; exists {
 		return
 	}
 
-	c.delivered[leaderMsg.(*MRecordAck).CmdId.SeqNum] = struct{}{}
-	c.RegisterReply(c.val, leaderMsg.(*MRecordAck).CmdId.SeqNum)
+	c.delivered[seqNum] = struct{}{}
+	c.mu.Lock()
+	delete(c.pending, seqNum)
+	c.mu.Unlock()
+	c.RegisterReply(c.val, seqNum)
 	c.Println("Slow Paths:", c.slowPaths)
 }
 
@@ -212,11 +254,23 @@ func (c *Client) handleAcks(leaderMsg interface{}, msgs []interface{}) {
 // CURP only supports strong consistency, so weak methods are stubs.
 
 func (c *Client) SendStrongWrite(key int64, value []byte) int32 {
-	return c.SendWrite(key, value)
+	c.writerMu[c.LeaderId].Lock()
+	seqnum := c.SendWrite(key, value)
+	c.writerMu[c.LeaderId].Unlock()
+	c.mu.Lock()
+	c.pending[seqnum] = struct{}{}
+	c.mu.Unlock()
+	return seqnum
 }
 
 func (c *Client) SendStrongRead(key int64) int32 {
-	return c.SendRead(key)
+	c.writerMu[c.LeaderId].Lock()
+	seqnum := c.SendRead(key)
+	c.writerMu[c.LeaderId].Unlock()
+	c.mu.Lock()
+	c.pending[seqnum] = struct{}{}
+	c.mu.Unlock()
+	return seqnum
 }
 
 func (c *Client) SendWeakWrite(key int64, value []byte) int32 {

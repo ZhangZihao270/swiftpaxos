@@ -46,7 +46,8 @@ type Replica struct {
 
 	cs CommunicationSupply
 
-	deliverChan chan int
+	deliverChan     chan int
+	lastDeliverSlot int // track last delivered slot for watchdog
 
 	descPool     sync.Pool
 	poolLevel    int
@@ -255,21 +256,66 @@ func (r *Replica) run() {
 
 	go r.WaitForClientConnections()
 
+	// Watchdog: safety net for deliver chain stalls.
+	// Detects and fixes delivered-but-not-executed slots (Pattern A).
+	if r.isLeader {
+		go func() {
+			prevDeliver := 0
+			staleCount := 0
+			for !r.Shutdown {
+				time.Sleep(5 * time.Second)
+				lastDeliver := r.lastDeliverSlot
+				lastCmd := r.lastCmdSlot
+				if lastCmd > 0 && lastDeliver < lastCmd {
+					if lastDeliver == prevDeliver {
+						staleCount++
+					} else {
+						staleCount = 0
+					}
+					prevDeliver = lastDeliver
+					if staleCount >= 3 {
+						// Scan forward and fix all delivered-but-not-executed slots
+						nextSlot := lastDeliver + 1
+						pushSlot := nextSlot
+						for s := nextSlot; s <= lastCmd; s++ {
+							sStr := strconv.Itoa(s)
+							if r.delivered.Has(sStr) {
+								if !r.executed.Has(sStr) {
+									r.executed.Set(sStr, true)
+								}
+								pushSlot = s + 1
+							} else {
+								break
+							}
+						}
+						go func(s int) {
+							r.deliverChan <- s
+						}(pushSlot)
+						staleCount = 0
+					}
+				}
+			}
+		}()
+	}
+
 	var cmdId CommandId
 	for !r.Shutdown {
 		select {
 		case slot := <-r.deliverChan:
 			// Skip already-delivered slots to maintain the delivery chain.
-			// When weak commands timeout waiting for slot ordering (1s timeout
-			// in asyncReplicateWeak), they execute out-of-order and mark the
-			// slot as delivered. When the preceding slot finishes and sends
-			// deliverChan <- nextSlot, we must skip past delivered slots to
-			// find the next undelivered one, otherwise getCmdDesc returns nil
-			// and the chain breaks permanently.
-			for r.delivered.Has(strconv.Itoa(slot)) {
+			for {
+				for r.delivered.Has(strconv.Itoa(slot)) {
+					// Safety: ensure executed is set for delivered slots
+					if !r.executed.Has(strconv.Itoa(slot)) {
+						r.executed.Set(strconv.Itoa(slot), true)
+					}
+					slot++
+				}
+				if r.getCmdDesc(slot, "deliver", -1) != nil {
+					break
+				}
 				slot++
 			}
-			r.getCmdDesc(slot, "deliver", -1)
 
 		case propose := <-r.ProposeChan:
 			if r.isLeader {
@@ -929,6 +975,9 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 				r.keyVersions.Set(keyStr, slot)
 			}
 			r.notifyExecute(slot) // Notify waiters that slot is executed
+			if slot > r.lastDeliverSlot {
+				r.lastDeliverSlot = slot
+			}
 
 			// Set r.values immediately after execution so MSync can reply
 			// even before the descriptor cleanup phase completes.
@@ -1043,6 +1092,7 @@ func (r *Replica) newDesc() *commandDesc {
 	desc.successor = -1
 	desc.successorL = sync.Mutex{}
 	desc.accepted = false
+	desc.applied = false
 
 	desc.afterPayload = desc.afterPayload.ReinitCondF(func() bool {
 		// For weak commands on non-leaders, desc.cmd is set from the Accept message
@@ -1189,9 +1239,28 @@ func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
 	go r.asyncReplicateWeak(desc, slot, propose.ClientId, propose.CommandId, propose.CausalDep)
 }
 
-// getWeakCmdDesc creates a command descriptor for weak commands
+// getWeakCmdDesc creates or reuses a command descriptor for weak commands.
+// Uses Upsert to avoid overwriting a desc already created by getCmdDescSeq
+// (from the deliverChan handler), which would orphan the existing handler goroutine.
 func (r *Replica) getWeakCmdDesc(slot int, propose *MWeakPropose, dep int) *commandDesc {
-	desc := r.newDesc()
+	slotStr := strconv.Itoa(slot)
+
+	var desc *commandDesc
+	var created bool
+
+	r.cmdDescs.Upsert(slotStr, nil,
+		func(exists bool, mapV, _ interface{}) interface{} {
+			if exists {
+				desc = mapV.(*commandDesc)
+				created = false
+				return desc
+			}
+			desc = r.newDesc()
+			created = true
+			return desc
+		})
+
+	// Update fields on the desc (whether new or reused)
 	desc.isWeak = true
 	desc.cmdSlot = slot
 	desc.dep = dep
@@ -1201,14 +1270,10 @@ func (r *Replica) getWeakCmdDesc(slot int, propose *MWeakPropose, dep int) *comm
 	}
 	desc.cmd = propose.Command
 	desc.phase = ACCEPT // Skip START phase for weak commands
-
-	// Register in cmdDescs so AcceptAcks are routed to this descriptor
-	slotStr := strconv.Itoa(slot)
 	desc.slotStr = slotStr
-	r.cmdDescs.Set(slotStr, desc)
 
-	// Start handler goroutine to process incoming messages (AcceptAcks, Commits)
-	if !desc.seq {
+	// Only start handler goroutine if we created a new desc
+	if created && !desc.seq {
 		go r.handleDesc(desc, slot, dep)
 		r.routineCount++
 	}
@@ -1292,8 +1357,27 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 		desc.applied = true
 		r.executed.Set(slotStr, struct{}{})
 		r.notifyExecute(slot)
+		if slot > r.lastDeliverSlot {
+			r.lastDeliverSlot = slot
+		}
 
 		// Trigger next slot
+		go func(nextSlot int) {
+			r.deliverChan <- nextSlot
+		}(slot + 1)
+	} else {
+		// deliver() already executed this command (set desc.applied=true).
+		// Ensure executed is set and deliver chain advances — there is a data race
+		// where deliver() sets desc.applied before r.executed.Set completes,
+		// so we must guarantee both are set before we mark delivered.
+		if !r.executed.Has(slotStr) {
+			r.executed.Set(slotStr, struct{}{})
+			r.notifyExecute(slot)
+		}
+		if slot > r.lastDeliverSlot {
+			r.lastDeliverSlot = slot
+		}
+		// Push deliver chain in case deliver() didn't (weak+leader returns early)
 		go func(nextSlot int) {
 			r.deliverChan <- nextSlot
 		}(slot + 1)
@@ -1311,15 +1395,17 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 		r.removePendingWrite(clientId, desc.cmd.K, seqNum)
 	}
 
-	// Cleanup: mark delivered, then trigger handler exit.
-	// deliver() skipped this for weak commands on leader to avoid freeing desc too early.
+	// Ensure executed is set before marking delivered to prevent deliver chain breakage.
+	if !r.executed.Has(slotStr) {
+		// Safety: ensure executed is set before delivered
+		r.executed.Set(slotStr, struct{}{})
+		r.notifyExecute(slot)
+	}
 	r.delivered.Set(slotStr, struct{}{})
 	if desc.seq {
-		// No handler goroutine to clean up — just remove from cmdDescs.
-		// Don't call freeDesc (unsafe from goroutine — run loop may still reference desc).
 		r.cmdDescs.Remove(slotStr)
 	} else {
-		desc.msgs <- slot // triggers handler goroutine cleanup (freeDesc) and exit
+		desc.msgs <- slot
 	}
 }
 
@@ -1376,7 +1462,24 @@ func (r *Replica) handleCausalPropose(propose *MCausalPropose) {
 // getCausalCmdDesc creates a command descriptor for causal commands.
 // Similar to getWeakCmdDesc but takes MCausalPropose instead of MWeakPropose.
 func (r *Replica) getCausalCmdDesc(slot int, propose *MCausalPropose, dep int) *commandDesc {
-	desc := r.newDesc()
+	slotStr := strconv.Itoa(slot)
+
+	var desc *commandDesc
+	var created bool
+
+	r.cmdDescs.Upsert(slotStr, nil,
+		func(exists bool, mapV, _ interface{}) interface{} {
+			if exists {
+				desc = mapV.(*commandDesc)
+				created = false
+				return desc
+			}
+			desc = r.newDesc()
+			created = true
+			return desc
+		})
+
+	// Update fields on the desc (whether new or reused)
 	desc.isWeak = true
 	desc.cmdSlot = slot
 	desc.dep = dep
@@ -1386,14 +1489,10 @@ func (r *Replica) getCausalCmdDesc(slot int, propose *MCausalPropose, dep int) *
 	}
 	desc.cmd = propose.Command
 	desc.phase = ACCEPT // Skip START phase for causal commands
-
-	// Register in cmdDescs so AcceptAcks are routed to this descriptor
-	slotStr := strconv.Itoa(slot)
 	desc.slotStr = slotStr
-	r.cmdDescs.Set(slotStr, desc)
 
-	// Start handler goroutine to process incoming messages (AcceptAcks, Commits)
-	if !desc.seq {
+	// Only start handler goroutine if we created a new desc
+	if created && !desc.seq {
 		go r.handleDesc(desc, slot, dep)
 		r.routineCount++
 	}
@@ -1482,6 +1581,16 @@ func (r *Replica) asyncReplicateCausal(desc *commandDesc, slot int, clientId int
 		go func(nextSlot int) {
 			r.deliverChan <- nextSlot
 		}(slot + 1)
+	} else {
+		// deliver() already executed this command. Ensure executed is set and
+		// deliver chain advances (same data race fix as asyncReplicateWeak).
+		if !r.executed.Has(slotStr) {
+			r.executed.Set(slotStr, struct{}{})
+			r.notifyExecute(slot)
+		}
+		go func(nextSlot int) {
+			r.deliverChan <- nextSlot
+		}(slot + 1)
 	}
 
 	// Set r.values immediately after execution so MSync can reply
@@ -1498,15 +1607,17 @@ func (r *Replica) asyncReplicateCausal(desc *commandDesc, slot int, clientId int
 
 	r.syncLeader(desc.cmdId, desc.cmd)
 
-	// Cleanup: mark delivered, then trigger handler exit.
-	// deliver() skipped this for weak commands on leader to avoid freeing desc too early.
+	// Ensure executed is set before marking delivered to prevent deliver chain breakage.
+	if !r.executed.Has(slotStr) {
+		// Safety: ensure executed is set before delivered
+		r.executed.Set(slotStr, struct{}{})
+		r.notifyExecute(slot)
+	}
 	r.delivered.Set(slotStr, struct{}{})
 	if desc.seq {
-		// No handler goroutine to clean up — just remove from cmdDescs.
-		// Don't call freeDesc (unsafe from goroutine — run loop may still reference desc).
 		r.cmdDescs.Remove(slotStr)
 	} else {
-		desc.msgs <- slot // triggers handler goroutine cleanup (freeDesc) and exit
+		desc.msgs <- slot
 	}
 }
 

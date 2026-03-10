@@ -34,9 +34,15 @@ func (t *Timer) Start(wait time.Duration) {
 				return
 			case <-time.After(wait):
 				stop := (len(s) != 0)
-				t.c <- !stop
 				if stop {
 					return
+				}
+				// Non-blocking send: skip if channel already has a pending event.
+				// This prevents the timer goroutine from blocking when
+				// handleStrongMsgs is busy processing replies.
+				select {
+				case t.c <- true:
+				default:
 				}
 			}
 		}

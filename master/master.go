@@ -198,6 +198,10 @@ func (master *Master) Register(args *defs.RegisterArgs, reply *defs.RegisterRepl
 	}
 
 	if index == nlen {
+		if nlen >= cap(master.nodeList) {
+			master.Printf("Rejecting extra registration from %v (already have %d/%d nodes)", addrPort, nlen, cap(master.nodeList))
+			return fmt.Errorf("too many registrations: %d >= %d", nlen, cap(master.nodeList))
+		}
 		master.nodeList = master.nodeList[0 : nlen+1]
 		master.nodeList[nlen] = addrPort
 		master.addrList = master.addrList[0 : nlen+1]
