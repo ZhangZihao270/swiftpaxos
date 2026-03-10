@@ -5844,10 +5844,34 @@ fast path behavior since all machines are homogeneous (64-core).
 - Thread counts: 1, 4, 16, 32, 64
 
 **Steps**:
-- [ ] 90a: Create config (or modify Phase 89 config) with reqs=3000
-- [ ] 90b: Create eval script scripts/eval-phase90.sh
-- [ ] 90c: Run curpht exp3.1 (t=1, 4, 16, 32, 64)
-- [ ] 90d: Compare with Phase 89 results
+- [x] 90a: Create config (or modify Phase 89 config) with reqs=3000
+- [x] 90b: Create eval script scripts/eval-phase90.sh
+- [x] 90c: Run curpht exp3.1 (t=1, 4, 16, 32, 64)
+- [x] 90d: Compare with Phase 89 results
+
+**Phase 90 Results** (5 replicas/5 machines, 3 clients, reqs=3000):
+
+| threads | throughput | s_avg   | s_p50  | s_p99   | w_avg  | w_p50 | w_p99  |
+|---------|-----------|---------|--------|---------|--------|-------|--------|
+| 1       | 1,620     | 51.31   | 51.27  | 52.42   | 4.93   | 0.17  | 104.80 |
+| 4       | 6,202     | 51.29   | 51.08  | 53.79   | 5.53   | 0.24  | 103.35 |
+| 16      | 24,737    | 51.81   | 50.83  | 76.02   | 5.37   | 0.23  | 101.78 |
+| 32      | 37,938    | 68.38   | 68.95  | 111.34  | 6.16   | 0.35  | 108.12 |
+| 64      | 49,020    | 104.36  | 95.51  | 227.18  | 11.73  | 1.51  | 205.22 |
+
+**Comparison: Phase 90 (reqs=3000) vs Phase 89 (reqs=10000)**:
+
+| threads | Ph90 tp  | Ph89 tp  | Ph90 s_p50 | Ph89 s_p50 |
+|---------|----------|----------|------------|------------|
+| 8       | —        | 12,327   | —          | 50.90      |
+| 16      | 24,737   | —        | 50.83      | —          |
+| 32      | 37,938   | 35,457   | 68.95      | 72.34      |
+| 64      | 49,020   | 38,894   | 95.51      | 92.97      |
+
+**Analysis**: Fast path confirmed at t=1–16 (s_p50 ≈ 51ms). Throughput at t=64 is
+49K vs Phase 89's 38.9K — shorter runs (reqs=3000) avoid sustained saturation,
+giving higher apparent throughput. Latency pattern matches: gradual degradation
+from 51ms (t=1) → 69ms (t=32) → 96ms (t=64). Results consistent with Phase 87/89.
 
 ---
 
