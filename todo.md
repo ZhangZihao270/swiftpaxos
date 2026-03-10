@@ -5780,6 +5780,77 @@ fast path behavior since all machines are homogeneous (64-core).
 
 ---
 
+### Phase 89: 5-replica 3-client validation (per-client bottleneck theory)
+
+**Goal**: Verify that throughput saturates at ~42K (same as 3-replica Phase 87) when using only 3 clients on a 5-replica/5-machine setup, confirming the per-client throughput bottleneck (~14K/client).
+
+**Setup**:
+- 5 replicas on 5 machines: .101, .103, .104, .125, .126 (same as Phase 88)
+- Only 3 clients on .101, .103, .104 (no clients on .125/.126)
+- Config: benchmark-5r-5m.conf with client list trimmed to 3
+- curpht only, weakRatio=50, writes=5, weakWrites=5
+- Thread counts: 8, 32, 64, 128
+
+**Expected outcome**:
+- If per-client bottleneck theory is correct: throughput caps at ~42K (3 × ~14K), matching Phase 87 (3r/3m)
+- If throughput still scales to ~53K+: bottleneck is elsewhere (replica count or network)
+
+**Steps**:
+- [x] 89a: Create benchmark-5r-5m-3c.conf (5 replicas, 3 clients on .101/.103/.104)
+- [x] 89b: Create eval script scripts/eval-phase89.sh
+- [x] 89c: Run curpht exp3.1 (t=8, 32, 64, 128)
+- [x] 89d: Compare with Phase 88 (5c) and Phase 87 (3r) results
+
+**Phase 89 Results** (5 replicas/5 machines, 3 clients on .101/.103/.104 only):
+
+| threads | throughput | s_avg   | s_p50  | s_p99   | w_avg  | w_p50 | w_p99  |
+|---------|-----------|---------|--------|---------|--------|-------|--------|
+| 8       | 12,327    | 51.44   | 50.90  | 76.92   | 5.20   | 0.23  | 102.28 |
+| 32      | 35,457    | 68.71   | 72.34  | 150.44  | 5.89   | 0.40  | 107.22 |
+| 64      | 38,894    | 102.46  | 92.97  | 454.82  | 11.81  | 1.27  | 287.80 |
+| 128     | 52,969    | 135.49  | 99.78  | 876.84  | 36.40  | 33.10 | 188.67 |
+
+**Comparison: Phase 89 (5r/3c) vs Phase 88 (5r/5c) vs Phase 87 (3r/3c)**:
+
+| threads | Ph89 5r/3c tp | Ph88 5r/5c tp | Ph87 3r/3c tp | Ph89 s_p50 | Ph88 s_p50 | Ph87 s_p50 |
+|---------|--------------|--------------|--------------|------------|------------|------------|
+| 8       | 12,327       | —            | —            | 50.90      | —          | —          |
+| 32      | 35,457       | 37,290       | 40,464       | 72.34      | 96.82      | 61.33      |
+| 64      | 38,894       | 53,243       | 41,526       | 92.97      | 99.65      | 99.64      |
+| 128     | 52,969       | —            | —            | 99.78      | —          | —          |
+
+**Analysis**:
+1. **Fast path restored**: s_p50 = 50.90ms at t=8 — fast path works when clients are
+   on fast machines! Phase 88 showed 66ms at t=1 because slow .125/.126 clients added
+   processing latency. Confirms the issue is client-side, not replica-side.
+2. **Per-client bottleneck partially confirmed**: At t=64, throughput = 38.9K ≈ Phase 87's
+   41.5K (3r/3c), consistent with ~13K/client cap. But at t=128, throughput jumps to 53K,
+   breaking past the cap — suggests the bottleneck shifts at higher concurrency.
+3. **Throughput plateau at t=64 then jump at t=128**: 38.9K→53K jump between t=64 and
+   t=128 suggests pipeline depth becomes sufficient to overcome the per-client bottleneck.
+   More threads per client = more in-flight commands = better utilization of 5-replica quorum.
+
+---
+
+### Phase 90: 5-replica 3-client short-run validation (reqs=3000)
+
+**Goal**: Quick validation run with fewer requests per client (3000) to reduce experiment time while confirming throughput scaling behavior under 5-replica/3-client setup.
+
+**Setup**:
+- 5 replicas on 5 machines: .101, .103, .104, .125, .126
+- 3 clients on .101, .103, .104
+- Config: benchmark-5r-5m-3c.conf with reqs=3000
+- curpht only, weakRatio=50, writes=5, weakWrites=5
+- Thread counts: 1, 4, 16, 32, 64
+
+**Steps**:
+- [ ] 90a: Create config (or modify Phase 89 config) with reqs=3000
+- [ ] 90b: Create eval script scripts/eval-phase90.sh
+- [ ] 90c: Run curpht exp3.1 (t=1, 4, 16, 32, 64)
+- [ ] 90d: Compare with Phase 89 results
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
