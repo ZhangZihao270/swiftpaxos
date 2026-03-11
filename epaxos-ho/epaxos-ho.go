@@ -783,12 +783,161 @@ func (r *Replica) startStrongCommit(replicaId int32, instance int32, ballot int3
 	}
 }
 
+// --- Ballot helpers ---
+
+func (r *Replica) makeUniqueBallot(ballot int32) int32 {
+	return (ballot << 4) | r.Id
+}
+
+func (r *Replica) makeBallotLargerThan(ballot int32) int32 {
+	return r.makeUniqueBallot((ballot >> 4) + 1)
+}
+
+func isInitialBallot(ballot int32) bool {
+	return (ballot >> 4) == 0
+}
+
+// bcastPrepare broadcasts a Prepare message to all peers.
+// Used during recovery when a higher ballot is needed.
+func (r *Replica) bcastPrepare(replicaId int32, instance int32, ballot int32) {
+	defer func() {
+		if err := recover(); err != nil {
+			dlog.Println("Prepare bcast failed:", err)
+		}
+	}()
+
+	args := &Prepare{
+		LeaderId: r.Id,
+		Replica:  replicaId,
+		Instance: instance,
+		Ballot:   ballot,
+	}
+
+	for q := 0; q < r.N-1; q++ {
+		if !r.Alive[r.PreferredPeerOrder[q]] {
+			continue
+		}
+		r.SendMsg(r.PreferredPeerOrder[q], r.prepareRPC, args)
+	}
+}
+
 func (r *Replica) handlePrepare(prepare *Prepare) {
 	// TODO: Phase 99.3g — recovery path
 }
 
+// handlePreAccept processes a PreAccept message from the leader (follower side).
+// It updates attributes with local conflict information and replies with either
+// a PreAcceptOK (fast path, no changes) or PreAcceptReply (with updated attributes).
 func (r *Replica) handlePreAccept(preAccept *PreAccept) {
-	// TODO: Phase 99.3f — strong commit path
+	inst := r.InstanceSpace[preAccept.Replica][preAccept.Instance]
+
+	if preAccept.Seq >= r.maxSeq {
+		r.maxSeq = preAccept.Seq + 1
+	}
+
+	if preAccept.Instance >= r.crtInstance[preAccept.Replica] {
+		r.crtInstance[preAccept.Replica] = preAccept.Instance + 1
+	}
+
+	// Already executed or discarded — nothing to do
+	if inst != nil && (inst.Status == EXECUTED || inst.Status == DISCARDED) {
+		return
+	}
+
+	// Reordered: we already received Commit/Accept before PreAccept
+	if inst != nil && (inst.Status == STRONGLY_COMMITTED || inst.Status == ACCEPTED) {
+		if inst.Cmds == nil {
+			r.InstanceSpace[preAccept.Replica][preAccept.Instance].Cmds = preAccept.Command
+			r.updateStrongConflicts(preAccept.Command, preAccept.Replica, preAccept.Instance, preAccept.Seq)
+		}
+		r.recordCommands(preAccept.Command)
+		r.sync()
+		return
+	}
+
+	// Compute local attributes
+	seq, deps, cl, changed := r.updateStrongAttributes2(preAccept.Command, preAccept.Seq, preAccept.Deps, preAccept.CL, preAccept.Replica, preAccept.Instance)
+
+	// Check for uncommitted strong dependencies
+	uncommittedDeps := false
+	for q := 0; q < r.N; q++ {
+		if cl[q] == int32(state.STRONG) && deps[q] > r.CommittedUpTo[q] {
+			uncommittedDeps = true
+			break
+		}
+	}
+
+	status := int8(PREACCEPTED_EQ)
+	if changed {
+		status = PREACCEPTED
+	}
+
+	// Ballot check and instance update
+	if inst != nil {
+		if preAccept.Ballot < inst.bal {
+			r.replyPreAccept(preAccept.LeaderId, &PreAcceptReply{
+				Replica:       preAccept.Replica,
+				Instance:      preAccept.Instance,
+				OK:            FALSE,
+				Ballot:        inst.bal,
+				Seq:           inst.Seq,
+				Deps:          inst.Deps,
+				CL:            inst.CL,
+				CommittedDeps: r.CommittedUpTo,
+			})
+			return
+		}
+		inst.Cmds = preAccept.Command
+		inst.Seq = seq
+		inst.Deps = deps
+		inst.CL = cl
+		inst.bal = preAccept.Ballot
+		inst.vbal = preAccept.Ballot
+		inst.Status = status
+		inst.State = READY
+	} else {
+		r.InstanceSpace[preAccept.Replica][preAccept.Instance] = &Instance{
+			Cmds:       preAccept.Command,
+			bal:        preAccept.Ballot,
+			vbal:       preAccept.Ballot,
+			Status:     status,
+			State:      READY,
+			Seq:        seq,
+			Deps:       deps,
+			CL:         cl,
+			instanceId: &instanceId{preAccept.Replica, preAccept.Instance},
+		}
+	}
+
+	r.updateStrongConflicts(preAccept.Command, preAccept.Replica, preAccept.Instance, preAccept.Seq)
+
+	r.recordInstanceMetadata(r.InstanceSpace[preAccept.Replica][preAccept.Instance])
+	r.recordCommands(preAccept.Command)
+	r.sync()
+
+	if len(preAccept.Command) == 0 {
+		// Checkpoint
+		r.latestCPReplica = preAccept.Replica
+		r.latestCPInstance = preAccept.Instance
+		r.clearHashtables()
+	}
+
+	if changed || uncommittedDeps || preAccept.Replica != preAccept.LeaderId || !isInitialBallot(preAccept.Ballot) {
+		// Slow path reply — include updated attributes
+		r.replyPreAccept(preAccept.LeaderId, &PreAcceptReply{
+			Replica:       preAccept.Replica,
+			Instance:      preAccept.Instance,
+			OK:            TRUE,
+			Ballot:        preAccept.Ballot,
+			Seq:           seq,
+			Deps:          deps,
+			CL:            cl,
+			CommittedDeps: r.CommittedUpTo,
+		})
+	} else {
+		// Fast path reply — attributes unchanged
+		r.SendMsg(preAccept.LeaderId, r.preAcceptOKRPC, &PreAcceptOK{Instance: preAccept.Instance})
+	}
 }
 
 func (r *Replica) handleAccept(accept *Accept) {
@@ -1183,12 +1332,163 @@ func (r *Replica) handlePrepareReply(reply *PrepareReply) {
 	// TODO: Phase 99.3g — recovery path
 }
 
-func (r *Replica) handlePreAcceptReply(reply *PreAcceptReply) {
-	// TODO: Phase 99.3f-iii — strong commit path
+// handlePreAcceptReply processes a PreAcceptReply from a follower (leader side).
+// Merges attributes and determines whether to commit on the fast path or
+// fall through to the slow path (Accept phase).
+func (r *Replica) handlePreAcceptReply(pareply *PreAcceptReply) {
+	inst := r.InstanceSpace[pareply.Replica][pareply.Instance]
+
+	if inst.Status != PREACCEPTED {
+		// Already moved past PreAccept phase — delayed reply
+		return
+	}
+
+	if pareply.OK == FALSE {
+		// Another leader is active — nack handling
+		inst.lb.nacks++
+		if pareply.Ballot > inst.lb.maxRecvBallot {
+			inst.lb.maxRecvBallot = pareply.Ballot
+		}
+		if inst.lb.nacks >= r.N/2 {
+			inst.bal = r.makeBallotLargerThan(pareply.Ballot)
+			r.bcastPrepare(pareply.Replica, pareply.Instance, inst.bal)
+		}
+		return
+	}
+
+	if inst.bal != pareply.Ballot {
+		return
+	}
+
+	inst.lb.preAcceptOKs++
+
+	var equal bool
+	inst.Seq, inst.Deps, inst.CL, equal = r.mergeStrongAttributes(inst.Seq, inst.Deps, pareply.Seq, pareply.Deps, inst.CL, pareply.CL)
+
+	if (r.N <= 3 && !r.Thrifty) || inst.lb.preAcceptOKs > 1 {
+		inst.lb.allEqual = inst.lb.allEqual && equal
+		if !equal {
+			r.Stats.M["conflicted"]++
+		}
+	}
+
+	allCommitted := true
+	for q := 0; q < r.N; q++ {
+		if inst.lb.committedDeps[q] < pareply.CommittedDeps[q] {
+			inst.lb.committedDeps[q] = pareply.CommittedDeps[q]
+		}
+		if inst.lb.committedDeps[q] < r.CommittedUpTo[q] {
+			inst.lb.committedDeps[q] = r.CommittedUpTo[q]
+		}
+		if inst.lb.committedDeps[q] < inst.Deps[q] {
+			allCommitted = false
+		}
+	}
+
+	// Fast path: all peers agreed on same attributes, all deps committed, initial ballot
+	if inst.lb.preAcceptOKs >= r.N/2+(r.N/2+1)/2-1 && inst.lb.allEqual && allCommitted && isInitialBallot(inst.bal) {
+		r.Stats.M["fast"]++
+
+		r.InstanceSpace[pareply.Replica][pareply.Instance].Status = STRONGLY_COMMITTED
+		r.updateCommitted(pareply.Replica)
+		r.updateStrongSessionConflict(inst.Cmds, pareply.Replica, pareply.Instance)
+
+		if inst.lb.clientProposals != nil && !r.Dreply {
+			for i := 0; i < len(inst.lb.clientProposals); i++ {
+				prop := inst.lb.clientProposals[i]
+				r.ReplyProposeTS(
+					&defs.ProposeReplyTS{
+						OK:        TRUE,
+						CommandId: prop.CommandId,
+						Value:     state.NIL(),
+						Timestamp: prop.Timestamp,
+					},
+					prop.Reply,
+					prop.Mutex)
+			}
+		}
+
+		r.recordInstanceMetadata(inst)
+		r.sync()
+
+		r.InstanceSpace[pareply.Replica][pareply.Instance].State = READY
+		r.bcastStrongCommit(pareply.Replica, pareply.Instance, inst.Cmds, inst.Seq, inst.Deps, inst.CL, state.STRONG)
+
+	} else if inst.lb.preAcceptOKs >= r.N/2 {
+		// Slow path: move to Accept phase
+		r.Stats.M["slow"]++
+		if !allCommitted {
+			r.Stats.M["weird"]++
+		}
+
+		inst.Status = ACCEPTED
+		r.InstanceSpace[pareply.Replica][pareply.Instance].State = READY
+		r.bcastAccept(pareply.Replica, pareply.Instance, inst.bal, int32(len(inst.Cmds)), inst.Seq, inst.Deps, inst.CL)
+	}
 }
 
-func (r *Replica) handlePreAcceptOK(msg *PreAcceptOK) {
-	// TODO: Phase 99.3f-iii — fast path acknowledgment
+// handlePreAcceptOK processes a fast-path PreAcceptOK from a follower (leader side).
+// PreAcceptOK indicates the follower's attributes matched exactly — no merge needed.
+func (r *Replica) handlePreAcceptOK(pareply *PreAcceptOK) {
+	inst := r.InstanceSpace[r.Id][pareply.Instance]
+
+	if inst.Status != PREACCEPTED {
+		return
+	}
+
+	if !isInitialBallot(inst.bal) {
+		return
+	}
+
+	inst.lb.preAcceptOKs++
+
+	allCommitted := true
+	for q := 0; q < r.N; q++ {
+		if inst.lb.committedDeps[q] < inst.lb.originalDeps[q] {
+			inst.lb.committedDeps[q] = inst.lb.originalDeps[q]
+		}
+		if inst.lb.committedDeps[q] < r.CommittedUpTo[q] {
+			inst.lb.committedDeps[q] = r.CommittedUpTo[q]
+		}
+		if inst.lb.committedDeps[q] < inst.Deps[q] {
+			allCommitted = false
+		}
+	}
+
+	// Fast path commit check
+	if inst.lb.preAcceptOKs >= r.N/2+(r.N/2+1)/2-1 && inst.lb.allEqual && allCommitted && isInitialBallot(inst.bal) {
+		r.Stats.M["fast"]++
+
+		r.InstanceSpace[r.Id][pareply.Instance].Status = STRONGLY_COMMITTED
+		r.updateCommitted(r.Id)
+		r.updateStrongSessionConflict(inst.Cmds, r.Id, pareply.Instance)
+
+		if inst.lb.clientProposals != nil && !r.Dreply {
+			for i := 0; i < len(inst.lb.clientProposals); i++ {
+				prop := inst.lb.clientProposals[i]
+				r.ReplyProposeTS(
+					&defs.ProposeReplyTS{
+						OK:        TRUE,
+						CommandId: prop.CommandId,
+						Value:     state.NIL(),
+						Timestamp: prop.Timestamp,
+					},
+					prop.Reply,
+					prop.Mutex)
+			}
+		}
+
+		r.recordInstanceMetadata(inst)
+		r.sync()
+
+		r.bcastStrongCommit(r.Id, pareply.Instance, inst.Cmds, inst.Seq, inst.Deps, inst.CL, state.STRONG)
+
+	} else if inst.lb.preAcceptOKs >= r.N/2 {
+		// Slow path
+		r.Stats.M["slow"]++
+		inst.Status = ACCEPTED
+		r.bcastAccept(r.Id, pareply.Instance, inst.bal, int32(len(inst.Cmds)), inst.Seq, inst.Deps, inst.CL)
+	}
 }
 
 func (r *Replica) handleAcceptReply(reply *AcceptReply) {

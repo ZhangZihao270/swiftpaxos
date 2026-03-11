@@ -216,9 +216,7 @@ func TestStubHandlersDoNotPanic(t *testing.T) {
 	t.Run("handlePrepare", func(t *testing.T) {
 		r.handlePrepare(&Prepare{})
 	})
-	t.Run("handlePreAccept", func(t *testing.T) {
-		r.handlePreAccept(&PreAccept{})
-	})
+	// handlePreAccept tested separately — it now requires initialized InstanceSpace and conflict maps
 	t.Run("handleAccept", func(t *testing.T) {
 		r.handleAccept(&Accept{})
 	})
@@ -232,12 +230,8 @@ func TestStubHandlersDoNotPanic(t *testing.T) {
 	t.Run("handlePrepareReply", func(t *testing.T) {
 		r.handlePrepareReply(&PrepareReply{})
 	})
-	t.Run("handlePreAcceptReply", func(t *testing.T) {
-		r.handlePreAcceptReply(&PreAcceptReply{})
-	})
-	t.Run("handlePreAcceptOK", func(t *testing.T) {
-		r.handlePreAcceptOK(&PreAcceptOK{})
-	})
+	// handlePreAcceptReply tested separately — it now requires initialized InstanceSpace
+	// handlePreAcceptOK tested separately — it now requires initialized InstanceSpace
 	t.Run("handleAcceptReply", func(t *testing.T) {
 		r.handleAcceptReply(&AcceptReply{})
 	})
@@ -1529,4 +1523,533 @@ func TestUpdateStrongAttributes1_MultipleKeys(t *testing.T) {
 	if newCL[2] != int32(state.CAUSAL) {
 		t.Errorf("cl[2]=%d, want CAUSAL(%d)", newCL[2], state.CAUSAL)
 	}
+}
+
+// --- Phase 99.3f-iii: Ballot helpers, handlePreAccept, handlePreAcceptReply, handlePreAcceptOK tests ---
+
+func TestIsInitialBallot(t *testing.T) {
+	if !isInitialBallot(0) {
+		t.Error("ballot 0 should be initial")
+	}
+	if !isInitialBallot(0x0F) {
+		t.Error("ballot 0x0F (replicaId only) should be initial")
+	}
+	if isInitialBallot(0x10) {
+		t.Error("ballot 0x10 should NOT be initial")
+	}
+	if isInitialBallot(0x20) {
+		t.Error("ballot 0x20 should NOT be initial")
+	}
+}
+
+func TestMakeUniqueBallot(t *testing.T) {
+	r := newTestReplica(3)
+	// r.Id = 0
+	b := r.makeUniqueBallot(1)
+	if b != (1<<4)|0 {
+		t.Errorf("makeUniqueBallot(1)=%d, want %d", b, (1<<4)|0)
+	}
+}
+
+func TestMakeBallotLargerThan(t *testing.T) {
+	r := newTestReplica(3)
+	// r.Id = 0
+	b := r.makeBallotLargerThan(0x10) // ballot >> 4 = 1, so (1+1)<<4 | 0 = 0x20
+	if b != 0x20 {
+		t.Errorf("makeBallotLargerThan(0x10)=%d, want %d", b, 0x20)
+	}
+}
+
+// Helper: create a PREACCEPTED instance with LeaderBookkeeping as startStrongCommit would.
+func setupStrongInstance(r *Replica, replicaId int32, instance int32, ballot int32, cmds []state.Command, seq int32, deps []int32) {
+	comDeps := make([]int32, r.N)
+	origDeps := make([]int32, len(deps))
+	copy(origDeps, deps)
+	for i := 0; i < r.N; i++ {
+		comDeps[i] = -1
+	}
+	cl := make([]int32, r.N)
+	r.InstanceSpace[replicaId][instance] = &Instance{
+		Cmds:       cmds,
+		bal:        ballot,
+		vbal:       ballot,
+		Status:     PREACCEPTED,
+		State:      READY,
+		Seq:        seq,
+		Deps:       deps,
+		CL:         cl,
+		lb:         &LeaderBookkeeping{allEqual: true, originalDeps: origDeps, committedDeps: comDeps},
+		instanceId: &instanceId{replicaId, instance},
+	}
+}
+
+// TestHandlePreAccept_NewInstance verifies follower creates a new instance.
+func TestHandlePreAccept_NewInstance(t *testing.T) {
+	r := newTestReplica(3)
+
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	deps := []int32{-1, -1, -1}
+	cl := []int32{0, 0, 0}
+
+	pa := &PreAccept{
+		LeaderId: 1,
+		Replica:  1,
+		Instance: 0,
+		Ballot:   0,
+		Command:  cmds,
+		Seq:      5,
+		Deps:     deps,
+		CL:       cl,
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handlePreAccept(pa)
+	}()
+
+	inst := r.InstanceSpace[1][0]
+	if inst == nil {
+		t.Fatal("instance should be created")
+	}
+	// No local conflicts → attributes unchanged → PREACCEPTED_EQ
+	if inst.Status != PREACCEPTED_EQ {
+		t.Errorf("Status=%d, want PREACCEPTED_EQ(%d)", inst.Status, PREACCEPTED_EQ)
+	}
+	if inst.State != READY {
+		t.Errorf("State=%d, want READY(%d)", inst.State, READY)
+	}
+	if inst.Seq != 5 {
+		t.Errorf("Seq=%d, want 5", inst.Seq)
+	}
+}
+
+// TestHandlePreAccept_ExistingExecutedSkipped verifies EXECUTED instances are skipped.
+func TestHandlePreAccept_ExistingExecutedSkipped(t *testing.T) {
+	r := newTestReplica(3)
+
+	r.InstanceSpace[1][0] = &Instance{Status: EXECUTED}
+
+	pa := &PreAccept{
+		LeaderId: 1, Replica: 1, Instance: 0, Ballot: 0,
+		Command: []state.Command{{Op: state.PUT, K: 10, V: state.NIL()}},
+		Seq: 5, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+	r.handlePreAccept(pa)
+
+	// Should remain EXECUTED
+	if r.InstanceSpace[1][0].Status != EXECUTED {
+		t.Errorf("Status=%d, want EXECUTED(%d)", r.InstanceSpace[1][0].Status, EXECUTED)
+	}
+}
+
+// TestHandlePreAccept_CommittedFillsCommands verifies reordered Commit then PreAccept.
+func TestHandlePreAccept_CommittedFillsCommands(t *testing.T) {
+	r := newTestReplica(3)
+
+	// Simulate Commit arrived first (no commands)
+	r.InstanceSpace[1][0] = &Instance{Status: STRONGLY_COMMITTED, Cmds: nil}
+
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	pa := &PreAccept{
+		LeaderId: 1, Replica: 1, Instance: 0, Ballot: 0,
+		Command: cmds, Seq: 5, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+	r.handlePreAccept(pa)
+
+	// Commands should be filled in
+	if r.InstanceSpace[1][0].Cmds == nil {
+		t.Error("Cmds should be filled from PreAccept when Commit arrived first")
+	}
+	if len(r.InstanceSpace[1][0].Cmds) != 1 {
+		t.Errorf("len(Cmds)=%d, want 1", len(r.InstanceSpace[1][0].Cmds))
+	}
+}
+
+// TestHandlePreAccept_BallotReject verifies nack for lower ballot.
+func TestHandlePreAccept_BallotReject(t *testing.T) {
+	r := newTestReplica(3)
+
+	// Existing instance with higher ballot
+	r.InstanceSpace[1][0] = &Instance{
+		bal:    0x10, // higher ballot
+		Status: PREACCEPTED,
+		Seq:    3,
+		Deps:   []int32{-1, -1, -1},
+		CL:     []int32{0, 0, 0},
+	}
+
+	pa := &PreAccept{
+		LeaderId: 1, Replica: 1, Instance: 0, Ballot: 0, // lower ballot
+		Command: []state.Command{{Op: state.PUT, K: 10, V: state.NIL()}},
+		Seq: 5, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	// Should not panic — replyPreAccept will panic due to nil SendMsg, but
+	// handlePreAccept should attempt the reply and return
+	func() {
+		defer func() { recover() }()
+		r.handlePreAccept(pa)
+	}()
+
+	// Instance should NOT be updated (ballot too low)
+	if r.InstanceSpace[1][0].Seq != 3 {
+		t.Errorf("Seq=%d, should stay 3 (ballot reject)", r.InstanceSpace[1][0].Seq)
+	}
+}
+
+// TestHandlePreAccept_ChangedAttributes verifies PREACCEPTED status when attributes change.
+func TestHandlePreAccept_ChangedAttributes(t *testing.T) {
+	r := newTestReplica(3)
+
+	// Pre-populate a conflict that will change deps
+	r.conflictMutex.Lock()
+	r.conflicts[2][10] = 5
+	r.conflictMutex.Unlock()
+	r.InstanceSpace[2][5] = &Instance{
+		Cmds: []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}},
+		Seq:  20,
+	}
+
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	pa := &PreAccept{
+		LeaderId: 1, Replica: 1, Instance: 0, Ballot: 0,
+		Command: cmds, Seq: 5, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handlePreAccept(pa)
+	}()
+
+	inst := r.InstanceSpace[1][0]
+	if inst == nil {
+		t.Fatal("instance should be created")
+	}
+	// Attributes changed → PREACCEPTED (not PREACCEPTED_EQ)
+	if inst.Status != PREACCEPTED {
+		t.Errorf("Status=%d, want PREACCEPTED(%d)", inst.Status, PREACCEPTED)
+	}
+	if inst.Deps[2] != 5 {
+		t.Errorf("Deps[2]=%d, want 5 from conflict", inst.Deps[2])
+	}
+}
+
+// TestHandlePreAccept_UpdatesMaxSeqAndCrtInstance verifies bookkeeping updates.
+func TestHandlePreAccept_UpdatesMaxSeqAndCrtInstance(t *testing.T) {
+	r := newTestReplica(3)
+	r.maxSeq = 0
+
+	pa := &PreAccept{
+		LeaderId: 1, Replica: 1, Instance: 5, Ballot: 0,
+		Command: []state.Command{{Op: state.PUT, K: 10, V: state.NIL()}},
+		Seq: 20, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handlePreAccept(pa)
+	}()
+
+	if r.maxSeq != 21 {
+		t.Errorf("maxSeq=%d, want 21", r.maxSeq)
+	}
+	if r.crtInstance[1] != 6 {
+		t.Errorf("crtInstance[1]=%d, want 6", r.crtInstance[1])
+	}
+}
+
+// TestHandlePreAccept_Checkpoint verifies checkpoint detection.
+func TestHandlePreAccept_Checkpoint(t *testing.T) {
+	r := newTestReplica(3)
+
+	pa := &PreAccept{
+		LeaderId: 1, Replica: 1, Instance: 0, Ballot: 0,
+		Command: []state.Command{}, // empty = checkpoint
+		Seq: 5, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handlePreAccept(pa)
+	}()
+
+	if r.latestCPReplica != 1 {
+		t.Errorf("latestCPReplica=%d, want 1", r.latestCPReplica)
+	}
+	if r.latestCPInstance != 0 {
+		t.Errorf("latestCPInstance=%d, want 0", r.latestCPInstance)
+	}
+}
+
+// TestHandlePreAcceptReply_DelayedReply verifies delayed replies are ignored.
+func TestHandlePreAcceptReply_DelayedReply(t *testing.T) {
+	r := newTestReplica(3)
+
+	// Instance already committed
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	setupStrongInstance(r, 0, 0, 0, cmds, 5, []int32{-1, -1, -1})
+	r.InstanceSpace[0][0].Status = STRONGLY_COMMITTED
+
+	reply := &PreAcceptReply{
+		Replica: 0, Instance: 0, OK: TRUE, Ballot: 0,
+		Seq: 5, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+		CommittedDeps: []int32{-1, -1, -1},
+	}
+	// Should return immediately without panicking
+	r.handlePreAcceptReply(reply)
+}
+
+// TestHandlePreAcceptReply_WrongBallot verifies wrong ballot replies are ignored.
+func TestHandlePreAcceptReply_WrongBallot(t *testing.T) {
+	r := newTestReplica(3)
+
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	setupStrongInstance(r, 0, 0, 0x10, cmds, 5, []int32{-1, -1, -1})
+
+	reply := &PreAcceptReply{
+		Replica: 0, Instance: 0, OK: TRUE, Ballot: 0, // wrong ballot
+		Seq: 5, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+		CommittedDeps: []int32{-1, -1, -1},
+	}
+	r.handlePreAcceptReply(reply)
+
+	// preAcceptOKs should NOT be incremented
+	if r.InstanceSpace[0][0].lb.preAcceptOKs != 0 {
+		t.Errorf("preAcceptOKs=%d, want 0 (wrong ballot)", r.InstanceSpace[0][0].lb.preAcceptOKs)
+	}
+}
+
+// TestHandlePreAcceptReply_Nack verifies nack counting.
+func TestHandlePreAcceptReply_Nack(t *testing.T) {
+	r := newTestReplica(3)
+
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	setupStrongInstance(r, 0, 0, 0, cmds, 5, []int32{-1, -1, -1})
+
+	reply := &PreAcceptReply{
+		Replica: 0, Instance: 0, OK: FALSE, Ballot: 0x10, // higher ballot
+		Seq: 5, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+		CommittedDeps: []int32{-1, -1, -1},
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handlePreAcceptReply(reply)
+	}()
+
+	if r.InstanceSpace[0][0].lb.nacks != 1 {
+		t.Errorf("nacks=%d, want 1", r.InstanceSpace[0][0].lb.nacks)
+	}
+	if r.InstanceSpace[0][0].lb.maxRecvBallot != 0x10 {
+		t.Errorf("maxRecvBallot=%d, want 0x10", r.InstanceSpace[0][0].lb.maxRecvBallot)
+	}
+}
+
+// TestHandlePreAcceptReply_CountsOKs verifies OK counting and attribute merging.
+func TestHandlePreAcceptReply_CountsOKs(t *testing.T) {
+	r := newTestReplica(5) // 5 replicas: fast quorum = 5/2 + (5/2+1)/2 - 1 = 2+1-1 = 2
+
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	setupStrongInstance(r, 0, 0, 0, cmds, 5, []int32{-1, -1, -1, -1, -1})
+
+	reply := &PreAcceptReply{
+		Replica: 0, Instance: 0, OK: TRUE, Ballot: 0,
+		Seq: 5, Deps: []int32{-1, -1, -1, -1, -1}, CL: []int32{0, 0, 0, 0, 0},
+		CommittedDeps: []int32{-1, -1, -1, -1, -1},
+	}
+
+	r.handlePreAcceptReply(reply)
+
+	if r.InstanceSpace[0][0].lb.preAcceptOKs != 1 {
+		t.Errorf("preAcceptOKs=%d, want 1", r.InstanceSpace[0][0].lb.preAcceptOKs)
+	}
+}
+
+// TestHandlePreAcceptReply_SlowPath verifies slow path transition to ACCEPTED.
+func TestHandlePreAcceptReply_SlowPath(t *testing.T) {
+	r := newTestReplica(3)
+
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	setupStrongInstance(r, 0, 0, 0, cmds, 5, []int32{-1, -1, -1})
+	// Set allEqual=false to prevent fast path
+	r.InstanceSpace[0][0].lb.allEqual = false
+
+	// Need N/2 = 1 OK for slow path
+	reply := &PreAcceptReply{
+		Replica: 0, Instance: 0, OK: TRUE, Ballot: 0,
+		Seq: 5, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+		CommittedDeps: []int32{-1, -1, -1},
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handlePreAcceptReply(reply)
+	}()
+
+	if r.InstanceSpace[0][0].Status != ACCEPTED {
+		t.Errorf("Status=%d, want ACCEPTED(%d)", r.InstanceSpace[0][0].Status, ACCEPTED)
+	}
+}
+
+// TestHandlePreAcceptReply_FastPath verifies fast path commit with N=3.
+func TestHandlePreAcceptReply_FastPath(t *testing.T) {
+	r := newTestReplica(3)
+
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	setupStrongInstance(r, 0, 0, 0, cmds, 5, []int32{-1, -1, -1})
+	// For N=3: fast quorum = 3/2 + (3/2+1)/2 - 1 = 1+1-1 = 1
+
+	reply := &PreAcceptReply{
+		Replica: 0, Instance: 0, OK: TRUE, Ballot: 0,
+		Seq: 5, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+		CommittedDeps: []int32{-1, -1, -1},
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handlePreAcceptReply(reply)
+	}()
+
+	if r.InstanceSpace[0][0].Status != STRONGLY_COMMITTED {
+		t.Errorf("Status=%d, want STRONGLY_COMMITTED(%d)", r.InstanceSpace[0][0].Status, STRONGLY_COMMITTED)
+	}
+}
+
+// TestHandlePreAcceptReply_MergesDeps verifies attribute merging.
+func TestHandlePreAcceptReply_MergesDeps(t *testing.T) {
+	r := newTestReplica(3)
+
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	setupStrongInstance(r, 0, 0, 0, cmds, 5, []int32{-1, -1, -1})
+
+	// Reply with higher deps
+	reply := &PreAcceptReply{
+		Replica: 0, Instance: 0, OK: TRUE, Ballot: 0,
+		Seq: 10, Deps: []int32{-1, 3, -1}, CL: []int32{0, int32(state.STRONG), 0},
+		CommittedDeps: []int32{-1, -1, -1},
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handlePreAcceptReply(reply)
+	}()
+
+	inst := r.InstanceSpace[0][0]
+	if inst.Seq != 10 {
+		t.Errorf("Seq=%d, want 10 (merged max)", inst.Seq)
+	}
+	if inst.Deps[1] != 3 {
+		t.Errorf("Deps[1]=%d, want 3 (merged max)", inst.Deps[1])
+	}
+}
+
+// TestHandlePreAcceptOK_DelayedIgnored verifies delayed PreAcceptOK is ignored.
+func TestHandlePreAcceptOK_DelayedIgnored(t *testing.T) {
+	r := newTestReplica(3)
+
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	setupStrongInstance(r, 0, 0, 0, cmds, 5, []int32{-1, -1, -1})
+	r.InstanceSpace[0][0].Status = STRONGLY_COMMITTED
+
+	r.handlePreAcceptOK(&PreAcceptOK{Instance: 0})
+
+	// Should not increment
+	if r.InstanceSpace[0][0].lb.preAcceptOKs != 0 {
+		t.Errorf("preAcceptOKs=%d, want 0", r.InstanceSpace[0][0].lb.preAcceptOKs)
+	}
+}
+
+// TestHandlePreAcceptOK_NonInitialBallotIgnored verifies non-initial ballot is ignored.
+func TestHandlePreAcceptOK_NonInitialBallotIgnored(t *testing.T) {
+	r := newTestReplica(3)
+
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	setupStrongInstance(r, 0, 0, 0x10, cmds, 5, []int32{-1, -1, -1}) // non-initial ballot
+
+	r.handlePreAcceptOK(&PreAcceptOK{Instance: 0})
+
+	if r.InstanceSpace[0][0].lb.preAcceptOKs != 0 {
+		t.Errorf("preAcceptOKs=%d, want 0 (non-initial ballot)", r.InstanceSpace[0][0].lb.preAcceptOKs)
+	}
+}
+
+// TestHandlePreAcceptOK_FastPath verifies fast path commit via PreAcceptOK.
+func TestHandlePreAcceptOK_FastPath(t *testing.T) {
+	r := newTestReplica(3)
+
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	setupStrongInstance(r, 0, 0, 0, cmds, 5, []int32{-1, -1, -1})
+
+	// For N=3: fast quorum = 1
+	func() {
+		defer func() { recover() }()
+		r.handlePreAcceptOK(&PreAcceptOK{Instance: 0})
+	}()
+
+	if r.InstanceSpace[0][0].Status != STRONGLY_COMMITTED {
+		t.Errorf("Status=%d, want STRONGLY_COMMITTED(%d)", r.InstanceSpace[0][0].Status, STRONGLY_COMMITTED)
+	}
+}
+
+// TestHandlePreAcceptOK_SlowPath verifies slow path with N=5.
+func TestHandlePreAcceptOK_SlowPath(t *testing.T) {
+	r := newTestReplica(5)
+
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	setupStrongInstance(r, 0, 0, 0, cmds, 5, []int32{-1, -1, -1, -1, -1})
+	r.InstanceSpace[0][0].lb.allEqual = false // prevent fast path
+
+	// N=5: need N/2 = 2 for slow path
+	func() {
+		defer func() { recover() }()
+		r.handlePreAcceptOK(&PreAcceptOK{Instance: 0})
+	}()
+	// Only 1 OK — not enough for slow path either
+	if r.InstanceSpace[0][0].Status != PREACCEPTED {
+		t.Errorf("Status=%d, want PREACCEPTED(%d) (not enough OKs)", r.InstanceSpace[0][0].Status, PREACCEPTED)
+	}
+
+	// Second OK → slow path (N/2 = 2 reached)
+	func() {
+		defer func() { recover() }()
+		r.handlePreAcceptOK(&PreAcceptOK{Instance: 0})
+	}()
+	if r.InstanceSpace[0][0].Status != ACCEPTED {
+		t.Errorf("Status=%d, want ACCEPTED(%d) (slow path)", r.InstanceSpace[0][0].Status, ACCEPTED)
+	}
+}
+
+// TestHandlePreAcceptReply_CommittedDepsUpdated verifies committedDeps merging.
+func TestHandlePreAcceptReply_CommittedDepsUpdated(t *testing.T) {
+	r := newTestReplica(3)
+
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	setupStrongInstance(r, 0, 0, 0, cmds, 5, []int32{-1, -1, -1})
+	r.InstanceSpace[0][0].lb.allEqual = false // prevent fast path
+
+	reply := &PreAcceptReply{
+		Replica: 0, Instance: 0, OK: TRUE, Ballot: 0,
+		Seq: 5, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+		CommittedDeps: []int32{3, 5, 2},
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handlePreAcceptReply(reply)
+	}()
+
+	inst := r.InstanceSpace[0][0]
+	if inst.lb.committedDeps[0] != 3 {
+		t.Errorf("committedDeps[0]=%d, want 3", inst.lb.committedDeps[0])
+	}
+	if inst.lb.committedDeps[1] != 5 {
+		t.Errorf("committedDeps[1]=%d, want 5", inst.lb.committedDeps[1])
+	}
+}
+
+// TestBcastPrepare verifies bcastPrepare doesn't panic on test replica.
+func TestBcastPrepare(t *testing.T) {
+	r := newTestReplica(3)
+	// Should not panic — recover catches
+	r.bcastPrepare(0, 5, 0x10)
 }

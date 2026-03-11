@@ -6717,7 +6717,13 @@ case slot := <-r.deliverChan:
     - bcastStrongCommit (CommitShort for first half, full Commit for rest)
     - startStrongCommit (attribute computation, instance creation, conflict update, checkpoint handling)
     - 11 tests: broadcast safety, instance creation, attribute computation, conflict tracking, ballot storage, deps/committedDeps initialization
-  - [ ] 99.3f-iii: handlePreAccept + handlePreAcceptReply + handlePreAcceptOK (~395 LOC)
+  - [x] 99.3f-iii: handlePreAccept + handlePreAcceptReply + handlePreAcceptOK (~395 LOC) ✓
+    - Ballot helpers: makeUniqueBallot, makeBallotLargerThan, isInitialBallot
+    - bcastPrepare (for nack recovery path)
+    - handlePreAccept: follower side — attribute computation, ballot check, instance creation/update, checkpoint detection, fast/slow reply
+    - handlePreAcceptReply: leader side — nack handling (fixed: check OK before ballot equality), attribute merging, fast path commit (STRONGLY_COMMITTED + client reply + bcast), slow path (ACCEPTED + bcastAccept)
+    - handlePreAcceptOK: leader fast path — count OKs, committedDeps from originalDeps, fast/slow path decision
+    - 22 tests: ballot helpers, PreAccept new/executed/committed/ballot-reject/changed/checkpoint, PreAcceptReply delayed/wrong-ballot/nack/count/slow/fast/merge/committedDeps, PreAcceptOK delayed/non-initial/fast/slow, bcastPrepare
   - [ ] 99.3f-iv: handleAccept + handleAcceptReply + handleCommit + handleCommitShort (~408 LOC)
 - [ ] 99.3g: 移植 recovery path（Prepare/TryPreAccept）
 - [ ] 99.3h: `go build ./epaxos-ho/` 通过
