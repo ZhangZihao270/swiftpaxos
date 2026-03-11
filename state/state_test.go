@@ -244,6 +244,92 @@ func TestMarshalUnmarshalCommand(t *testing.T) {
 	if decoded.Op != original.Op || decoded.K != original.K || !bytes.Equal(decoded.V, original.V) {
 		t.Errorf("Round-trip failed: got %v, want %v", decoded, original)
 	}
+	if decoded.CL != NONE || decoded.Sid != 0 {
+		t.Errorf("Default CL/Sid: got CL=%d Sid=%d, want CL=0 Sid=0", decoded.CL, decoded.Sid)
+	}
+}
+
+// TestMarshalUnmarshalCommandWithCLSid tests serialization with CL and Sid fields
+func TestMarshalUnmarshalCommandWithCLSid(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  Command
+	}{
+		{"STRONG PUT", Command{Op: PUT, K: Key(100), V: Value([]byte("val")), CL: STRONG, Sid: 42}},
+		{"CAUSAL GET", Command{Op: GET, K: Key(200), V: NIL(), CL: CAUSAL, Sid: 7}},
+		{"NONE legacy", Command{Op: GET, K: Key(300), V: NIL(), CL: NONE, Sid: 0}},
+		{"max Sid", Command{Op: PUT, K: Key(1), V: Value([]byte("x")), CL: STRONG, Sid: 2147483647}},
+		{"negative Sid", Command{Op: PUT, K: Key(1), V: Value([]byte("x")), CL: CAUSAL, Sid: -1}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			tt.cmd.Marshal(&buf)
+
+			var decoded Command
+			if err := decoded.Unmarshal(&buf); err != nil {
+				t.Fatalf("Unmarshal error: %v", err)
+			}
+
+			if decoded.Op != tt.cmd.Op {
+				t.Errorf("Op: got %d, want %d", decoded.Op, tt.cmd.Op)
+			}
+			if decoded.K != tt.cmd.K {
+				t.Errorf("K: got %d, want %d", decoded.K, tt.cmd.K)
+			}
+			if !bytes.Equal(decoded.V, tt.cmd.V) {
+				t.Errorf("V: got %v, want %v", decoded.V, tt.cmd.V)
+			}
+			if decoded.CL != tt.cmd.CL {
+				t.Errorf("CL: got %d, want %d", decoded.CL, tt.cmd.CL)
+			}
+			if decoded.Sid != tt.cmd.Sid {
+				t.Errorf("Sid: got %d, want %d", decoded.Sid, tt.cmd.Sid)
+			}
+		})
+	}
+}
+
+// TestConflictIgnoresCLSid verifies CL/Sid don't affect conflict detection
+func TestConflictIgnoresCLSid(t *testing.T) {
+	// Two PUTs to same key should conflict regardless of CL/Sid
+	a := &Command{Op: PUT, K: Key(10), V: Value([]byte("a")), CL: STRONG, Sid: 1}
+	b := &Command{Op: PUT, K: Key(10), V: Value([]byte("b")), CL: CAUSAL, Sid: 2}
+	if !Conflict(a, b) {
+		t.Error("PUTs to same key should conflict even with different CL/Sid")
+	}
+
+	// Two GETs to same key should NOT conflict regardless of CL/Sid
+	g1 := &Command{Op: GET, K: Key(10), V: NIL(), CL: STRONG, Sid: 1}
+	g2 := &Command{Op: GET, K: Key(10), V: NIL(), CL: CAUSAL, Sid: 2}
+	if Conflict(g1, g2) {
+		t.Error("GETs should not conflict even with different CL/Sid")
+	}
+}
+
+// TestConsistencyLevelConstants verifies CAUSAL and STRONG constant values
+func TestConsistencyLevelConstants(t *testing.T) {
+	if CAUSAL <= SCAN {
+		t.Errorf("CAUSAL (%d) should be > SCAN (%d)", CAUSAL, SCAN)
+	}
+	if STRONG <= CAUSAL {
+		t.Errorf("STRONG (%d) should be > CAUSAL (%d)", STRONG, CAUSAL)
+	}
+	if NONE != 0 {
+		t.Errorf("NONE should be 0, got %d", NONE)
+	}
+}
+
+// TestNOOPWithCLSid verifies NOOP has zero CL/Sid
+func TestNOOPWithCLSid(t *testing.T) {
+	noop := NOOP()
+	if noop[0].CL != NONE {
+		t.Errorf("NOOP CL = %d, want NONE(%d)", noop[0].CL, NONE)
+	}
+	if noop[0].Sid != 0 {
+		t.Errorf("NOOP Sid = %d, want 0", noop[0].Sid)
+	}
 }
 
 // TestConflictBasic tests basic conflict detection

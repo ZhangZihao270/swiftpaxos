@@ -17,6 +17,8 @@ const (
 	PUT
 	GET
 	SCAN
+	CAUSAL // Consistency level: causal ordering only
+	STRONG // Consistency level: strong (linearizable) ordering
 )
 
 type Value []byte
@@ -26,15 +28,17 @@ func NIL() Value { return Value([]byte{}) }
 type Key int64
 
 type Command struct {
-	Op Operation
-	K  Key
-	V  Value
+	Op  Operation
+	K   Key
+	V   Value
+	CL  Operation // Consistency level (CAUSAL or STRONG); 0 (NONE) for legacy protocols
+	Sid int32     // Session ID for causal ordering; 0 for legacy protocols
 }
 
 type Id int64
 type Phase int8
 
-func NOOP() []Command { return []Command{{NONE, 0, NIL()}} }
+func NOOP() []Command { return []Command{{Op: NONE, K: 0, V: NIL()}} }
 
 type State struct {
 	mutex *sync.Mutex
@@ -203,25 +207,30 @@ func (t *Command) Marshal(w io.Writer) {
 	t.Op.Marshal(w)
 	t.K.Marshal(w)
 	t.V.Marshal(w)
+	t.CL.Marshal(w)
+	var b [4]byte
+	binary.LittleEndian.PutUint32(b[:], uint32(t.Sid))
+	w.Write(b[:])
 }
 
 func (t *Command) Unmarshal(r io.Reader) error {
-
-	err := t.Op.Unmarshal(r)
-	if err != nil {
+	if err := t.Op.Unmarshal(r); err != nil {
 		return err
 	}
-
-	err = t.K.Unmarshal(r)
-	if err != nil {
+	if err := t.K.Unmarshal(r); err != nil {
 		return err
 	}
-
-	err = t.V.Unmarshal(r)
-	if err != nil {
+	if err := t.V.Unmarshal(r); err != nil {
 		return err
 	}
-
+	if err := t.CL.Unmarshal(r); err != nil {
+		return err
+	}
+	var b [4]byte
+	if _, err := io.ReadFull(r, b[:]); err != nil {
+		return err
+	}
+	t.Sid = int32(binary.LittleEndian.Uint32(b[:]))
 	return nil
 }
 

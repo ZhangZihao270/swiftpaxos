@@ -6612,12 +6612,13 @@ case slot := <-r.deliverChan:
 
 **Goal**: 在 SwiftPaxos 的 `state.Command` 中加入 Orca 需要的 `CL` 和 `Sid` 字段。
 
-- [ ] 99.1a: 在 `state/state.go` 的 `Command` struct 加 `CL Operation` 和 `Sid int32` 字段
+- [x] 99.1a: 在 `state/state.go` 的 `Command` struct 加 `CL Operation` 和 `Sid int32` 字段 [26:03:11]
   - 默认值 CL=0 (NONE) 不影响现有协议
   - 更新 `Command` 的 `Marshal/Unmarshal` 序列化（追加 CL + Sid 到末尾）
-- [ ] 99.1b: 在 `state/state.go` 加 `CAUSAL` 和 `STRONG` 常量（如果不存在）
-- [ ] 99.1c: 确保 `Conflict()` 函数行为不变（CL/Sid 不参与冲突判断）
-- [ ] 99.1d: 跑 `go test ./...` 确认所有现有协议测试通过
+- [x] 99.1b: 在 `state/state.go` 加 `CAUSAL` 和 `STRONG` 常量 [26:03:11]
+  - CAUSAL=4, STRONG=5 (after SCAN=3)
+- [x] 99.1c: 确保 `Conflict()` 函数行为不变 — added TestConflictIgnoresCLSid [26:03:11]
+- [x] 99.1d: `go test -count=1 ./...` 全部通过（含 raft 33s test）[26:03:11]
 
 **注意**: Command 序列化格式变了，新旧 binary 不兼容。这 OK 因为我们每次重新部署。
 
