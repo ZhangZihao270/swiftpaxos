@@ -6361,10 +6361,54 @@ case slot := <-r.deliverChan:
 
 **Tasks**:
 - [x] 96a: 创建 eval-phase96.sh 脚本（基于 eval-exp3.2-5r-dist.sh，适配 5r/5m/3c + writes=50）[26:03:11]
-- [ ] 96b: 跑 2 protocols × 5 weak ratios = 10 组实验
-  - Results: `results/eval-5r5m3c-phase96-YYYYMMDD/exp3.2/`
-- [ ] 96c: 对比 Phase 65（3r distributed）结果，分析 5r 下 T property 是否仍成立
-- [ ] 96d: 结果表格和分析写入 todo.md
+- [x] 96b: 跑 2 protocols × 5 weak ratios = 10 组实验（10/10 succeeded）[26:03:11]
+  - Results: `results/eval-5r5m3c-phase96-20260311/summary-exp3.2.csv`
+- [x] 96c: 对比 Phase 65（3r distributed, writes=5）结果 [26:03:11]
+- [x] 96d: 结果表格和分析 [26:03:11]
+
+**Phase 96 Results — Exp 3.2: T Property Verification (5r/5m/3c, writes=50, t=8)**:
+
+| Protocol | weakRatio | Throughput | s_p50    | s_p99    | w_p50    | w_p99     |
+|----------|-----------|------------|----------|----------|----------|-----------|
+| CURP-HT  | 0         | 6,938      | 51.25ms  | 60.46ms  | —        | —         |
+| CURP-HT  | 25        | 6,908      | 51.28ms  | 52.99ms  | 83.60ms  | 103.92ms  |
+| CURP-HT  | 50        | 7,375      | 51.26ms  | 52.72ms  | 84.30ms  | 103.99ms  |
+| CURP-HT  | 75        | 7,999      | 51.13ms  | 52.71ms  | 83.05ms  | 104.37ms  |
+| CURP-HT  | 100       | 8,816      | 51.96ms  | 53.05ms  | 80.78ms  | 104.93ms  |
+| CURP-HO  | 0         | 6,956      | 51.30ms  | 54.22ms  | —        | —         |
+| CURP-HO  | 25        | 7,256      | 68.08ms  | 78.65ms  | 0.28ms   | 3.49ms    |
+| CURP-HO  | 50        | 10,766     | 67.85ms  | 78.47ms  | 0.26ms   | 4.97ms    |
+| CURP-HO  | 75        | 21,391     | 67.49ms  | 78.07ms  | 0.19ms   | 4.98ms    |
+| CURP-HO  | 100       | 96,596     | 69.72ms  | 83.19ms  | 2.87ms   | 44.32ms   |
+
+**Analysis**:
+
+1. **CURP-HT T property: SATISFIED** — s_p50 stays flat at 51.1-51.9ms across all weak ratios.
+   The strong op fast path (1 RTT) is completely unaffected by weak ratio changes.
+   This confirms the T property holds on 5r/5m/3c with 50% writes, matching Phase 65 (3r, writes=5).
+
+2. **CURP-HO T property: PARTIALLY VIOLATED** — s_p50 jumps from 51.3ms (w=0) to ~68ms (w≥25).
+   Once any weak ops are introduced, strong ops incur ~17ms additional latency.
+   However, s_p50 is stable within the w=25-100 range (68.08→69.72ms), so the violation is a
+   one-time step, not a progressive degradation.
+
+3. **Phase 65 vs Phase 96 comparison (CURP-HO)**:
+   - Phase 65 (3r, writes=5): s_p50 = ~52ms flat across all weak ratios — T satisfied
+   - Phase 96 (5r, writes=50): s_p50 = 51ms (w=0) → 68ms (w≥25) — step function
+   - The difference is likely due to **50% writes increasing accept/commit overhead**:
+     with writes=5 (95% reads), strong ops rarely contend with write commits;
+     with writes=50, the accept path carries real write payloads that increase processing time.
+   - The 68ms plateau is still well under 2-RTT (100ms), confirming HO's fast path works.
+
+4. **Throughput scaling with weak ratio**:
+   - CURP-HT: modest increase (6.9K→8.8K, +27%) — weak ops offloaded but still go through leader
+   - CURP-HO: dramatic increase (7.0K→96.6K, +13.8x) — weak ops bypass leader entirely
+   - CURP-HO's throughput advantage over HT grows with weak ratio: 1.0x (w=0) → 11.0x (w=100)
+
+5. **Weak latency (writes=50)**:
+   - CURP-HT w_p50 ≈ 80-84ms — weak writes must go through leader (1.5-2 RTT)
+   - CURP-HO w_p50 ≈ 0.2-2.9ms — weak ops speculative, no leader roundtrip
+   - At w=100, HO w_p50 rises to 2.87ms (queuing under 100% weak load)
 
 ---
 
