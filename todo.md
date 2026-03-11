@@ -6705,7 +6705,7 @@ case slot := <-r.deliverChan:
   - Full handleCausalCommit: new/existing instance handling, idempotency, checkpoint detection
   - Helper functions: updateCommitted, clearHashtables, updateCausalConflicts (unified leader/follower), updateCausalAttributes (session + read-from + seq), bcastCausalCommit
   - 12 new tests: updateCommitted (gap/discard), clearHashtables, updateCausalConflicts (leader/follower), updateCausalAttributes (session/read-from), handleCausalCommit (new/existing/idempotent/checkpoint)
-- [ ] 99.3f: 移植 startStrongCommit + strong dependency computation + PreAccept/Accept/Commit phases (~1348 LOC in Orca)
+- [x] 99.3f: 移植 startStrongCommit + strong dependency computation + PreAccept/Accept/Commit phases (~1348 LOC in Orca)
   - [x] 99.3f-i: Reply helpers + attribute computation (~190 LOC) ✓
     - replyPrepare/PreAccept/Accept/TryPreAccept (4 helpers)
     - updateStrongConflicts, updateStrongSessionConflict
@@ -6748,13 +6748,13 @@ case slot := <-r.deliverChan:
 
 **Goal**: 移植执行逻辑。
 
-- [ ] 99.4a: 移植 `executeCommands()` 主循环
-- [ ] 99.4b: 移植 `executeCausalCommand()` — causal 命令执行
+- [x] 99.4a: 移植 `executeCommands()` 主循环
+- [x] 99.4b: 移植 `executeCausalCommand()` — causal 命令执行
   - 使用 `state.Command.Execute(r.State)` 执行命令
-  - 执行后通过 `SendClientMsg` 回复客户端
-- [ ] 99.4c: 移植 `findSCC()` — Tarjan SCC 算法 + strong 命令执行
+  - 执行后通过 `ReplyProposeTS` 回复客户端（Dreply模式）
+- [x] 99.4c: 移植 `findSCC()` — Tarjan SCC 算法 + strong 命令执行
   - 依赖图遍历、cycle 检测、按 Seq 排序执行
-- [ ] 99.4d: 移植 `latestWriteSeq()` — last-write-wins 语义
+- [x] 99.4d: 移植 `latestWriteSeq()` — last-write-wins 语义
 
 ---
 
@@ -6800,8 +6800,6 @@ case slot := <-r.deliverChan:
 - [ ] 99.7b: 跑 Exp 3.1（throughput sweep）：t=1,2,4,8,16,32,64,96
   - weakRatio=50, writes=5
   - 对比 CURP-HT/HO 结果
-- [ ] 99.7c: 跑 Exp 3.2（T property）：t=8, sweep weakRatio=0/25/50/75/100
-  - 验证 strong P50 是否随 weakRatio 平稳
 - [ ] 99.7d: 结果表格和分析写入 todo.md
 
 ---

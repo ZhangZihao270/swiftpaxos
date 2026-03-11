@@ -2229,6 +2229,4 @@ func (r *Replica) findPreAcceptConflicts(cmds []state.Command, replicaId int32, 
 	return false, -1, -1
 }
 
-func (r *Replica) executeCommands() {
-	// TODO: Phase 99.4 — execution engine with Tarjan SCC
-}
+// executeCommands is implemented in exec.go

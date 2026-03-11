@@ -206,30 +206,8 @@ func TestClockChannelVarsExist(t *testing.T) {
 	var _ chan bool = slowClockChan
 }
 
-// TestStubHandlersDoNotPanic verifies that all stub handler methods
-// can be called without panicking (they are no-ops for now).
-func TestStubHandlersDoNotPanic(t *testing.T) {
-	// We can't call New() without a full replica, but we can create
-	// a minimal Replica with just the fields the stubs need.
-	r := &Replica{}
-
-	// handlePrepare tested separately — it now requires initialized InstanceSpace
-	// handlePreAccept tested separately — it now requires initialized InstanceSpace and conflict maps
-	// handleAccept tested separately — it now requires initialized InstanceSpace
-	// handleCommit tested separately — it now requires initialized InstanceSpace
-	// handleCommitShort tested separately — it now requires initialized InstanceSpace
-	// handleCausalCommit tested separately — it now requires initialized InstanceSpace
-	// handlePrepareReply tested separately — it now requires initialized InstanceSpace
-	// handlePreAcceptReply tested separately — it now requires initialized InstanceSpace
-	// handlePreAcceptOK tested separately — it now requires initialized InstanceSpace
-	// handleAcceptReply tested separately — it now requires initialized InstanceSpace
-	// handleTryPreAccept tested separately — it now requires initialized InstanceSpace
-	// handleTryPreAcceptReply tested separately — it now requires initialized InstanceSpace
-	// startRecoveryForInstance tested separately — it now requires initialized InstanceSpace
-	t.Run("executeCommands", func(t *testing.T) {
-		r.executeCommands()
-	})
-}
+// All handler methods are tested separately with properly initialized replicas.
+// See individual Test* functions for each handler.
 
 // TestCausalCommitChannelPolling verifies that the non-blocking causal
 // commit channel polling in run() processes messages correctly.
@@ -279,6 +257,7 @@ func newTestReplica(n int) *Replica {
 			PreferredPeerOrder: make([]int32, n),
 			Stats:              &defs.Stats{M: make(map[string]int)},
 			ProposeChan:        make(chan *defs.GPropose, defs.CHAN_BUFFER_SIZE),
+			State:              state.InitState(),
 		},
 		InstanceSpace:            make([][]*Instance, n),
 		crtInstance:              make([]int32, n),
