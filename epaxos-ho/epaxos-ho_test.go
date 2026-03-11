@@ -852,3 +852,469 @@ func TestMessageChannelTypeAssertions(t *testing.T) {
 		})
 	}
 }
+
+// --- Phase 99.3f-i: Strong commit helper tests ---
+
+// TestUpdateStrongConflicts verifies per-key conflict and maxSeqPerKey updates.
+func TestUpdateStrongConflicts(t *testing.T) {
+	r := newTestReplica(3)
+
+	cmds := []state.Command{
+		{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG, Sid: 1},
+		{Op: state.PUT, K: 20, V: state.NIL(), CL: state.STRONG, Sid: 1},
+	}
+
+	r.updateStrongConflicts(cmds, 0, 5, 42)
+
+	// Check per-key conflict map
+	r.conflictMutex.RLock()
+	if r.conflicts[0][10] != 5 {
+		t.Errorf("conflicts[0][10]=%d, want 5", r.conflicts[0][10])
+	}
+	if r.conflicts[0][20] != 5 {
+		t.Errorf("conflicts[0][20]=%d, want 5", r.conflicts[0][20])
+	}
+	r.conflictMutex.RUnlock()
+
+	// Check maxSeqPerKey
+	r.maxSeqPerKeyMu.RLock()
+	if r.maxSeqPerKey[10] != 42 {
+		t.Errorf("maxSeqPerKey[10]=%d, want 42", r.maxSeqPerKey[10])
+	}
+	if r.maxSeqPerKey[20] != 42 {
+		t.Errorf("maxSeqPerKey[20]=%d, want 42", r.maxSeqPerKey[20])
+	}
+	r.maxSeqPerKeyMu.RUnlock()
+
+	// Higher instance and seq should overwrite
+	r.updateStrongConflicts(cmds, 0, 10, 100)
+	r.conflictMutex.RLock()
+	if r.conflicts[0][10] != 10 {
+		t.Errorf("conflicts[0][10]=%d after update, want 10", r.conflicts[0][10])
+	}
+	r.conflictMutex.RUnlock()
+	r.maxSeqPerKeyMu.RLock()
+	if r.maxSeqPerKey[10] != 100 {
+		t.Errorf("maxSeqPerKey[10]=%d after update, want 100", r.maxSeqPerKey[10])
+	}
+	r.maxSeqPerKeyMu.RUnlock()
+
+	// Lower instance should NOT overwrite
+	r.updateStrongConflicts(cmds, 0, 3, 50)
+	r.conflictMutex.RLock()
+	if r.conflicts[0][10] != 10 {
+		t.Errorf("conflicts[0][10]=%d, should not decrease to 3", r.conflicts[0][10])
+	}
+	r.conflictMutex.RUnlock()
+	r.maxSeqPerKeyMu.RLock()
+	if r.maxSeqPerKey[10] != 100 {
+		t.Errorf("maxSeqPerKey[10]=%d, should not decrease to 50", r.maxSeqPerKey[10])
+	}
+	r.maxSeqPerKeyMu.RUnlock()
+}
+
+// TestUpdateStrongConflictsDoesNotUpdateSession verifies that updateStrongConflicts
+// does NOT touch sessionConflicts (unlike causal conflicts).
+func TestUpdateStrongConflictsDoesNotUpdateSession(t *testing.T) {
+	r := newTestReplica(3)
+
+	cmds := []state.Command{
+		{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG, Sid: 42},
+	}
+
+	r.updateStrongConflicts(cmds, 0, 5, 10)
+
+	r.sessionConflictsMu.RLock()
+	if _, present := r.sessionConflicts[0][42]; present {
+		t.Error("updateStrongConflicts should not update sessionConflicts")
+	}
+	r.sessionConflictsMu.RUnlock()
+}
+
+// TestUpdateStrongSessionConflict verifies session-based conflict tracking.
+func TestUpdateStrongSessionConflict(t *testing.T) {
+	r := newTestReplica(3)
+
+	cmds := []state.Command{
+		{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG, Sid: 42},
+		{Op: state.GET, K: 20, V: state.NIL(), CL: state.STRONG, Sid: 7},
+	}
+
+	r.updateStrongSessionConflict(cmds, 1, 5)
+
+	r.sessionConflictsMu.RLock()
+	if r.sessionConflicts[1][42] != 5 {
+		t.Errorf("sessionConflicts[1][42]=%d, want 5", r.sessionConflicts[1][42])
+	}
+	if r.sessionConflicts[1][7] != 5 {
+		t.Errorf("sessionConflicts[1][7]=%d, want 5", r.sessionConflicts[1][7])
+	}
+	r.sessionConflictsMu.RUnlock()
+
+	// Higher instance overwrites
+	r.updateStrongSessionConflict(cmds, 1, 10)
+	r.sessionConflictsMu.RLock()
+	if r.sessionConflicts[1][42] != 10 {
+		t.Errorf("sessionConflicts[1][42]=%d, want 10", r.sessionConflicts[1][42])
+	}
+	r.sessionConflictsMu.RUnlock()
+
+	// Lower instance does NOT overwrite
+	r.updateStrongSessionConflict(cmds, 1, 3)
+	r.sessionConflictsMu.RLock()
+	if r.sessionConflicts[1][42] != 10 {
+		t.Errorf("sessionConflicts[1][42]=%d, should not decrease to 3", r.sessionConflicts[1][42])
+	}
+	r.sessionConflictsMu.RUnlock()
+}
+
+// TestUpdateStrongAttributes1_NoConflicts verifies behavior with no existing conflicts.
+func TestUpdateStrongAttributes1_NoConflicts(t *testing.T) {
+	r := newTestReplica(3)
+
+	cmds := []state.Command{
+		{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG, Sid: 1},
+	}
+	deps := []int32{-1, -1, -1}
+	cl := []int32{0, 0, 0}
+
+	seq, newDeps, newCL, changed := r.updateStrongAttributes1(cmds, 0, deps, cl, 0, 0)
+
+	if changed {
+		t.Error("expected no change with empty conflict maps")
+	}
+	if seq != 0 {
+		t.Errorf("seq=%d, want 0", seq)
+	}
+	for i, d := range newDeps {
+		if d != -1 {
+			t.Errorf("deps[%d]=%d, want -1", i, d)
+		}
+	}
+	for i, c := range newCL {
+		if c != 0 {
+			t.Errorf("cl[%d]=%d, want 0", i, c)
+		}
+	}
+}
+
+// TestUpdateStrongAttributes1_KeyConflict verifies dep computation from key conflicts.
+func TestUpdateStrongAttributes1_KeyConflict(t *testing.T) {
+	r := newTestReplica(3)
+
+	// Pre-populate conflict: replica 1, key 10 → instance 5
+	r.conflictMutex.Lock()
+	r.conflicts[1][10] = 5
+	r.conflictMutex.Unlock()
+
+	// Pre-populate instance space so seq/CL can be read
+	r.InstanceSpace[1][5] = &Instance{
+		Cmds: []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}},
+		Seq:  20,
+	}
+
+	cmds := []state.Command{
+		{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG, Sid: 1},
+	}
+	deps := []int32{-1, -1, -1}
+	cl := []int32{0, 0, 0}
+
+	seq, newDeps, newCL, changed := r.updateStrongAttributes1(cmds, 0, deps, cl, 0, 0)
+
+	if !changed {
+		t.Error("expected changed=true with key conflict")
+	}
+	if newDeps[1] != 5 {
+		t.Errorf("deps[1]=%d, want 5", newDeps[1])
+	}
+	if seq != 21 {
+		t.Errorf("seq=%d, want 21 (conflict instance seq=20 + 1)", seq)
+	}
+	if newCL[1] != int32(state.STRONG) {
+		t.Errorf("cl[1]=%d, want STRONG(%d)", newCL[1], state.STRONG)
+	}
+}
+
+// TestUpdateStrongAttributes1_SessionConflict verifies session-based dep on own replica.
+func TestUpdateStrongAttributes1_SessionConflict(t *testing.T) {
+	r := newTestReplica(3)
+
+	// Pre-populate session conflict: replica 0, session 42 → instance 3
+	r.sessionConflictsMu.Lock()
+	r.sessionConflicts[0][42] = 3
+	r.sessionConflictsMu.Unlock()
+
+	r.InstanceSpace[0][3] = &Instance{
+		Cmds: []state.Command{{Op: state.PUT, K: 99, V: state.NIL(), CL: state.CAUSAL}},
+		Seq:  15,
+	}
+
+	cmds := []state.Command{
+		{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG, Sid: 42},
+	}
+	deps := []int32{-1, -1, -1}
+	cl := []int32{0, 0, 0}
+
+	// replicaId=0, so session conflict should apply to deps[0]
+	seq, newDeps, newCL, changed := r.updateStrongAttributes1(cmds, 0, deps, cl, 0, 0)
+
+	if !changed {
+		t.Error("expected changed=true with session conflict")
+	}
+	if newDeps[0] != 3 {
+		t.Errorf("deps[0]=%d, want 3 from session conflict", newDeps[0])
+	}
+	if seq != 16 {
+		t.Errorf("seq=%d, want 16 (session conflict instance seq=15 + 1)", seq)
+	}
+	_ = newCL
+}
+
+// TestUpdateStrongAttributes1_MaxSeqPerKey verifies seq bump from maxSeqPerKey.
+func TestUpdateStrongAttributes1_MaxSeqPerKey(t *testing.T) {
+	r := newTestReplica(3)
+
+	r.maxSeqPerKeyMu.Lock()
+	r.maxSeqPerKey[10] = 50
+	r.maxSeqPerKeyMu.Unlock()
+
+	cmds := []state.Command{
+		{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG, Sid: 1},
+	}
+	deps := []int32{-1, -1, -1}
+	cl := []int32{0, 0, 0}
+
+	seq, _, _, changed := r.updateStrongAttributes1(cmds, 0, deps, cl, 0, 0)
+
+	if !changed {
+		t.Error("expected changed=true from maxSeqPerKey")
+	}
+	if seq != 51 {
+		t.Errorf("seq=%d, want 51 (maxSeqPerKey[10]=50 + 1)", seq)
+	}
+}
+
+// TestUpdateStrongAttributes2_NoSession verifies Attributes2 does NOT use session conflicts.
+func TestUpdateStrongAttributes2_NoSession(t *testing.T) {
+	r := newTestReplica(3)
+
+	// Add session conflict — Attributes2 should ignore it
+	r.sessionConflictsMu.Lock()
+	r.sessionConflicts[0][42] = 10
+	r.sessionConflictsMu.Unlock()
+	r.InstanceSpace[0][10] = &Instance{Seq: 99}
+
+	cmds := []state.Command{
+		{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG, Sid: 42},
+	}
+	deps := []int32{-1, -1, -1}
+	cl := []int32{0, 0, 0}
+
+	seq, newDeps, _, changed := r.updateStrongAttributes2(cmds, 0, deps, cl, 0, 0)
+
+	// Should NOT pick up session conflict
+	if newDeps[0] != -1 {
+		t.Errorf("deps[0]=%d, want -1 (Attributes2 should skip session conflicts)", newDeps[0])
+	}
+	if seq != 0 && !changed {
+		// seq unchanged, no conflict
+	}
+	_ = seq
+}
+
+// TestUpdateStrongAttributes2_KeyConflict verifies Attributes2 picks up key conflicts.
+func TestUpdateStrongAttributes2_KeyConflict(t *testing.T) {
+	r := newTestReplica(3)
+
+	r.conflictMutex.Lock()
+	r.conflicts[2][10] = 7
+	r.conflictMutex.Unlock()
+	r.InstanceSpace[2][7] = &Instance{
+		Cmds: []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}},
+		Seq:  30,
+	}
+
+	cmds := []state.Command{
+		{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG, Sid: 1},
+	}
+	deps := []int32{-1, -1, -1}
+	cl := []int32{0, 0, 0}
+
+	seq, newDeps, _, changed := r.updateStrongAttributes2(cmds, 0, deps, cl, 0, 0)
+
+	if !changed {
+		t.Error("expected changed=true from key conflict")
+	}
+	if newDeps[2] != 7 {
+		t.Errorf("deps[2]=%d, want 7", newDeps[2])
+	}
+	if seq != 31 {
+		t.Errorf("seq=%d, want 31", seq)
+	}
+}
+
+// TestUpdateStrongAttributes1_SkipsOwnReplicaForNonLeader verifies skip logic:
+// when r.Id != replicaId, skip q == replicaId in key conflict loop.
+func TestUpdateStrongAttributes1_SkipsOwnReplicaForNonLeader(t *testing.T) {
+	r := newTestReplica(3)
+
+	// r.Id=0, replicaId=1. Conflict on replica 1 should be skipped.
+	r.conflictMutex.Lock()
+	r.conflicts[1][10] = 5
+	r.conflictMutex.Unlock()
+	r.InstanceSpace[1][5] = &Instance{Seq: 20}
+
+	cmds := []state.Command{
+		{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG, Sid: 1},
+	}
+	deps := []int32{-1, -1, -1}
+	cl := []int32{0, 0, 0}
+
+	_, newDeps, _, _ := r.updateStrongAttributes1(cmds, 0, deps, cl, 1, 0)
+
+	// q=1 (==replicaId=1) should be skipped since r.Id(0) != replicaId(1)
+	if newDeps[1] != -1 {
+		t.Errorf("deps[1]=%d, want -1 (should skip replicaId's own conflicts)", newDeps[1])
+	}
+}
+
+// TestMergeStrongAttributes_Equal verifies merge of identical attributes.
+func TestMergeStrongAttributes_Equal(t *testing.T) {
+	r := newTestReplica(3)
+
+	deps1 := []int32{5, 3, 7}
+	deps2 := []int32{5, 3, 7}
+	cl1 := []int32{1, 2, 3}
+	cl2 := []int32{1, 2, 3}
+
+	seq, deps, cl, equal := r.mergeStrongAttributes(10, deps1, 10, deps2, cl1, cl2)
+
+	if !equal {
+		t.Error("expected equal=true for identical attributes")
+	}
+	if seq != 10 {
+		t.Errorf("seq=%d, want 10", seq)
+	}
+	// deps should be unchanged
+	for i, d := range deps {
+		if d != deps2[i] {
+			t.Errorf("deps[%d]=%d, want %d", i, d, deps2[i])
+		}
+	}
+	_ = cl
+}
+
+// TestMergeStrongAttributes_DifferentSeq verifies merge picks max seq.
+func TestMergeStrongAttributes_DifferentSeq(t *testing.T) {
+	r := newTestReplica(3)
+
+	deps1 := []int32{5, 3, 7}
+	deps2 := []int32{5, 3, 7}
+	cl1 := []int32{1, 2, 3}
+	cl2 := []int32{1, 2, 3}
+
+	seq, _, _, equal := r.mergeStrongAttributes(10, deps1, 20, deps2, cl1, cl2)
+
+	if equal {
+		t.Error("expected equal=false for different seq")
+	}
+	if seq != 20 {
+		t.Errorf("seq=%d, want 20 (max of 10, 20)", seq)
+	}
+}
+
+// TestMergeStrongAttributes_DifferentDeps verifies merge picks max deps element-wise.
+func TestMergeStrongAttributes_DifferentDeps(t *testing.T) {
+	r := newTestReplica(3)
+
+	// r.Id=0, so index 0 is skipped in merge
+	deps1 := []int32{5, 3, 7}
+	deps2 := []int32{5, 8, 2}
+	cl1 := []int32{1, 2, 3}
+	cl2 := []int32{1, 9, 6}
+
+	seq, deps, cl, equal := r.mergeStrongAttributes(10, deps1, 10, deps2, cl1, cl2)
+
+	if equal {
+		t.Error("expected equal=false for different deps")
+	}
+	if seq != 10 {
+		t.Errorf("seq=%d, want 10", seq)
+	}
+	// Index 0 is skipped (r.Id==0), so deps[0] stays as deps1[0]
+	if deps[0] != 5 {
+		t.Errorf("deps[0]=%d, want 5 (r.Id skip)", deps[0])
+	}
+	// Index 1: deps2[1]=8 > deps1[1]=3, so pick deps2
+	if deps[1] != 8 {
+		t.Errorf("deps[1]=%d, want 8 (max of 3, 8)", deps[1])
+	}
+	if cl[1] != 9 {
+		t.Errorf("cl[1]=%d, want 9 (from deps2 winner)", cl[1])
+	}
+	// Index 2: deps1[2]=7 > deps2[2]=2, so keep deps1
+	if deps[2] != 7 {
+		t.Errorf("deps[2]=%d, want 7 (max of 7, 2)", deps[2])
+	}
+	if cl[2] != 3 {
+		t.Errorf("cl[2]=%d, want 3 (from deps1 winner)", cl[2])
+	}
+}
+
+// TestEqualDeps verifies element-wise equality check.
+func TestEqualDeps(t *testing.T) {
+	if !equalDeps([]int32{1, 2, 3}, []int32{1, 2, 3}) {
+		t.Error("identical deps should be equal")
+	}
+	if equalDeps([]int32{1, 2, 3}, []int32{1, 2, 4}) {
+		t.Error("different deps should not be equal")
+	}
+	if equalDeps([]int32{1, 2, 3}, []int32{0, 2, 3}) {
+		t.Error("different first element should not be equal")
+	}
+	// Empty deps
+	if !equalDeps([]int32{}, []int32{}) {
+		t.Error("empty deps should be equal")
+	}
+}
+
+// TestUpdateStrongAttributes1_MultipleKeys verifies conflict detection across multiple keys.
+func TestUpdateStrongAttributes1_MultipleKeys(t *testing.T) {
+	r := newTestReplica(3)
+
+	// Key conflict on replica 2 for key 20
+	r.conflictMutex.Lock()
+	r.conflicts[2][20] = 8
+	r.conflictMutex.Unlock()
+	r.InstanceSpace[2][8] = &Instance{
+		Cmds: []state.Command{
+			{Op: state.PUT, K: 20, V: state.NIL(), CL: state.STRONG},
+			{Op: state.PUT, K: 20, V: state.NIL(), CL: state.CAUSAL},
+		},
+		Seq: 10,
+	}
+
+	cmds := []state.Command{
+		{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG, Sid: 1},
+		{Op: state.PUT, K: 20, V: state.NIL(), CL: state.STRONG, Sid: 1},
+	}
+	deps := []int32{-1, -1, -1}
+	cl := []int32{0, 0, 0}
+
+	seq, newDeps, newCL, changed := r.updateStrongAttributes1(cmds, 0, deps, cl, 0, 0)
+
+	if !changed {
+		t.Error("expected changed=true")
+	}
+	if newDeps[2] != 8 {
+		t.Errorf("deps[2]=%d, want 8", newDeps[2])
+	}
+	if seq != 11 {
+		t.Errorf("seq=%d, want 11", seq)
+	}
+	// CL for index 2 should come from conflicting instance's cmd at index matching the key
+	// cmd index 1 matches key 20, so CL comes from instance's Cmds[1]
+	if newCL[2] != int32(state.CAUSAL) {
+		t.Errorf("cl[2]=%d, want CAUSAL(%d)", newCL[2], state.CAUSAL)
+	}
+}

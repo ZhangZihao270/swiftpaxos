@@ -6705,10 +6705,17 @@ case slot := <-r.deliverChan:
   - Full handleCausalCommit: new/existing instance handling, idempotency, checkpoint detection
   - Helper functions: updateCommitted, clearHashtables, updateCausalConflicts (unified leader/follower), updateCausalAttributes (session + read-from + seq), bcastCausalCommit
   - 12 new tests: updateCommitted (gap/discard), clearHashtables, updateCausalConflicts (leader/follower), updateCausalAttributes (session/read-from), handleCausalCommit (new/existing/idempotent/checkpoint)
-- [ ] 99.3f: 移植 startStrongCommit + strong dependency computation + PreAccept/Accept/Commit phases
-  - `updateStrongAttributes1/2()`, `mergeStrongAttributes()` 原样搬
-  - `handlePreAccept`, `handlePreAcceptReply`, `handleAccept`, `handleAcceptReply`
-  - `handleCommit`, `handleCommitShort`, `handleCausalCommit`
+- [ ] 99.3f: 移植 startStrongCommit + strong dependency computation + PreAccept/Accept/Commit phases (~1348 LOC in Orca)
+  - [x] 99.3f-i: Reply helpers + attribute computation (~190 LOC) ✓
+    - replyPrepare/PreAccept/Accept/TryPreAccept (4 helpers)
+    - updateStrongConflicts, updateStrongSessionConflict
+    - updateStrongAttributes1/2, mergeStrongAttributes, equalDeps
+    - 15 tests: conflict tracking, session isolation, key/session/maxSeq deps, skip logic, merge equal/seq/deps, equalDeps
+  - [ ] 99.3f-ii: Broadcast functions + startStrongCommit (~310 LOC)
+    - bcastPreAccept + bcastAccept + bcastStrongCommit (~194 LOC)
+    - startStrongCommit (~116 LOC)
+  - [ ] 99.3f-iii: handlePreAccept + handlePreAcceptReply + handlePreAcceptOK (~395 LOC)
+  - [ ] 99.3f-iv: handleAccept + handleAcceptReply + handleCommit + handleCommitShort (~408 LOC)
 - [ ] 99.3g: 移植 recovery path（Prepare/TryPreAccept）
 - [ ] 99.3h: `go build ./epaxos-ho/` 通过
 

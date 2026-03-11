@@ -791,20 +791,209 @@ func (r *Replica) bcastCausalCommit(replicaId int32, instance int32, cmds []stat
 	}
 }
 
+// --- Strong commit helpers (Phase 99.3f-i) ---
+
+// Reply helpers — thin wrappers around SendMsg for each reply type.
+func (r *Replica) replyPrepare(replicaId int32, reply *PrepareReply) {
+	r.SendMsg(replicaId, r.prepareReplyRPC, reply)
+}
+
+func (r *Replica) replyPreAccept(replicaId int32, reply *PreAcceptReply) {
+	r.SendMsg(replicaId, r.preAcceptReplyRPC, reply)
+}
+
+func (r *Replica) replyAccept(replicaId int32, reply *AcceptReply) {
+	r.SendMsg(replicaId, r.acceptReplyRPC, reply)
+}
+
+func (r *Replica) replyTryPreAccept(replicaId int32, reply *TryPreAcceptReply) {
+	r.SendMsg(replicaId, r.tryPreAcceptReplyRPC, reply)
+}
+
+// updateStrongConflicts updates conflict tracking maps after a strong commit.
+// Unlike causal conflicts, this does NOT update session conflicts — strong ops
+// use key-based conflict tracking only.
+func (r *Replica) updateStrongConflicts(cmds []state.Command, replicaId int32, instance int32, seq int32) {
+	for i := 0; i < len(cmds); i++ {
+		r.conflictMutex.Lock()
+		if d, present := r.conflicts[replicaId][cmds[i].K]; !present || d < instance {
+			r.conflicts[replicaId][cmds[i].K] = instance
+		}
+		r.conflictMutex.Unlock()
+
+		r.maxSeqPerKeyMu.Lock()
+		if s, present := r.maxSeqPerKey[cmds[i].K]; !present || s < seq {
+			r.maxSeqPerKey[cmds[i].K] = seq
+		}
+		r.maxSeqPerKeyMu.Unlock()
+	}
+}
+
+// updateStrongSessionConflict updates session conflict tracking for strong commands.
+func (r *Replica) updateStrongSessionConflict(cmds []state.Command, replicaId int32, instance int32) {
+	for i := 0; i < len(cmds); i++ {
+		sid := cmds[i].Sid
+		r.sessionConflictsMu.Lock()
+		if d, present := r.sessionConflicts[replicaId][sid]; !present || d < instance {
+			r.sessionConflicts[replicaId][sid] = instance
+		}
+		r.sessionConflictsMu.Unlock()
+	}
+}
+
+// updateStrongAttributes1 computes initial dependencies for strong commands.
+// It checks per-key conflicts across all replicas, session conflicts, and max seq per key.
+// Returns: updated seq, deps, cl, and whether any dependency changed.
+func (r *Replica) updateStrongAttributes1(cmds []state.Command, seq int32, deps []int32, cl []int32, replicaId int32, instance int32) (int32, []int32, []int32, bool) {
+	changed := false
+
+	// Check per-key conflicts across all replicas
+	for q := 0; q < r.N; q++ {
+		if r.Id != replicaId && int32(q) == replicaId {
+			continue
+		}
+		for i := 0; i < len(cmds); i++ {
+			r.conflictMutex.RLock()
+			d, present := r.conflicts[q][cmds[i].K]
+			r.conflictMutex.RUnlock()
+
+			if present && d > deps[q] {
+				deps[q] = d
+				if r.InstanceSpace[q][d] != nil && len(r.InstanceSpace[q][d].Cmds) > i {
+					cl[q] = int32(r.InstanceSpace[q][d].Cmds[i].CL)
+				}
+				if r.InstanceSpace[q][d] != nil && seq <= r.InstanceSpace[q][d].Seq {
+					seq = r.InstanceSpace[q][d].Seq + 1
+				}
+				changed = true
+				break
+			}
+		}
+	}
+
+	// Track session dependency
+	for i := 0; i < len(cmds); i++ {
+		r.sessionConflictsMu.RLock()
+		d, present := r.sessionConflicts[replicaId][cmds[i].Sid]
+		r.sessionConflictsMu.RUnlock()
+
+		if present && d > deps[replicaId] {
+			deps[replicaId] = d
+			if r.InstanceSpace[replicaId][d] != nil && len(r.InstanceSpace[replicaId][d].Cmds) > 0 {
+				cl[replicaId] = int32(r.InstanceSpace[replicaId][d].Cmds[0].CL)
+			}
+			if r.InstanceSpace[replicaId][d] != nil && seq <= r.InstanceSpace[replicaId][d].Seq {
+				seq = r.InstanceSpace[replicaId][d].Seq + 1
+			}
+			changed = true
+			break
+		}
+	}
+
+	// Update seq from maxSeqPerKey for all affected keys
+	for i := 0; i < len(cmds); i++ {
+		r.maxSeqPerKeyMu.RLock()
+		s, present := r.maxSeqPerKey[cmds[i].K]
+		r.maxSeqPerKeyMu.RUnlock()
+		if present && seq <= s {
+			changed = true
+			seq = s + 1
+		}
+	}
+
+	return seq, deps, cl, changed
+}
+
+// updateStrongAttributes2 refines dependencies for strong commands on the follower side.
+// Similar to updateStrongAttributes1 but without session conflict tracking.
+func (r *Replica) updateStrongAttributes2(cmds []state.Command, seq int32, deps []int32, cl []int32, replicaId int32, instance int32) (int32, []int32, []int32, bool) {
+	changed := false
+
+	for q := 0; q < r.N; q++ {
+		if r.Id != replicaId && int32(q) == replicaId {
+			continue
+		}
+		for i := 0; i < len(cmds); i++ {
+			r.conflictMutex.RLock()
+			d, present := r.conflicts[q][cmds[i].K]
+			r.conflictMutex.RUnlock()
+
+			if present && d > deps[q] {
+				deps[q] = d
+				if r.InstanceSpace[q][d] != nil && len(r.InstanceSpace[q][d].Cmds) > i {
+					cl[q] = int32(r.InstanceSpace[q][d].Cmds[i].CL)
+				}
+				if r.InstanceSpace[q][d] != nil && seq <= r.InstanceSpace[q][d].Seq {
+					seq = r.InstanceSpace[q][d].Seq + 1
+				}
+				changed = true
+				break
+			}
+		}
+	}
+
+	for i := 0; i < len(cmds); i++ {
+		r.maxSeqPerKeyMu.RLock()
+		s, present := r.maxSeqPerKey[cmds[i].K]
+		r.maxSeqPerKeyMu.RUnlock()
+		if present && seq <= s {
+			changed = true
+			seq = s + 1
+		}
+	}
+
+	return seq, deps, cl, changed
+}
+
+// mergeStrongAttributes merges seq and deps from two sources, picking the max for each.
+// Returns the merged seq, deps, cl, and whether they were equal.
+func (r *Replica) mergeStrongAttributes(seq1 int32, deps1 []int32, seq2 int32, deps2 []int32, cl1 []int32, cl2 []int32) (int32, []int32, []int32, bool) {
+	equal := true
+	if seq1 != seq2 {
+		equal = false
+		if seq2 > seq1 {
+			seq1 = seq2
+		}
+	}
+	for q := 0; q < r.N; q++ {
+		if int32(q) == r.Id {
+			continue
+		}
+		if deps1[q] != deps2[q] {
+			equal = false
+			if deps2[q] > deps1[q] {
+				deps1[q] = deps2[q]
+				cl1[q] = cl2[q]
+			}
+		}
+	}
+	return seq1, deps1, cl1, equal
+}
+
+// equalDeps checks if two dependency arrays are equal.
+func equalDeps(deps1 []int32, deps2 []int32) bool {
+	for i := 0; i < len(deps1); i++ {
+		if deps1[i] != deps2[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func (r *Replica) handlePrepareReply(reply *PrepareReply) {
 	// TODO: Phase 99.3g — recovery path
 }
 
 func (r *Replica) handlePreAcceptReply(reply *PreAcceptReply) {
-	// TODO: Phase 99.3f — strong commit path
+	// TODO: Phase 99.3f-iii — strong commit path
 }
 
 func (r *Replica) handlePreAcceptOK(msg *PreAcceptOK) {
-	// TODO: Phase 99.3f — fast path acknowledgment
+	// TODO: Phase 99.3f-iii — fast path acknowledgment
 }
 
 func (r *Replica) handleAcceptReply(reply *AcceptReply) {
-	// TODO: Phase 99.3f — strong commit path
+	// TODO: Phase 99.3f-iv — strong commit path
 }
 
 func (r *Replica) handleTryPreAccept(msg *TryPreAccept) {
