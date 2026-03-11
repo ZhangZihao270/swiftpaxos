@@ -6683,12 +6683,12 @@ case slot := <-r.deliverChan:
 
 **Goal**: 将 Orca 的 `hybrid.go` 移植为 `epaxos-ho/epaxos-ho.go`。
 
-- [ ] 99.3a: 定义 `Replica` struct（嵌入 `*replica.Replica`）
-  - Instance, InstanceSpace, LeaderBookkeeping 等内部结构从 Orca 直接搬
-  - 替换 `genericsmr.Replica` 引用 → `replica.Replica`
-- [ ] 99.3b: 实现 `New()` 构造函数
-  - 初始化 InstanceSpace、conflict maps、channels
-  - 注册 RPC 消息类型（用 SwiftPaxos 的 `fastrpc.Table`）
+- [x] 99.3a+b: 定义 `Replica` struct + `New()` 构造函数 [26:03:11]
+  - Replica embeds `*replica.Replica`, adds EPaxos-HO specific fields (causalCommitChan, sessionConflicts, maxWriteInstancePerKey/Seq)
+  - Instance/LeaderBookkeeping/RecoveryInstance/instanceId/Exec types ported from Orca
+  - New() initializes all maps/channels, registers 12+ RPC types (including N*10 causal commit channels)
+  - recordInstanceMetadata/recordCommands for durable storage
+  - 8 unit tests covering struct types, constants, status transitions
 - [ ] 99.3c: 移植 `run()` 主事件循环
   - 所有 channel select cases 从 Orca 搬过来
   - 替换 `genericsmr.SendMsg()` → `replica.SendMsg()`
