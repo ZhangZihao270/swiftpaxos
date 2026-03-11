@@ -294,7 +294,7 @@ func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads i
 		return hbc.GetMetrics(), hbc.GetDuration()
 	} else if p == "epaxosho" {
 		epaxoshoCl := epaxosho.NewClient(b)
-		hbc := client.NewHybridBufferClient(b, c.WeakRatio, 0)
+		hbc := client.NewHybridBufferClient(b, c.WeakRatio, c.WeakWrites)
 		hbc.SetHybridClient(epaxoshoCl)
 		printResults := (numThreads == 1)
 		hbc.HybridLoopWithOptions(printResults)

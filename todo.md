@@ -6782,7 +6782,10 @@ case slot := <-r.deliverChan:
 - [x] 99.6a: `main.go` 加 `case "epaxosho":` 设置 `c.Leaderless = true`
 - [x] 99.6b: `run.go` 加 `case "epaxosho":` 创建 `epaxosho.New(...)` replica
 - [x] 99.6c: `main.go` client switch 加 `case "epaxosho":` 创建 `epaxosho.NewClient(b)` + HybridBufferClient
-- [ ] 99.6d: 本地单机测试（3 replica, 1 client, no delay）验证基本功能
+- [x] 99.6d: 本地单机测试（3 replica, 1 client, no delay）验证基本功能
+  - Fixed: main.go epaxosho client wiring passed `0` instead of `c.WeakWrites`
+  - Results: 1000 ops, 4762 ops/sec, Strong avg 0.24ms, Weak avg 0.12ms
+  - All 4 command types working: StrongWrite(229), StrongRead(250), WeakWrite(269), WeakRead(252)
 - [x] 99.6e: `go test ./epaxos-ho/` 单元测试通过
 - [x] 99.6f: `go build -o swiftpaxos .` 编译通过
 
