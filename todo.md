@@ -6762,17 +6762,13 @@ case slot := <-r.deliverChan:
 
 **Goal**: 实现 `epaxos-ho/client.go`，满足 `HybridClient` 接口。
 
-- [ ] 99.5a: 定义 `Client` struct（嵌入 `*client.BufferClient`）
-  - CommunicationSupply（proposeReply channel）
-  - 注册 RPC table 接收 replica 回复
-- [ ] 99.5b: 实现 `NewClient(b *client.BufferClient) *Client`
-- [ ] 99.5c: 实现 `SendStrongWrite/Read` — 发 Propose 消息，CL=STRONG
-  - 走 `client.SendProposal()` 但设置 `cmd.CL = state.STRONG`
-- [ ] 99.5d: 实现 `SendWeakWrite/Read` — 发 Propose 消息，CL=CAUSAL
-  - 走 `client.SendProposal()` 但设置 `cmd.CL = state.CAUSAL`
-- [ ] 99.5e: 实现 `handleMsgs()` — 接收 ProposeReply，调用 `RegisterReply()`
-- [ ] 99.5f: 实现 `SupportsWeak() → true`，`MarkAllSent()`
-- [ ] 99.5g: `go build ./epaxos-ho/` 通过
+- [x] 99.5a: 定义 `Client` struct（嵌入 `*client.BufferClient`）
+- [x] 99.5b: 实现 `NewClient(b *client.BufferClient) *Client`
+- [x] 99.5c: 实现 `SendStrongWrite/Read` — 委托给 base SendWrite/SendRead (CL defaults to NONE → strong)
+- [x] 99.5d: 实现 `SendWeakWrite/Read` — 发 Propose 消息，CL=CAUSAL
+- [x] 99.5e: handleMsgs 不需要 — base BufferClient.WaitReplies 处理 ProposeReplyTS
+- [x] 99.5f: 实现 `SupportsWeak() → true`，`MarkAllSent()`
+- [x] 99.5g: `go build ./epaxos-ho/` 通过
 
 **注意**: EPaxos-HO 的 client 比 CURP-HO 简单很多 — 不需要 fast path/slow path 判断、
 不需要 checkCausalDeps、不需要 RecordAck。Client 只发 Propose，设 CL 字段，等回复。
@@ -6783,12 +6779,12 @@ case slot := <-r.deliverChan:
 
 **Goal**: 在 main.go/run.go 注册 epaxosho 协议，端到端测试。
 
-- [ ] 99.6a: `main.go` 加 `case "epaxosho":` 设置 `c.Leaderless = true`（EPaxos 无固定 leader）
-- [ ] 99.6b: `run.go` 加 `case "epaxosho":` 创建 `epaxosho.New(...)` replica
-- [ ] 99.6c: `main.go` client switch 加 `case "epaxosho":` 创建 `epaxosho.NewClient(b)`
+- [x] 99.6a: `main.go` 加 `case "epaxosho":` 设置 `c.Leaderless = true`
+- [x] 99.6b: `run.go` 加 `case "epaxosho":` 创建 `epaxosho.New(...)` replica
+- [x] 99.6c: `main.go` client switch 加 `case "epaxosho":` 创建 `epaxosho.NewClient(b)` + HybridBufferClient
 - [ ] 99.6d: 本地单机测试（3 replica, 1 client, no delay）验证基本功能
-- [ ] 99.6e: `go test ./epaxos-ho/` 单元测试通过
-- [ ] 99.6f: `go build -o swiftpaxos .` 编译通过
+- [x] 99.6e: `go test ./epaxos-ho/` 单元测试通过
+- [x] 99.6f: `go build -o swiftpaxos .` 编译通过
 
 ---
 
