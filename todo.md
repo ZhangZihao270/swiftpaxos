@@ -6412,6 +6412,43 @@ case slot := <-r.deliverChan:
 
 ---
 
+### Phase 97: Re-run Exp 1.1 — Raft-HT vs Vanilla Raft (5r/5m/3c)
+
+**Goal**: 在 5r/5m/3c 分布式集群上重跑 Exp 1.1（Raft-HT vs Vanilla Raft 吞吐量-延迟曲线），使用当前最新代码，验证 Raft-HT 性能。
+
+**Setup**:
+- 5 replicas: .101, .103, .104, .125, .126 (每台 1 个 replica)
+- 3 clients: .101, .103, .104 (co-located with replica0/1/2)
+- reqs=3000, networkDelay=25, commandSize=100
+- **两组 write ratio**：writes=5 和 writes=50
+
+**Protocols**:
+1. **Raft-HT** (raftht): weakRatio=50
+2. **Vanilla Raft** (raft): weakRatio=0
+
+**Write ratio 配置**:
+- writes=5, weakWrites=5（5% 写入，与 Phase 72/94 一致）
+- writes=50, weakWrites=50（50% 写入，与 Phase 95/96 一致）
+
+**Thread counts**: t=1, 2, 4, 8, 16, 32, 64, 96
+
+**验证目标**:
+- Raft-HT strong P50 应 ≈ 100ms (2 RTT)，weak P50 依 read/write 比例而定
+- Vanilla Raft strong P50 应 ≈ 100ms (2 RTT)
+- Raft-HT 吞吐量应高于 Vanilla Raft（weak ops 分担 leader 压力）
+- 对比 writes=5 vs writes=50 的吞吐量和延迟差异
+
+**Tasks**:
+- [x] 97a: 创建 eval-phase97.sh 脚本（基于 eval-exp1.1-5r-dist.sh，适配 5r/5m/3c + dual write ratio）[26:03:11]
+- [ ] 97b: 跑 writes=5：2 protocols × 8 thread counts = 16 组实验
+  - Results: `results/eval-5r5m3c-phase97-YYYYMMDD/exp1.1-w5/`
+- [ ] 97c: 跑 writes=50：2 protocols × 8 thread counts = 16 组实验
+  - Results: `results/eval-5r5m3c-phase97-YYYYMMDD/exp1.1-w50/`
+- [ ] 97d: 对比 Phase 72（5r/2-1-2 布局, writes=5）及 writes=5 vs writes=50 结果
+- [ ] 97e: 结果表格和分析写入 todo.md
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
