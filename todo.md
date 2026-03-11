@@ -6586,6 +6586,40 @@ case slot := <-r.deliverChan:
    - writes=50: Raft-HT 11.7K vs Raft 13.4K at t=96 (-13%) — still worse due to hybrid overhead
    - The fix restores Raft-HT's advantage for read-heavy workloads but doesn't help write-heavy
 
+**Merged Results: Phase 98 Raft-HT + Phase 97 Raft**
+
+**writes=5 (5% writes)**:
+
+| Threads | Raft tput | Raft-HT tput | Speedup | Raft s_p50 | HT s_p50 | HT w_p50 |
+|---------|-----------|--------------|---------|------------|----------|----------|
+| t=1     | 681       | 1,161        | 1.70x   | 68.2ms     | 85.3ms   | 0.13ms   |
+| t=2     | 1,359     | 2,304        | 1.70x   | 68.4ms     | 85.0ms   | 0.15ms   |
+| t=4     | 2,707     | 4,584        | 1.69x   | 68.6ms     | 85.1ms   | 0.16ms   |
+| t=8     | 5,389     | 8,398        | 1.56x   | 68.8ms     | 87.2ms   | 0.14ms   |
+| t=16    | 9,545     | 15,106       | 1.58x   | 74.7ms     | 90.4ms   | 0.58ms   |
+| t=32    | 16,253    | 23,971       | 1.47x   | 89.9ms     | 117.8ms  | 2.44ms   |
+| t=64    | 18,712    | 31,590       | 1.69x   | 161.6ms    | 166.6ms  | 11.50ms  |
+| t=96    | 21,232    | 32,269       | 1.52x   | 210.9ms    | 234.2ms  | 22.76ms  |
+
+**writes=50 (50% writes)**:
+
+| Threads | Raft tput | Raft-HT tput | Speedup | Raft s_p50 | HT s_p50 | HT w_p50 |
+|---------|-----------|--------------|---------|------------|----------|----------|
+| t=1     | 678       | 1,039        | 1.53x   | 68.4ms     | 85.4ms   | 33.7ms   |
+| t=2     | 1,355     | 2,119        | 1.56x   | 68.5ms     | 85.4ms   | 17.1ms   |
+| t=4     | 2,700     | 3,670        | 1.36x   | 68.7ms     | 88.5ms   | 33.7ms   |
+| t=8     | 4,600     | 5,890        | 1.28x   | 76.6ms     | 108.6ms  | 34.4ms   |
+| t=16    | 7,727     | 8,551        | 1.11x   | 90.1ms     | 146.6ms  | 40.9ms   |
+| t=32    | 10,773    | 10,464       | 0.97x   | 134.3ms    | 208.2ms  | 61.5ms   |
+| t=64    | 11,964    | 11,808       | 0.99x   | 245.4ms    | 339.3ms  | 98.1ms   |
+| t=96    | 13,381    | 11,665       | 0.87x   | 325.8ms    | 495.5ms  | 116.6ms  |
+
+**Summary**:
+- **writes=5**: Raft-HT 稳定 1.5-1.7x speedup，峰值 32.3K vs 21.2K (+52%)
+- **writes=50**: 低并发有优势 (1.3-1.5x)，t=32+ 优势消失，t=96 反而低 13%
+- **writes=50 退化原因**: weak reads 加速 client 循环，但 75% ops 仍打到 leader（strong + weak writes），
+  leader 承受更多 ops/sec + 双倍 AppendEntries broadcast（strong batch + weak batch 各触发一次），导致 leader 饱和更快
+
 ---
 
 ### Phase 99: Port Orca's EPaxos-HO (Hybrid Protocol) to SwiftPaxos
@@ -6628,13 +6662,20 @@ case slot := <-r.deliverChan:
 
 **Goal**: 创建 `swiftpaxos/epaxos-ho/` 目录，搭建包骨架。
 
-- [ ] 99.2a: 创建 `epaxos-ho/` 目录，package 名 `epaxosho`
-- [ ] 99.2b: 创建 `epaxos-ho/defs.go` — 移植 Orca `hybridproto/` 的所有消息类型
-  - Prepare, PrepareReply, PreAccept, PreAcceptReply, PreAcceptOK
-  - Accept, AcceptReply, CausalCommit, Commit, CommitShort
-  - TryPreAccept, TryPreAcceptReply
-  - 每个消息的 Marshal/Unmarshal 从 Orca 直接复制，改 import
-  - 状态常量: PREACCEPTED, ACCEPTED, CAUSALLY_COMMITTED, STRONGLY_COMMITTED, EXECUTED, DISCARDED
+- [x] 99.2a: 创建 `epaxos-ho/` 目录，package 名 `epaxosho` [26:03:11]
+- [ ] 99.2b: 创建 `epaxos-ho/defs.go` — 消息类型定义 + 状态常量
+  - 12 个 struct (Prepare, PrepareReply, PreAccept, PreAcceptReply, PreAcceptOK, Accept, AcceptReply, Commit, CausalCommit, CommitShort, TryPreAccept, TryPreAcceptReply)
+  - 状态常量: PREACCEPTED, ACCEPTED, CAUSALLY_COMMITTED, STRONGLY_COMMITTED, EXECUTED, DISCARDED 等
+  - 从 Orca `hybridproto/hybridproto.go` 搬，改 import path (~150 LOC)
+- [ ] 99.2b2: 创建 `epaxos-ho/defsmarsh.go` — 简单固定大小消息的 Marshal/Unmarshal
+  - Prepare (4×int32), PreAcceptOK (1×int32), AcceptReply (4×int32), TryPreAcceptReply (8×int32)
+  - 纯 int32 字段，无 slice (~200 LOC)
+- [ ] 99.2b3: `epaxos-ho/defsmarsh.go` — 含 []int32 slice 消息的 Marshal/Unmarshal
+  - PreAcceptReply (int32s + []int32×3), Accept (int32s + []int32×2), CommitShort (int32s + []int32×2)
+  - 需要 length-prefixed slice 编码 (~300 LOC)
+- [ ] 99.2b4: `epaxos-ho/defsmarsh.go` — 含 []Command + []int32 的复杂消息 Marshal/Unmarshal
+  - PrepareReply, PreAccept, Commit, CausalCommit, TryPreAccept
+  - 需要 []state.Command 序列化 (用 Command.Marshal/Unmarshal) (~400 LOC)
 - [ ] 99.2c: 创建 `epaxos-ho/defs_test.go` — 序列化 round-trip 测试
 - [ ] 99.2d: `go build ./epaxos-ho/` 通过
 
