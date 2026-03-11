@@ -6340,6 +6340,34 @@ case slot := <-r.deliverChan:
 
 ---
 
+### Phase 96: Exp 3.2 — T Property Verification (5r/5m/3c)
+
+**Goal**: 在 5r/5m/3c 分布式集群上重跑 Exp 3.2（T Property 验证）。固定 t=8，sweep weakRatio=0/25/50/75/100，验证 strong op P50 是否随 weak ratio 保持稳定。
+
+**Setup**:
+- 5 replicas: .101, .103, .104, .125, .126
+- 3 clients: .101, .103, .104 (co-located with replica0/1/2)
+- reqs=3000, networkDelay=25, commandSize=100
+- **固定 t=8**，sweep weakRatio=0/25/50/75/100
+- writes=50, weakWrites=50（50% 写入）
+
+**Protocols**: curpht, curpho（不跑 curp baseline）
+
+**Sweep 参数**: weakRatio = 0, 25, 50, 75, 100（共 5 × 2 = 10 组实验）
+
+**验证目标**:
+- CURP-HT: strong P50 应在 ~51ms 保持平稳（T property satisfied）
+- CURP-HO: strong P50 是否平稳（之前 Phase 65 在 3r 集群上 = 52ms flat）
+
+**Tasks**:
+- [x] 96a: 创建 eval-phase96.sh 脚本（基于 eval-exp3.2-5r-dist.sh，适配 5r/5m/3c + writes=50）[26:03:11]
+- [ ] 96b: 跑 2 protocols × 5 weak ratios = 10 组实验
+  - Results: `results/eval-5r5m3c-phase96-YYYYMMDD/exp3.2/`
+- [ ] 96c: 对比 Phase 65（3r distributed）结果，分析 5r 下 T property 是否仍成立
+- [ ] 96d: 结果表格和分析写入 todo.md
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
