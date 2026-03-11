@@ -217,24 +217,16 @@ func TestStubHandlersDoNotPanic(t *testing.T) {
 		r.handlePrepare(&Prepare{})
 	})
 	// handlePreAccept tested separately — it now requires initialized InstanceSpace and conflict maps
-	t.Run("handleAccept", func(t *testing.T) {
-		r.handleAccept(&Accept{})
-	})
-	t.Run("handleCommit", func(t *testing.T) {
-		r.handleCommit(&Commit{})
-	})
-	t.Run("handleCommitShort", func(t *testing.T) {
-		r.handleCommitShort(&CommitShort{})
-	})
+	// handleAccept tested separately — it now requires initialized InstanceSpace
+	// handleCommit tested separately — it now requires initialized InstanceSpace
+	// handleCommitShort tested separately — it now requires initialized InstanceSpace
 	// handleCausalCommit tested separately — it now requires initialized InstanceSpace
 	t.Run("handlePrepareReply", func(t *testing.T) {
 		r.handlePrepareReply(&PrepareReply{})
 	})
 	// handlePreAcceptReply tested separately — it now requires initialized InstanceSpace
 	// handlePreAcceptOK tested separately — it now requires initialized InstanceSpace
-	t.Run("handleAcceptReply", func(t *testing.T) {
-		r.handleAcceptReply(&AcceptReply{})
-	})
+	// handleAcceptReply tested separately — it now requires initialized InstanceSpace
 	t.Run("handleTryPreAccept", func(t *testing.T) {
 		r.handleTryPreAccept(&TryPreAccept{})
 	})
@@ -2052,4 +2044,468 @@ func TestBcastPrepare(t *testing.T) {
 	r := newTestReplica(3)
 	// Should not panic — recover catches
 	r.bcastPrepare(0, 5, 0x10)
+}
+
+// --- Phase 99.3f-iv: handleAccept, handleAcceptReply, handleCommit, handleCommitShort tests ---
+
+// TestHandleAccept_NewInstance verifies Accept creates a new ACCEPTED instance.
+func TestHandleAccept_NewInstance(t *testing.T) {
+	r := newTestReplica(3)
+
+	acc := &Accept{
+		LeaderId: 1, Replica: 1, Instance: 0, Ballot: 0,
+		Count: 3, Seq: 10, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handleAccept(acc)
+	}()
+
+	inst := r.InstanceSpace[1][0]
+	if inst == nil {
+		t.Fatal("instance should be created")
+	}
+	if inst.Status != ACCEPTED {
+		t.Errorf("Status=%d, want ACCEPTED(%d)", inst.Status, ACCEPTED)
+	}
+	if inst.State != READY {
+		t.Errorf("State=%d, want READY(%d)", inst.State, READY)
+	}
+	if inst.Seq != 10 {
+		t.Errorf("Seq=%d, want 10", inst.Seq)
+	}
+	if inst.bal != 0 {
+		t.Errorf("bal=%d, want 0", inst.bal)
+	}
+}
+
+// TestHandleAccept_ExistingInstance verifies Accept updates existing instance.
+func TestHandleAccept_ExistingInstance(t *testing.T) {
+	r := newTestReplica(3)
+
+	// Pre-existing PREACCEPTED instance
+	r.InstanceSpace[1][0] = &Instance{
+		Status: PREACCEPTED, State: READY, Seq: 5,
+		Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0}, bal: 0,
+	}
+
+	acc := &Accept{
+		LeaderId: 1, Replica: 1, Instance: 0, Ballot: 0,
+		Count: 1, Seq: 15, Deps: []int32{3, -1, -1}, CL: []int32{int32(state.STRONG), 0, 0},
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handleAccept(acc)
+	}()
+
+	inst := r.InstanceSpace[1][0]
+	if inst.Status != ACCEPTED {
+		t.Errorf("Status=%d, want ACCEPTED(%d)", inst.Status, ACCEPTED)
+	}
+	if inst.Seq != 15 {
+		t.Errorf("Seq=%d, want 15", inst.Seq)
+	}
+	if inst.Deps[0] != 3 {
+		t.Errorf("Deps[0]=%d, want 3", inst.Deps[0])
+	}
+}
+
+// TestHandleAccept_CommittedSkipped verifies committed instances are skipped.
+func TestHandleAccept_CommittedSkipped(t *testing.T) {
+	r := newTestReplica(3)
+
+	r.InstanceSpace[1][0] = &Instance{Status: STRONGLY_COMMITTED}
+
+	acc := &Accept{
+		LeaderId: 1, Replica: 1, Instance: 0, Ballot: 0,
+		Count: 1, Seq: 10, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	r.handleAccept(acc)
+
+	if r.InstanceSpace[1][0].Status != STRONGLY_COMMITTED {
+		t.Errorf("Status should remain STRONGLY_COMMITTED")
+	}
+}
+
+// TestHandleAccept_BallotReject verifies lower ballot is rejected.
+func TestHandleAccept_BallotReject(t *testing.T) {
+	r := newTestReplica(3)
+
+	r.InstanceSpace[1][0] = &Instance{
+		Status: PREACCEPTED, bal: 0x10, Seq: 5,
+		Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	acc := &Accept{
+		LeaderId: 1, Replica: 1, Instance: 0, Ballot: 0, // lower ballot
+		Count: 1, Seq: 20, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handleAccept(acc)
+	}()
+
+	// Should NOT update
+	if r.InstanceSpace[1][0].Seq != 5 {
+		t.Errorf("Seq=%d, should stay 5 (ballot reject)", r.InstanceSpace[1][0].Seq)
+	}
+}
+
+// TestHandleAccept_Checkpoint verifies checkpoint detection.
+func TestHandleAccept_Checkpoint(t *testing.T) {
+	r := newTestReplica(3)
+
+	acc := &Accept{
+		LeaderId: 1, Replica: 1, Instance: 5, Ballot: 0,
+		Count: 0, // empty = checkpoint
+		Seq: 10, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handleAccept(acc)
+	}()
+
+	if r.latestCPReplica != 1 {
+		t.Errorf("latestCPReplica=%d, want 1", r.latestCPReplica)
+	}
+	if r.latestCPInstance != 5 {
+		t.Errorf("latestCPInstance=%d, want 5", r.latestCPInstance)
+	}
+}
+
+// TestHandleAccept_UpdatesMaxSeq verifies maxSeq is bumped.
+func TestHandleAccept_UpdatesMaxSeq(t *testing.T) {
+	r := newTestReplica(3)
+	r.maxSeq = 0
+
+	acc := &Accept{
+		LeaderId: 1, Replica: 1, Instance: 0, Ballot: 0,
+		Count: 1, Seq: 50, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handleAccept(acc)
+	}()
+
+	if r.maxSeq != 51 {
+		t.Errorf("maxSeq=%d, want 51", r.maxSeq)
+	}
+}
+
+// TestHandleAcceptReply_DelayedReply verifies delayed replies are ignored.
+func TestHandleAcceptReply_DelayedReply(t *testing.T) {
+	r := newTestReplica(3)
+
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	setupStrongInstance(r, 0, 0, 0, cmds, 5, []int32{-1, -1, -1})
+	r.InstanceSpace[0][0].Status = STRONGLY_COMMITTED
+
+	r.handleAcceptReply(&AcceptReply{Replica: 0, Instance: 0, OK: TRUE, Ballot: 0})
+	// Should not panic or change state
+}
+
+// TestHandleAcceptReply_Nack verifies nack counting.
+func TestHandleAcceptReply_Nack(t *testing.T) {
+	r := newTestReplica(3)
+
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	setupStrongInstance(r, 0, 0, 0, cmds, 5, []int32{-1, -1, -1})
+	r.InstanceSpace[0][0].Status = ACCEPTED
+
+	r.handleAcceptReply(&AcceptReply{Replica: 0, Instance: 0, OK: FALSE, Ballot: 0x10})
+
+	if r.InstanceSpace[0][0].lb.nacks != 1 {
+		t.Errorf("nacks=%d, want 1", r.InstanceSpace[0][0].lb.nacks)
+	}
+	if r.InstanceSpace[0][0].lb.maxRecvBallot != 0x10 {
+		t.Errorf("maxRecvBallot=%d, want 0x10", r.InstanceSpace[0][0].lb.maxRecvBallot)
+	}
+}
+
+// TestHandleAcceptReply_WrongBallot verifies wrong ballot replies are ignored.
+func TestHandleAcceptReply_WrongBallot(t *testing.T) {
+	r := newTestReplica(3)
+
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	setupStrongInstance(r, 0, 0, 0x10, cmds, 5, []int32{-1, -1, -1})
+	r.InstanceSpace[0][0].Status = ACCEPTED
+
+	r.handleAcceptReply(&AcceptReply{Replica: 0, Instance: 0, OK: TRUE, Ballot: 0})
+
+	if r.InstanceSpace[0][0].lb.acceptOKs != 0 {
+		t.Errorf("acceptOKs=%d, want 0 (wrong ballot)", r.InstanceSpace[0][0].lb.acceptOKs)
+	}
+}
+
+// TestHandleAcceptReply_QuorumCommits verifies quorum leads to STRONGLY_COMMITTED.
+func TestHandleAcceptReply_QuorumCommits(t *testing.T) {
+	r := newTestReplica(3)
+
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	setupStrongInstance(r, 0, 0, 0, cmds, 5, []int32{-1, -1, -1})
+	r.InstanceSpace[0][0].Status = ACCEPTED
+
+	// N=3: need acceptOKs+1 > N/2 → acceptOKs+1 > 1 → acceptOKs >= 1
+	func() {
+		defer func() { recover() }()
+		r.handleAcceptReply(&AcceptReply{Replica: 0, Instance: 0, OK: TRUE, Ballot: 0})
+	}()
+
+	if r.InstanceSpace[0][0].Status != STRONGLY_COMMITTED {
+		t.Errorf("Status=%d, want STRONGLY_COMMITTED(%d)", r.InstanceSpace[0][0].Status, STRONGLY_COMMITTED)
+	}
+}
+
+// TestHandleAcceptReply_NotEnoughOKs verifies partial quorum doesn't commit.
+func TestHandleAcceptReply_NotEnoughOKs(t *testing.T) {
+	r := newTestReplica(5)
+
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	setupStrongInstance(r, 0, 0, 0, cmds, 5, []int32{-1, -1, -1, -1, -1})
+	r.InstanceSpace[0][0].Status = ACCEPTED
+
+	// N=5: need acceptOKs+1 > N/2 → acceptOKs+1 > 2 → acceptOKs >= 2
+	func() {
+		defer func() { recover() }()
+		r.handleAcceptReply(&AcceptReply{Replica: 0, Instance: 0, OK: TRUE, Ballot: 0})
+	}()
+
+	// Only 1 OK — not enough
+	if r.InstanceSpace[0][0].Status != ACCEPTED {
+		t.Errorf("Status=%d, want ACCEPTED(%d) (not enough OKs)", r.InstanceSpace[0][0].Status, ACCEPTED)
+	}
+}
+
+// TestHandleCommit_NewInstance verifies Commit creates STRONGLY_COMMITTED instance.
+func TestHandleCommit_NewInstance(t *testing.T) {
+	r := newTestReplica(3)
+
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	commit := &Commit{
+		Consistency: state.STRONG, LeaderId: 1, Replica: 1, Instance: 0,
+		Command: cmds, Seq: 10, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	r.handleCommit(commit)
+
+	inst := r.InstanceSpace[1][0]
+	if inst == nil {
+		t.Fatal("instance should be created")
+	}
+	if inst.Status != STRONGLY_COMMITTED {
+		t.Errorf("Status=%d, want STRONGLY_COMMITTED(%d)", inst.Status, STRONGLY_COMMITTED)
+	}
+	if inst.State != READY {
+		t.Errorf("State=%d, want READY(%d)", inst.State, READY)
+	}
+	if len(inst.Cmds) != 1 {
+		t.Errorf("len(Cmds)=%d, want 1", len(inst.Cmds))
+	}
+}
+
+// TestHandleCommit_ExistingInstance verifies Commit updates existing instance.
+func TestHandleCommit_ExistingInstance(t *testing.T) {
+	r := newTestReplica(3)
+
+	r.InstanceSpace[1][0] = &Instance{
+		Status: ACCEPTED, State: READY, Seq: 5,
+		Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	commit := &Commit{
+		Consistency: state.STRONG, LeaderId: 1, Replica: 1, Instance: 0,
+		Command: cmds, Seq: 20, Deps: []int32{3, -1, -1}, CL: []int32{int32(state.STRONG), 0, 0},
+	}
+
+	r.handleCommit(commit)
+
+	inst := r.InstanceSpace[1][0]
+	if inst.Status != STRONGLY_COMMITTED {
+		t.Errorf("Status=%d, want STRONGLY_COMMITTED(%d)", inst.Status, STRONGLY_COMMITTED)
+	}
+	if inst.Seq != 20 {
+		t.Errorf("Seq=%d, want 20", inst.Seq)
+	}
+	if inst.Deps[0] != 3 {
+		t.Errorf("Deps[0]=%d, want 3", inst.Deps[0])
+	}
+}
+
+// TestHandleCommit_CommittedSkipped verifies already committed instances are skipped.
+func TestHandleCommit_CommittedSkipped(t *testing.T) {
+	r := newTestReplica(3)
+
+	r.InstanceSpace[1][0] = &Instance{Status: STRONGLY_COMMITTED, Seq: 5}
+
+	commit := &Commit{
+		Consistency: state.STRONG, LeaderId: 1, Replica: 1, Instance: 0,
+		Command: []state.Command{{Op: state.PUT, K: 10, V: state.NIL()}},
+		Seq: 20, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	r.handleCommit(commit)
+
+	if r.InstanceSpace[1][0].Seq != 5 {
+		t.Errorf("Seq=%d, should stay 5 (already committed)", r.InstanceSpace[1][0].Seq)
+	}
+}
+
+// TestHandleCommit_Checkpoint verifies checkpoint detection.
+func TestHandleCommit_Checkpoint(t *testing.T) {
+	r := newTestReplica(3)
+
+	commit := &Commit{
+		Consistency: state.STRONG, LeaderId: 1, Replica: 1, Instance: 5,
+		Command: []state.Command{}, // empty = checkpoint
+		Seq: 10, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	r.handleCommit(commit)
+
+	if r.latestCPReplica != 1 {
+		t.Errorf("latestCPReplica=%d, want 1", r.latestCPReplica)
+	}
+	if r.latestCPInstance != 5 {
+		t.Errorf("latestCPInstance=%d, want 5", r.latestCPInstance)
+	}
+}
+
+// TestHandleCommit_UpdatesMaxSeqAndCrtInstance verifies bookkeeping.
+func TestHandleCommit_UpdatesMaxSeqAndCrtInstance(t *testing.T) {
+	r := newTestReplica(3)
+	r.maxSeq = 0
+
+	commit := &Commit{
+		Consistency: state.STRONG, LeaderId: 1, Replica: 1, Instance: 10,
+		Command: []state.Command{{Op: state.PUT, K: 10, V: state.NIL()}},
+		Seq: 50, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	r.handleCommit(commit)
+
+	if r.maxSeq != 51 {
+		t.Errorf("maxSeq=%d, want 51", r.maxSeq)
+	}
+	if r.crtInstance[1] != 11 {
+		t.Errorf("crtInstance[1]=%d, want 11", r.crtInstance[1])
+	}
+}
+
+// TestHandleCommitShort_NewInstance verifies CommitShort creates STRONGLY_COMMITTED instance.
+func TestHandleCommitShort_NewInstance(t *testing.T) {
+	r := newTestReplica(3)
+
+	commit := &CommitShort{
+		Consistency: state.STRONG, LeaderId: 1, Replica: 1, Instance: 0,
+		Count: 3, Seq: 10, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	r.handleCommitShort(commit)
+
+	inst := r.InstanceSpace[1][0]
+	if inst == nil {
+		t.Fatal("instance should be created")
+	}
+	if inst.Status != STRONGLY_COMMITTED {
+		t.Errorf("Status=%d, want STRONGLY_COMMITTED(%d)", inst.Status, STRONGLY_COMMITTED)
+	}
+	if inst.State != READY {
+		t.Errorf("State=%d, want READY(%d)", inst.State, READY)
+	}
+	// CommitShort doesn't include commands
+	if inst.Cmds != nil {
+		t.Errorf("Cmds should be nil for CommitShort")
+	}
+}
+
+// TestHandleCommitShort_ExistingInstance verifies CommitShort updates existing instance.
+func TestHandleCommitShort_ExistingInstance(t *testing.T) {
+	r := newTestReplica(3)
+
+	// Pre-existing instance from PreAccept (has commands)
+	r.InstanceSpace[1][0] = &Instance{
+		Cmds:   []state.Command{{Op: state.PUT, K: 10, V: state.NIL()}},
+		Status: PREACCEPTED, State: READY, Seq: 5,
+		Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	commit := &CommitShort{
+		Consistency: state.STRONG, LeaderId: 1, Replica: 1, Instance: 0,
+		Count: 1, Seq: 20, Deps: []int32{3, -1, -1}, CL: []int32{int32(state.STRONG), 0, 0},
+	}
+
+	r.handleCommitShort(commit)
+
+	inst := r.InstanceSpace[1][0]
+	if inst.Status != STRONGLY_COMMITTED {
+		t.Errorf("Status=%d, want STRONGLY_COMMITTED(%d)", inst.Status, STRONGLY_COMMITTED)
+	}
+	if inst.Seq != 20 {
+		t.Errorf("Seq=%d, want 20", inst.Seq)
+	}
+	// Commands should still be there from PreAccept
+	if inst.Cmds == nil || len(inst.Cmds) != 1 {
+		t.Error("Cmds should be preserved from PreAccept")
+	}
+}
+
+// TestHandleCommitShort_CommittedSkipped verifies already committed instances are skipped.
+func TestHandleCommitShort_CommittedSkipped(t *testing.T) {
+	r := newTestReplica(3)
+
+	r.InstanceSpace[1][0] = &Instance{Status: STRONGLY_COMMITTED, Seq: 5}
+
+	commit := &CommitShort{
+		Consistency: state.STRONG, LeaderId: 1, Replica: 1, Instance: 0,
+		Count: 1, Seq: 20, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	r.handleCommitShort(commit)
+
+	if r.InstanceSpace[1][0].Seq != 5 {
+		t.Errorf("Seq=%d, should stay 5 (already committed)", r.InstanceSpace[1][0].Seq)
+	}
+}
+
+// TestHandleCommitShort_Checkpoint verifies checkpoint detection.
+func TestHandleCommitShort_Checkpoint(t *testing.T) {
+	r := newTestReplica(3)
+
+	commit := &CommitShort{
+		Consistency: state.STRONG, LeaderId: 1, Replica: 1, Instance: 5,
+		Count: 0, // checkpoint
+		Seq: 10, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	r.handleCommitShort(commit)
+
+	if r.latestCPReplica != 1 {
+		t.Errorf("latestCPReplica=%d, want 1", r.latestCPReplica)
+	}
+	if r.latestCPInstance != 5 {
+		t.Errorf("latestCPInstance=%d, want 5", r.latestCPInstance)
+	}
+}
+
+// TestHandleCommitShort_UpdatesCrtInstance verifies crtInstance is bumped.
+func TestHandleCommitShort_UpdatesCrtInstance(t *testing.T) {
+	r := newTestReplica(3)
+
+	commit := &CommitShort{
+		Consistency: state.STRONG, LeaderId: 1, Replica: 1, Instance: 10,
+		Count: 1, Seq: 5, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	r.handleCommitShort(commit)
+
+	if r.crtInstance[1] != 11 {
+		t.Errorf("crtInstance[1]=%d, want 11", r.crtInstance[1])
+	}
 }

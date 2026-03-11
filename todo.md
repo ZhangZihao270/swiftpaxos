@@ -6724,7 +6724,12 @@ case slot := <-r.deliverChan:
     - handlePreAcceptReply: leader side — nack handling (fixed: check OK before ballot equality), attribute merging, fast path commit (STRONGLY_COMMITTED + client reply + bcast), slow path (ACCEPTED + bcastAccept)
     - handlePreAcceptOK: leader fast path — count OKs, committedDeps from originalDeps, fast/slow path decision
     - 22 tests: ballot helpers, PreAccept new/executed/committed/ballot-reject/changed/checkpoint, PreAcceptReply delayed/wrong-ballot/nack/count/slow/fast/merge/committedDeps, PreAcceptOK delayed/non-initial/fast/slow, bcastPrepare
-  - [ ] 99.3f-iv: handleAccept + handleAcceptReply + handleCommit + handleCommitShort (~408 LOC)
+  - [x] 99.3f-iv: handleAccept + handleAcceptReply + handleCommit + handleCommitShort (~408 LOC) ✓
+    - handleAccept (follower): ballot check, instance create/update to ACCEPTED, checkpoint detection, reply AcceptReply
+    - handleAcceptReply (leader): nack counting, ballot check, quorum → STRONGLY_COMMITTED + client reply + bcastStrongCommit
+    - handleCommit (follower): full Commit with commands → STRONGLY_COMMITTED, NO-OP re-propose, checkpoint
+    - handleCommitShort (follower): short Commit without commands → STRONGLY_COMMITTED, re-propose, checkpoint
+    - 21 tests: Accept new/existing/committed/ballot-reject/checkpoint/maxSeq, AcceptReply delayed/nack/wrong-ballot/quorum/partial, Commit new/existing/committed/checkpoint/bookkeeping, CommitShort new/existing/committed/checkpoint/crtInstance
 - [ ] 99.3g: 移植 recovery path（Prepare/TryPreAccept）
 - [ ] 99.3h: `go build ./epaxos-ho/` 通过
 

@@ -940,16 +940,172 @@ func (r *Replica) handlePreAccept(preAccept *PreAccept) {
 	}
 }
 
+// handleAccept processes an Accept message from the leader (follower side).
+// Sets instance to ACCEPTED with the leader's finalized attributes and replies.
 func (r *Replica) handleAccept(accept *Accept) {
-	// TODO: Phase 99.3f — strong commit path
+	inst := r.InstanceSpace[accept.Replica][accept.Instance]
+
+	if accept.Seq >= r.maxSeq {
+		r.maxSeq = accept.Seq + 1
+	}
+
+	if inst != nil && (inst.Status == STRONGLY_COMMITTED || inst.Status == CAUSALLY_COMMITTED || inst.Status == EXECUTED || inst.Status == DISCARDED) {
+		return
+	}
+
+	if accept.Instance >= r.crtInstance[accept.Replica] {
+		r.crtInstance[accept.Replica] = accept.Instance + 1
+	}
+
+	if inst != nil {
+		if accept.Ballot < inst.bal {
+			r.replyAccept(accept.LeaderId, &AcceptReply{
+				Replica:  accept.Replica,
+				Instance: accept.Instance,
+				OK:       FALSE,
+				Ballot:   inst.bal,
+			})
+			return
+		}
+		inst.Status = ACCEPTED
+		inst.State = READY
+		inst.Seq = accept.Seq
+		inst.Deps = accept.Deps
+		inst.CL = accept.CL
+		inst.bal = accept.Ballot
+		inst.vbal = accept.Ballot
+	} else {
+		r.InstanceSpace[accept.Replica][accept.Instance] = &Instance{
+			bal:        accept.Ballot,
+			vbal:       accept.Ballot,
+			Status:     ACCEPTED,
+			State:      READY,
+			Seq:        accept.Seq,
+			Deps:       accept.Deps,
+			CL:         accept.CL,
+			instanceId: &instanceId{accept.Replica, accept.Instance},
+		}
+
+		if accept.Count == 0 {
+			// Checkpoint
+			r.latestCPReplica = accept.Replica
+			r.latestCPInstance = accept.Instance
+			r.clearHashtables()
+		}
+	}
+
+	r.recordInstanceMetadata(r.InstanceSpace[accept.Replica][accept.Instance])
+	r.sync()
+
+	r.replyAccept(accept.LeaderId, &AcceptReply{
+		Replica:  accept.Replica,
+		Instance: accept.Instance,
+		OK:       TRUE,
+		Ballot:   accept.Ballot,
+	})
 }
 
+// handleCommit processes a full Commit message (follower side, strong path).
+// Contains full command payload. Sets instance to STRONGLY_COMMITTED.
 func (r *Replica) handleCommit(commit *Commit) {
-	// TODO: Phase 99.3f — strong commit handling
+	inst := r.InstanceSpace[commit.Replica][commit.Instance]
+
+	if commit.Seq >= r.maxSeq {
+		r.maxSeq = commit.Seq + 1
+	}
+
+	if commit.Instance >= r.crtInstance[commit.Replica] {
+		r.crtInstance[commit.Replica] = commit.Instance + 1
+	}
+
+	if inst != nil && (inst.Status == STRONGLY_COMMITTED || inst.Status == CAUSALLY_COMMITTED || inst.Status == EXECUTED || inst.Status == DISCARDED) {
+		return
+	}
+
+	if inst != nil {
+		if inst.lb != nil && inst.lb.clientProposals != nil && len(commit.Command) == 0 {
+			// NO-OP committed — re-propose our pending proposals
+			for _, p := range inst.lb.clientProposals {
+				r.ProposeChan <- p
+			}
+			inst.lb = nil
+		}
+		inst.Cmds = commit.Command
+		inst.Seq = commit.Seq
+		inst.Deps = commit.Deps
+		inst.CL = commit.CL
+		inst.Status = STRONGLY_COMMITTED
+		inst.State = READY
+	} else {
+		r.InstanceSpace[commit.Replica][commit.Instance] = &Instance{
+			Cmds:       commit.Command,
+			Status:     STRONGLY_COMMITTED,
+			State:      READY,
+			Seq:        commit.Seq,
+			Deps:       commit.Deps,
+			CL:         commit.CL,
+			instanceId: &instanceId{commit.Replica, commit.Instance},
+		}
+
+		if len(commit.Command) == 0 {
+			// Checkpoint
+			r.latestCPReplica = commit.Replica
+			r.latestCPInstance = commit.Instance
+			r.clearHashtables()
+		}
+	}
+
+	r.updateCommitted(commit.Replica)
+	r.recordInstanceMetadata(r.InstanceSpace[commit.Replica][commit.Instance])
+	r.recordCommands(commit.Command)
 }
 
+// handleCommitShort processes a short Commit message (follower side, strong path).
+// Commands were already sent via PreAccept/Accept — only metadata here.
 func (r *Replica) handleCommitShort(commit *CommitShort) {
-	// TODO: Phase 99.3f — short commit handling
+	inst := r.InstanceSpace[commit.Replica][commit.Instance]
+
+	if commit.Instance >= r.crtInstance[commit.Replica] {
+		r.crtInstance[commit.Replica] = commit.Instance + 1
+	}
+
+	if inst != nil && (inst.Status == STRONGLY_COMMITTED || inst.Status == CAUSALLY_COMMITTED || inst.Status == EXECUTED || inst.Status == DISCARDED) {
+		return
+	}
+
+	if inst != nil {
+		if inst.lb != nil && inst.lb.clientProposals != nil {
+			// Re-propose pending proposals in a different instance
+			for _, p := range inst.lb.clientProposals {
+				r.ProposeChan <- p
+			}
+			inst.lb = nil
+		}
+		inst.Seq = commit.Seq
+		inst.Deps = commit.Deps
+		inst.CL = commit.CL
+		inst.Status = STRONGLY_COMMITTED
+		inst.State = READY
+	} else {
+		r.InstanceSpace[commit.Replica][commit.Instance] = &Instance{
+			Status:     STRONGLY_COMMITTED,
+			State:      READY,
+			Seq:        commit.Seq,
+			Deps:       commit.Deps,
+			CL:         commit.CL,
+			instanceId: &instanceId{commit.Replica, commit.Instance},
+		}
+
+		if commit.Count == 0 {
+			// Checkpoint
+			r.latestCPReplica = commit.Replica
+			r.latestCPInstance = commit.Instance
+			r.clearHashtables()
+		}
+	}
+
+	r.updateCommitted(commit.Replica)
+	r.recordInstanceMetadata(r.InstanceSpace[commit.Replica][commit.Instance])
 }
 
 func (r *Replica) handleCausalCommit(commit *CausalCommit) {
@@ -1491,8 +1647,56 @@ func (r *Replica) handlePreAcceptOK(pareply *PreAcceptOK) {
 	}
 }
 
-func (r *Replica) handleAcceptReply(reply *AcceptReply) {
-	// TODO: Phase 99.3f-iv — strong commit path
+// handleAcceptReply processes an AcceptReply from a follower (leader side).
+// When quorum reached, commits the instance and broadcasts strong commit.
+func (r *Replica) handleAcceptReply(areply *AcceptReply) {
+	inst := r.InstanceSpace[areply.Replica][areply.Instance]
+
+	if inst.Status != ACCEPTED {
+		// Already moved past Accept phase — delayed reply
+		return
+	}
+
+	if areply.OK == FALSE {
+		inst.lb.nacks++
+		if areply.Ballot > inst.lb.maxRecvBallot {
+			inst.lb.maxRecvBallot = areply.Ballot
+		}
+		return
+	}
+
+	if inst.bal != areply.Ballot {
+		return
+	}
+
+	inst.lb.acceptOKs++
+
+	if inst.lb.acceptOKs+1 > r.N/2 {
+		r.InstanceSpace[areply.Replica][areply.Instance].Status = STRONGLY_COMMITTED
+
+		r.updateCommitted(areply.Replica)
+		r.updateStrongSessionConflict(inst.Cmds, areply.Replica, areply.Instance)
+
+		if inst.lb.clientProposals != nil && !r.Dreply {
+			for i := 0; i < len(inst.lb.clientProposals); i++ {
+				prop := inst.lb.clientProposals[i]
+				r.ReplyProposeTS(
+					&defs.ProposeReplyTS{
+						OK:        TRUE,
+						CommandId: prop.CommandId,
+						Value:     state.NIL(),
+						Timestamp: prop.Timestamp,
+					},
+					prop.Reply,
+					prop.Mutex)
+			}
+		}
+
+		r.recordInstanceMetadata(inst)
+		r.sync()
+
+		r.bcastStrongCommit(areply.Replica, areply.Instance, inst.Cmds, inst.Seq, inst.Deps, inst.CL, state.STRONG)
+	}
 }
 
 func (r *Replica) handleTryPreAccept(msg *TryPreAccept) {
