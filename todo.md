@@ -6711,9 +6711,12 @@ case slot := <-r.deliverChan:
     - updateStrongConflicts, updateStrongSessionConflict
     - updateStrongAttributes1/2, mergeStrongAttributes, equalDeps
     - 15 tests: conflict tracking, session isolation, key/session/maxSeq deps, skip logic, merge equal/seq/deps, equalDeps
-  - [ ] 99.3f-ii: Broadcast functions + startStrongCommit (~310 LOC)
-    - bcastPreAccept + bcastAccept + bcastStrongCommit (~194 LOC)
-    - startStrongCommit (~116 LOC)
+  - [x] 99.3f-ii: Broadcast functions + startStrongCommit (~310 LOC) ✓
+    - bcastPreAccept (Thrifty-aware PreAccept broadcast)
+    - bcastAccept (Thrifty-aware Accept broadcast)
+    - bcastStrongCommit (CommitShort for first half, full Commit for rest)
+    - startStrongCommit (attribute computation, instance creation, conflict update, checkpoint handling)
+    - 11 tests: broadcast safety, instance creation, attribute computation, conflict tracking, ballot storage, deps/committedDeps initialization
   - [ ] 99.3f-iii: handlePreAccept + handlePreAcceptReply + handlePreAcceptOK (~395 LOC)
   - [ ] 99.3f-iv: handleAccept + handleAcceptReply + handleCommit + handleCommitShort (~408 LOC)
 - [ ] 99.3g: 移植 recovery path（Prepare/TryPreAccept）

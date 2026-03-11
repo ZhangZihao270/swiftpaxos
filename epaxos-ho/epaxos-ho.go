@@ -578,10 +578,209 @@ func (r *Replica) startCausalCommit(replicaId int32, instance int32, ballot int3
 	}
 }
 
+// bcastPreAccept broadcasts a PreAccept message to peers.
+// With Thrifty mode, sends to a fast-path quorum instead of all peers.
+func (r *Replica) bcastPreAccept(replicaId int32, instance int32, ballot int32, cmds []state.Command, seq int32, deps []int32, cl []int32) {
+	defer func() {
+		if err := recover(); err != nil {
+			dlog.Println("PreAccept bcast failed:", err)
+		}
+	}()
+
+	args := &PreAccept{
+		LeaderId: r.Id,
+		Replica:  replicaId,
+		Instance: instance,
+		Ballot:   ballot,
+		Command:  cmds,
+		Seq:      seq,
+		Deps:     deps,
+		CL:       cl,
+	}
+
+	n := r.N - 1
+	if r.Thrifty {
+		n = r.N/2 + (r.N/2+1)/2 - 1
+	}
+
+	sent := 0
+	for q := 0; q < r.N-1; q++ {
+		if !r.Alive[r.PreferredPeerOrder[q]] {
+			continue
+		}
+		r.SendMsg(r.PreferredPeerOrder[q], r.preAcceptRPC, args)
+		sent++
+		if sent >= n {
+			break
+		}
+	}
+}
+
+// bcastAccept broadcasts an Accept message to peers.
+// With Thrifty mode, sends to a simple majority instead of all peers.
+func (r *Replica) bcastAccept(replicaId int32, instance int32, ballot int32, count int32, seq int32, deps []int32, cl []int32) {
+	defer func() {
+		if err := recover(); err != nil {
+			dlog.Println("Accept bcast failed:", err)
+		}
+	}()
+
+	args := &Accept{
+		LeaderId: r.Id,
+		Replica:  replicaId,
+		Instance: instance,
+		Ballot:   ballot,
+		Count:    count,
+		Seq:      seq,
+		Deps:     deps,
+		CL:       cl,
+	}
+
+	n := r.N - 1
+	if r.Thrifty {
+		n = r.N / 2
+	}
+
+	sent := 0
+	for q := 0; q < r.N-1; q++ {
+		if !r.Alive[r.PreferredPeerOrder[q]] {
+			continue
+		}
+		r.SendMsg(r.PreferredPeerOrder[q], r.acceptRPC, args)
+		sent++
+		if sent >= n {
+			break
+		}
+	}
+}
+
+// bcastStrongCommit broadcasts a strong Commit to all peers.
+// Sends CommitShort (without commands) to the first half and full Commit to the rest,
+// unless Thrifty mode is active (switches to full Commit after quorum).
+func (r *Replica) bcastStrongCommit(replicaId int32, instance int32, cmds []state.Command, seq int32, deps []int32, cl []int32, consistency state.Operation) {
+	defer func() {
+		if err := recover(); err != nil {
+			dlog.Println("Commit bcast failed:", err)
+		}
+	}()
+
+	args := &Commit{
+		Consistency: consistency,
+		LeaderId:    r.Id,
+		Replica:     replicaId,
+		Instance:    instance,
+		Command:     cmds,
+		Seq:         seq,
+		Deps:        deps,
+		CL:          cl,
+	}
+
+	argsShort := &CommitShort{
+		Consistency: consistency,
+		LeaderId:    r.Id,
+		Replica:     replicaId,
+		Instance:    instance,
+		Count:       int32(len(cmds)),
+		Seq:         seq,
+		Deps:        deps,
+		CL:          cl,
+	}
+
+	sent := 0
+	for q := 0; q < r.N-1; q++ {
+		if !r.Alive[r.PreferredPeerOrder[q]] {
+			continue
+		}
+		if r.Thrifty && sent >= r.N/2 {
+			r.SendMsg(r.PreferredPeerOrder[q], r.commitRPC, args)
+		} else {
+			r.SendMsg(r.PreferredPeerOrder[q], r.commitShortRPC, argsShort)
+			sent++
+		}
+	}
+}
+
 // startStrongCommit initiates the EPaxos-style 2-RTT commit for strong commands.
 // Strong commands go through PreAccept → Accept → Commit phases.
+// This function computes initial attributes, creates the instance, and broadcasts PreAccept.
 func (r *Replica) startStrongCommit(replicaId int32, instance int32, ballot int32, proposals []*defs.GPropose, cmds []state.Command) {
-	// TODO: Phase 99.3f — strong dependency computation + PreAccept broadcast
+	seq := int32(0)
+	deps := make([]int32, r.N)
+	cl := make([]int32, r.N)
+	for q := 0; q < r.N; q++ {
+		deps[q] = -1
+		cl[q] = 0
+	}
+
+	seq, deps, cl, _ = r.updateStrongAttributes1(cmds, seq, deps, cl, replicaId, instance)
+
+	comDeps := make([]int32, r.N)
+	for i := 0; i < r.N; i++ {
+		comDeps[i] = -1
+	}
+
+	r.InstanceSpace[replicaId][instance] = &Instance{
+		Cmds:       cmds,
+		bal:        ballot,
+		vbal:       ballot,
+		Status:     PREACCEPTED,
+		State:      READY,
+		Seq:        seq,
+		Deps:       deps,
+		CL:         cl,
+		lb:         &LeaderBookkeeping{clientProposals: proposals, allEqual: true, originalDeps: deps, committedDeps: comDeps},
+		instanceId: &instanceId{replicaId, instance},
+	}
+
+	if seq >= r.maxSeq {
+		r.maxSeq = seq + 1
+	}
+
+	r.updateStrongConflicts(cmds, replicaId, instance, seq)
+
+	r.recordInstanceMetadata(r.InstanceSpace[replicaId][instance])
+	r.recordCommands(cmds)
+	r.sync()
+
+	r.bcastPreAccept(replicaId, instance, ballot, cmds, seq, deps, cl)
+
+	cpcounter += len(cmds)
+
+	if replicaId == r.Id && DO_CHECKPOINTING && cpcounter >= CHECKPOINT_PERIOD {
+		cpcounter = 0
+
+		r.crtInstance[r.Id]++
+		instance++
+
+		r.maxSeq++
+		for q := 0; q < r.N; q++ {
+			deps[q] = r.crtInstance[int32(q)] - 1
+			cl[q] = 0
+		}
+
+		r.InstanceSpace[r.Id][instance] = &Instance{
+			Cmds:       cpMarker,
+			bal:        0,
+			vbal:       0,
+			Status:     PREACCEPTED,
+			State:      READY,
+			Seq:        r.maxSeq,
+			Deps:       deps,
+			CL:         cl,
+			lb:         &LeaderBookkeeping{allEqual: true, originalDeps: deps, committedDeps: comDeps},
+			instanceId: &instanceId{r.Id, instance},
+		}
+
+		r.latestCPReplica = r.Id
+		r.latestCPInstance = instance
+
+		r.clearHashtables()
+
+		r.recordInstanceMetadata(r.InstanceSpace[r.Id][instance])
+		r.sync()
+
+		r.bcastPreAccept(r.Id, instance, 0, cpMarker, r.maxSeq, deps, cl)
+	}
 }
 
 func (r *Replica) handlePrepare(prepare *Prepare) {

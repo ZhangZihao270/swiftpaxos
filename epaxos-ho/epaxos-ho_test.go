@@ -476,11 +476,7 @@ func TestHandleProposeAllStrong(t *testing.T) {
 	}
 }
 
-func TestStartStrongCommitStub(t *testing.T) {
-	r := &Replica{}
-	// Should not panic — it's a stub
-	r.startStrongCommit(0, 0, 0, nil, nil)
-}
+// startStrongCommit tested separately — it now requires initialized InstanceSpace and conflict maps.
 
 // --- Causal commit helper tests ---
 
@@ -1275,6 +1271,222 @@ func TestEqualDeps(t *testing.T) {
 	// Empty deps
 	if !equalDeps([]int32{}, []int32{}) {
 		t.Error("empty deps should be equal")
+	}
+}
+
+// --- Phase 99.3f-ii: Broadcast + startStrongCommit tests ---
+
+// TestBcastPreAccept verifies PreAccept broadcast doesn't panic on bare test replica.
+func TestBcastPreAccept(t *testing.T) {
+	r := newTestReplica(3)
+	// bcastPreAccept requires Alive and SendMsg — test that it doesn't panic
+	// with a bare test replica (SendMsg is nil, but recover catches panics).
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	deps := []int32{-1, -1, -1}
+	cl := []int32{0, 0, 0}
+
+	// Should not panic due to defer/recover
+	r.bcastPreAccept(0, 5, 1, cmds, 10, deps, cl)
+}
+
+// TestBcastAccept verifies Accept broadcast doesn't panic on bare test replica.
+func TestBcastAccept(t *testing.T) {
+	r := newTestReplica(3)
+	deps := []int32{-1, -1, -1}
+	cl := []int32{0, 0, 0}
+
+	r.bcastAccept(0, 5, 1, 3, 10, deps, cl)
+}
+
+// TestBcastStrongCommit verifies strong commit broadcast doesn't panic.
+func TestBcastStrongCommit(t *testing.T) {
+	r := newTestReplica(3)
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	deps := []int32{-1, -1, -1}
+	cl := []int32{0, 0, 0}
+
+	r.bcastStrongCommit(0, 5, cmds, 10, deps, cl, state.STRONG)
+}
+
+// TestStartStrongCommit_BasicInstance verifies that startStrongCommit creates
+// the instance with correct status and attributes.
+func TestStartStrongCommit_BasicInstance(t *testing.T) {
+	r := newTestReplica(3)
+
+	cmds := []state.Command{
+		{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG, Sid: 1},
+	}
+	proposals := []*defs.GPropose{
+		{Propose: &defs.Propose{CommandId: 1, Command: cmds[0]}},
+	}
+
+	r.startStrongCommit(0, 0, 0, proposals, cmds)
+
+	inst := r.InstanceSpace[0][0]
+	if inst == nil {
+		t.Fatal("instance not created")
+	}
+	if inst.Status != PREACCEPTED {
+		t.Errorf("Status=%d, want PREACCEPTED(%d)", inst.Status, PREACCEPTED)
+	}
+	if inst.State != READY {
+		t.Errorf("State=%d, want READY(%d)", inst.State, READY)
+	}
+	if len(inst.Cmds) != 1 {
+		t.Errorf("len(Cmds)=%d, want 1", len(inst.Cmds))
+	}
+	if inst.lb == nil {
+		t.Fatal("LeaderBookkeeping is nil")
+	}
+	if !inst.lb.allEqual {
+		t.Error("allEqual should be true initially")
+	}
+	if len(inst.lb.clientProposals) != 1 {
+		t.Errorf("clientProposals len=%d, want 1", len(inst.lb.clientProposals))
+	}
+	if inst.instanceId == nil || inst.instanceId.replica != 0 || inst.instanceId.instance != 0 {
+		t.Error("instanceId not set correctly")
+	}
+}
+
+// TestStartStrongCommit_AttributesComputed verifies dependency computation.
+func TestStartStrongCommit_AttributesComputed(t *testing.T) {
+	r := newTestReplica(3)
+
+	// Set up a pre-existing conflict on replica 1
+	r.conflictMutex.Lock()
+	r.conflicts[1][10] = 3
+	r.conflictMutex.Unlock()
+	r.InstanceSpace[1][3] = &Instance{
+		Cmds: []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}},
+		Seq:  20,
+	}
+
+	cmds := []state.Command{
+		{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG, Sid: 1},
+	}
+
+	r.startStrongCommit(0, 0, 0, nil, cmds)
+
+	inst := r.InstanceSpace[0][0]
+	if inst.Deps[1] != 3 {
+		t.Errorf("Deps[1]=%d, want 3 from conflict", inst.Deps[1])
+	}
+	if inst.Seq != 21 {
+		t.Errorf("Seq=%d, want 21", inst.Seq)
+	}
+}
+
+// TestStartStrongCommit_UpdatesConflicts verifies that conflict maps are updated.
+func TestStartStrongCommit_UpdatesConflicts(t *testing.T) {
+	r := newTestReplica(3)
+
+	cmds := []state.Command{
+		{Op: state.PUT, K: 42, V: state.NIL(), CL: state.STRONG, Sid: 1},
+	}
+
+	r.startStrongCommit(0, 5, 0, nil, cmds)
+
+	r.conflictMutex.RLock()
+	if r.conflicts[0][42] != 5 {
+		t.Errorf("conflicts[0][42]=%d, want 5", r.conflicts[0][42])
+	}
+	r.conflictMutex.RUnlock()
+}
+
+// TestStartStrongCommit_MaxSeqBumped verifies maxSeq is updated.
+func TestStartStrongCommit_MaxSeqBumped(t *testing.T) {
+	r := newTestReplica(3)
+	r.maxSeq = 0
+
+	cmds := []state.Command{
+		{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG, Sid: 1},
+	}
+
+	r.startStrongCommit(0, 0, 0, nil, cmds)
+
+	if r.maxSeq < 1 {
+		t.Errorf("maxSeq=%d, want >= 1", r.maxSeq)
+	}
+}
+
+// TestStartStrongCommit_DepsInitializedToNegOne verifies initial deps are -1.
+func TestStartStrongCommit_DepsInitializedToNegOne(t *testing.T) {
+	r := newTestReplica(3)
+
+	cmds := []state.Command{
+		{Op: state.PUT, K: 99, V: state.NIL(), CL: state.STRONG, Sid: 1},
+	}
+
+	r.startStrongCommit(0, 0, 0, nil, cmds)
+
+	inst := r.InstanceSpace[0][0]
+	for i, d := range inst.Deps {
+		if d != -1 {
+			t.Errorf("Deps[%d]=%d, want -1 with no conflicts", i, d)
+		}
+	}
+}
+
+// TestStartStrongCommit_CommittedDepsInitialized verifies committedDeps in lb.
+func TestStartStrongCommit_CommittedDepsInitialized(t *testing.T) {
+	r := newTestReplica(3)
+
+	cmds := []state.Command{
+		{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG, Sid: 1},
+	}
+
+	r.startStrongCommit(0, 0, 0, nil, cmds)
+
+	inst := r.InstanceSpace[0][0]
+	for i, cd := range inst.lb.committedDeps {
+		if cd != -1 {
+			t.Errorf("committedDeps[%d]=%d, want -1", i, cd)
+		}
+	}
+}
+
+// TestStartStrongCommit_OriginalDepsSaved verifies originalDeps are saved in lb.
+func TestStartStrongCommit_OriginalDepsSaved(t *testing.T) {
+	r := newTestReplica(3)
+
+	// Set up a conflict so deps are non-trivial
+	r.conflictMutex.Lock()
+	r.conflicts[2][10] = 7
+	r.conflictMutex.Unlock()
+	r.InstanceSpace[2][7] = &Instance{
+		Cmds: []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}},
+		Seq:  5,
+	}
+
+	cmds := []state.Command{
+		{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG, Sid: 1},
+	}
+
+	r.startStrongCommit(0, 0, 0, nil, cmds)
+
+	inst := r.InstanceSpace[0][0]
+	if inst.lb.originalDeps[2] != 7 {
+		t.Errorf("originalDeps[2]=%d, want 7", inst.lb.originalDeps[2])
+	}
+}
+
+// TestStartStrongCommit_BallotStored verifies ballot is saved in instance.
+func TestStartStrongCommit_BallotStored(t *testing.T) {
+	r := newTestReplica(3)
+
+	cmds := []state.Command{
+		{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG, Sid: 1},
+	}
+
+	r.startStrongCommit(0, 0, 42, nil, cmds)
+
+	inst := r.InstanceSpace[0][0]
+	if inst.bal != 42 {
+		t.Errorf("bal=%d, want 42", inst.bal)
+	}
+	if inst.vbal != 42 {
+		t.Errorf("vbal=%d, want 42", inst.vbal)
 	}
 }
 
