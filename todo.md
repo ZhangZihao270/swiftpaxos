@@ -6275,10 +6275,68 @@ case slot := <-r.deliverChan:
 
 **Tasks**:
 - [x] 95a: 创建 eval-phase95.sh 脚本（基于 eval-phase94.sh，修改 writes=50, weakWrites=50）[26:03:10]
-- [ ] 95b: 跑 3 protocols × 8 thread counts = 24 组实验
-  - Results: `results/eval-5r5m3c-phase95-YYYYMMDD/summary-exp3.1.csv`
-- [ ] 95c: 对比 Phase 94（writes=5）结果，分析 write ratio 对性能的影响
-- [ ] 95d: 结果表格和分析写入 todo.md
+- [x] 95b: 跑 3 protocols × 8 thread counts = 24 组实验 [26:03:10]
+  - Results: `results/eval-5r5m3c-phase95-20260310/summary-exp3.1.csv`
+  - All 24/24 experiments succeeded (no retries needed)
+- [x] 95c: 对比 Phase 94（writes=5）结果，分析 write ratio 对性能的影响 [26:03:10]
+- [x] 95d: 结果表格和分析写入 todo.md [26:03:10]
+
+**Phase 95 Results — Exp 3.1: 50% Write Ratio (5r/5m/3c, networkDelay=25ms)**:
+
+| Threads | CURP tput | HT tput | HO tput | CURP s_p50 | HT s_p50 | HO s_p50 | HT w_p50 | HO w_p50 |
+|---------|-----------|---------|---------|------------|----------|----------|----------|----------|
+| t=1     | 868       | 968     | 1,362   | 51.5ms     | 51.3ms   | 68.6ms   | 77.3ms   | 0.16ms   |
+| t=2     | 1,739     | 1,911   | 2,749   | 51.4ms     | 51.3ms   | 68.3ms   | 34.1ms   | 0.19ms   |
+| t=4     | 3,476     | 3,783   | 5,411   | 51.4ms     | 51.3ms   | 68.1ms   | 84.3ms   | 0.22ms   |
+| t=8     | 6,864     | 7,335   | 10,686  | 51.4ms     | 51.3ms   | 67.9ms   | 83.3ms   | 0.24ms   |
+| t=16    | 12,493    | 14,945  | 20,149  | 51.5ms     | 51.1ms   | 69.6ms   | 84.2ms   | 0.31ms   |
+| t=32    | 15,325    | 24,671  | 27,065  | 54.5ms     | 61.1ms   | 83.5ms   | 84.5ms   | 0.45ms   |
+| t=64    | 18,382    | 28,397  | 30,584  | 76.2ms     | 82.5ms   | 99.3ms   | 84.8ms   | 0.70ms   |
+| t=96    | 20,241    | 22,629  | 29,462  | 86.6ms     | 93.4ms   | 153.2ms  | 88.7ms   | 0.83ms   |
+
+**Phase 94 vs Phase 95 — Throughput Comparison (writes=5 vs writes=50)**:
+
+| Threads | CURP (5%) | CURP (50%) | HT (5%) | HT (50%) | HO (5%) | HO (50%) |
+|---------|-----------|------------|---------|----------|---------|----------|
+| t=1     | 867       | 868        | 1,583   | 968      | 1,542   | 1,362    |
+| t=4     | 3,459     | 3,476      | 6,304   | 3,783    | 5,909   | 5,411    |
+| t=16    | 6,780     | 12,493     | 24,520  | 14,945   | 22,085  | 20,149   |
+| t=32    | 2,922     | 15,325     | 34,698  | 24,671   | 33,030  | 27,065   |
+| t=64    | 930       | 18,382     | 41,925  | 28,397   | 41,762  | 30,584   |
+| t=96    | 0 (FAIL)  | 20,241     | 47,394  | 22,629   | 46,095  | 29,462   |
+
+**Analysis**:
+
+1. **CURP Baseline dramatically improved with 50% writes**:
+   - Phase 94 collapsed at t=32+ (2.9K) and failed at t=96. Phase 95 scales to 20.2K at t=96.
+   - **Confounding variable**: Phase 95 runs with simplified deliverChan code (commit 8aed210).
+     The improvement may be partly due to the code fix, not just the write ratio.
+
+2. **Hybrid protocols lose throughput with 50% writes**:
+   - **CURP-HT**: 39-52% throughput drop (47.4K → 22.6K at t=96). Peak shifts from t=96 to t=64.
+   - **CURP-HO**: 8-36% throughput drop (46.1K → 29.5K at t=96). Peak shifts from t=96 to t=64.
+   - Expected: more writes = more state machine work + more conflict potential.
+
+3. **CURP-HT weak latency degrades catastrophically with 50% writes**:
+   - Phase 94 (5% writes): w_p50 ≈ 0.2ms (sub-millisecond, speculative fast path).
+   - Phase 95 (50% writes): w_p50 ≈ 77-89ms (~1.5 RTT). Weak writes appear to go
+     through MSync synchronization path instead of instant speculative reply.
+   - This is a **key finding**: HT's weak write performance is poor when write ratio is high.
+
+4. **CURP-HO maintains sub-ms weak latency even with 50% writes**:
+   - Phase 94: w_p50 = 0.17-2.90ms. Phase 95: w_p50 = 0.16-0.83ms.
+   - HO's speculative reply path works correctly regardless of write ratio.
+   - **HO is the clear winner for write-heavy hybrid workloads**.
+
+5. **Strong latency (s_p50) unchanged by write ratio**:
+   - CURP baseline: ~51ms (both phases).
+   - HT: ~51ms (both phases).
+   - HO: ~68ms (both phases, 17ms higher than HT due to accept processing).
+
+6. **Key takeaway**: At 50% writes, CURP-HO outperforms CURP-HT on both throughput
+   (29.5K vs 22.6K at t=96, +30%) and weak latency (0.83ms vs 88.7ms, 107x faster).
+   The advantage widens with write ratio because HO's speculative reply path handles
+   weak writes without waiting for MSync.
 
 ---
 
