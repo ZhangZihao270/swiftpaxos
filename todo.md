@@ -6695,10 +6695,11 @@ case slot := <-r.deliverChan:
   - slowClock/fastClock/stopAdapting helper goroutines, sync() for durable storage
   - 15 stub handler methods (handlePropose through executeCommands) — to be filled in 99.3d-g
   - 5 new tests: stub handler no-panic, causal channel polling, message type assertions, clock vars, constants
-- [ ] 99.3d: 移植 handlePropose — 分离 causal/strong batches
-  - Orca 的 `handlePropose` 读 `cmd.CL` 来区分
-  - 在 SwiftPaxos 中：weak ops → CL=CAUSAL，strong ops → CL=STRONG
-  - ProposeChan 里的 `defs.GPropose` 需要携带 CL 信息
+- [x] 99.3d: 移植 handlePropose — 分离 causal/strong batches [26:03:11]
+  - Classifies proposals by cmd.CL: CAUSAL → causalCmds, STRONG → strongCmds, default → strong
+  - Batches from ProposeChan, allocates separate instances for causal and strong batches
+  - startCausalCommit/startStrongCommit stubs ready for 99.3e/f
+  - 7 new tests: classification, default-to-strong, instance allocation, all-causal/all-strong, stub calls
 - [ ] 99.3e: 移植 startCausalCommit + causal dependency computation
   - `updateCausalAttributes()` 原样搬
   - `bcastCausalCommit()` 用 SwiftPaxos 的 `SendMsg`

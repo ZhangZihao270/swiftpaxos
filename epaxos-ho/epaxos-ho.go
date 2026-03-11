@@ -419,10 +419,72 @@ func (r *Replica) run() {
 	}
 }
 
-// --- Stub handlers (to be implemented in phases 99.3d-g) ---
+// --- Protocol handlers ---
 
 func (r *Replica) handlePropose(propose *defs.GPropose) {
-	// TODO: Phase 99.3d — separate causal/strong batches based on cmd.CL
+	batchSize := len(r.ProposeChan) + 1
+
+	// Separate proposals into causal and strong batches based on CL field
+	causalCmds := make([]state.Command, 0, batchSize)
+	causalProposals := make([]*defs.GPropose, 0, batchSize)
+	strongCmds := make([]state.Command, 0, batchSize)
+	strongProposals := make([]*defs.GPropose, 0, batchSize)
+
+	// Classify the first proposal
+	switch propose.Command.CL {
+	case state.CAUSAL:
+		causalCmds = append(causalCmds, propose.Command)
+		causalProposals = append(causalProposals, propose)
+	case state.STRONG:
+		strongCmds = append(strongCmds, propose.Command)
+		strongProposals = append(strongProposals, propose)
+	default:
+		// Default to strong for safety (unknown CL)
+		strongCmds = append(strongCmds, propose.Command)
+		strongProposals = append(strongProposals, propose)
+	}
+
+	// Drain remaining proposals from the channel
+	for i := 1; i < batchSize; i++ {
+		prop := <-r.ProposeChan
+		switch prop.Command.CL {
+		case state.CAUSAL:
+			causalCmds = append(causalCmds, prop.Command)
+			causalProposals = append(causalProposals, prop)
+		case state.STRONG:
+			strongCmds = append(strongCmds, prop.Command)
+			strongProposals = append(strongProposals, prop)
+		default:
+			strongCmds = append(strongCmds, prop.Command)
+			strongProposals = append(strongProposals, prop)
+		}
+	}
+
+	// Start causal commit if we have causal commands
+	if len(causalCmds) > 0 {
+		instNo := r.crtInstance[r.Id]
+		r.crtInstance[r.Id]++
+		r.startCausalCommit(r.Id, instNo, 0, causalProposals, causalCmds)
+	}
+
+	// Start strong commit if we have strong commands
+	if len(strongCmds) > 0 {
+		instNo := r.crtInstance[r.Id]
+		r.crtInstance[r.Id]++
+		r.startStrongCommit(r.Id, instNo, 0, strongProposals, strongCmds)
+	}
+}
+
+// startCausalCommit initiates a 1-RTT causal commit for the given commands.
+// Causal commands are committed immediately and broadcast to all replicas.
+func (r *Replica) startCausalCommit(replicaId int32, instance int32, ballot int32, proposals []*defs.GPropose, cmds []state.Command) {
+	// TODO: Phase 99.3e — causal dependency computation + broadcast
+}
+
+// startStrongCommit initiates the EPaxos-style 2-RTT commit for strong commands.
+// Strong commands go through PreAccept → Accept → Commit phases.
+func (r *Replica) startStrongCommit(replicaId int32, instance int32, ballot int32, proposals []*defs.GPropose, cmds []state.Command) {
+	// TODO: Phase 99.3f — strong dependency computation + PreAccept broadcast
 }
 
 func (r *Replica) handlePrepare(prepare *Prepare) {
