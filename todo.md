@@ -6795,7 +6795,7 @@ case slot := <-r.deliverChan:
 
 **Goal**: 在 5r/5m/3c 集群上跑 EPaxos-HO，验证正确性和性能。
 
-- [ ] 99.7a: 创建 eval-phase99.sh 脚本
+- [x] 99.7a: 创建 eval-phase99.sh 脚本（scripts/eval-phase99.sh）
 - [ ] 99.7b: 跑 Exp 3.1（throughput sweep）：t=1,2,4,8,16,32,64,96
   - weakRatio=50, writes=5
   - 对比 CURP-HT/HO 结果
