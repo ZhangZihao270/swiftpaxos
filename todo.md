@@ -6730,7 +6730,10 @@ case slot := <-r.deliverChan:
     - handleCommit (follower): full Commit with commands → STRONGLY_COMMITTED, NO-OP re-propose, checkpoint
     - handleCommitShort (follower): short Commit without commands → STRONGLY_COMMITTED, re-propose, checkpoint
     - 21 tests: Accept new/existing/committed/ballot-reject/checkpoint/maxSeq, AcceptReply delayed/nack/wrong-ballot/quorum/partial, Commit new/existing/committed/checkpoint/bookkeeping, CommitShort new/existing/committed/checkpoint/crtInstance
-- [ ] 99.3g: 移植 recovery path（Prepare/TryPreAccept）
+- [ ] 99.3g: 移植 recovery path（Prepare/TryPreAccept）(~552 LOC in Orca, simplified to ~520 LOC)
+  - [x] 99.3g-i: startRecoveryForInstance + handlePrepare + bcastTryPreAccept + findPreAcceptConflicts (~180 LOC)
+  - [ ] 99.3g-ii: handlePrepareReply (~200 LOC, simplified: remove WAITING branches, set State=READY)
+  - [ ] 99.3g-iii: handleTryPreAccept + handleTryPreAcceptReply (~140 LOC)
 - [ ] 99.3h: `go build ./epaxos-ho/` 通过
 
 **关键适配点**:

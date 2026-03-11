@@ -821,8 +821,85 @@ func (r *Replica) bcastPrepare(replicaId int32, instance int32, ballot int32) {
 	}
 }
 
+// handlePrepare processes a Prepare message during recovery (responder side).
+// Returns the acceptor's current state for this instance so the recovery leader
+// can reconstruct the committed/pre-accepted state.
 func (r *Replica) handlePrepare(prepare *Prepare) {
-	// TODO: Phase 99.3g — recovery path
+	inst := r.InstanceSpace[prepare.Replica][prepare.Instance]
+	nildeps := make([]int32, r.N)
+	nilcl := make([]int32, r.N)
+
+	var preply *PrepareReply
+
+	if inst == nil {
+		// Never seen this instance — reply with NONE status
+		r.InstanceSpace[prepare.Replica][prepare.Instance] = &Instance{
+			bal:        prepare.Ballot,
+			vbal:       prepare.Ballot,
+			Status:     NONE,
+			State:      DONE,
+			Deps:       nildeps,
+			CL:         nilcl,
+			instanceId: &instanceId{prepare.Replica, prepare.Instance},
+		}
+		preply = &PrepareReply{
+			AcceptorId: r.Id,
+			Replica:    prepare.Replica,
+			Instance:   prepare.Instance,
+			OK:         TRUE,
+			Bal:        -1,
+			VBal:       -1,
+			Status:     NONE,
+			Seq:        -1,
+			Deps:       nildeps,
+			CL:         nilcl,
+		}
+	} else if inst.State == WAITING {
+		// WAITING means causal dependency not reached — treat as NONE
+		r.InstanceSpace[prepare.Replica][prepare.Instance] = &Instance{
+			bal:        prepare.Ballot,
+			vbal:       prepare.Ballot,
+			Status:     NONE,
+			State:      DONE,
+			Deps:       nildeps,
+			CL:         nilcl,
+			instanceId: &instanceId{prepare.Replica, prepare.Instance},
+		}
+		preply = &PrepareReply{
+			AcceptorId: r.Id,
+			Replica:    prepare.Replica,
+			Instance:   prepare.Instance,
+			OK:         TRUE,
+			Bal:        -1,
+			VBal:       -1,
+			Status:     NONE,
+			Seq:        -1,
+			Deps:       nildeps,
+			CL:         nilcl,
+		}
+	} else {
+		ok := uint8(TRUE)
+		if prepare.Ballot < inst.bal {
+			ok = FALSE
+		} else {
+			inst.bal = prepare.Ballot
+		}
+		preply = &PrepareReply{
+			AcceptorId: r.Id,
+			Replica:    prepare.Replica,
+			Instance:   prepare.Instance,
+			OK:         ok,
+			Bal:        inst.bal,
+			VBal:       inst.vbal,
+			Status:     inst.Status,
+			Command:    inst.Cmds,
+			Seq:        inst.Seq,
+			Deps:       inst.Deps,
+			CL:         inst.CL,
+		}
+	}
+
+	r.replyPrepare(prepare.LeaderId, preply)
 }
 
 // handlePreAccept processes a PreAccept message from the leader (follower side).
@@ -1707,8 +1784,130 @@ func (r *Replica) handleTryPreAcceptReply(reply *TryPreAcceptReply) {
 	// TODO: Phase 99.3g — recovery path
 }
 
-func (r *Replica) startRecoveryForInstance(replicaId int32, instanceId int32) {
-	// TODO: Phase 99.3g — initiate recovery for a stalled instance
+// startRecoveryForInstance initiates recovery for a stalled instance by
+// incrementing the ballot and broadcasting Prepare messages.
+func (r *Replica) startRecoveryForInstance(replicaId int32, instance int32) {
+	nildeps := make([]int32, r.N)
+	nilcl := make([]int32, r.N)
+
+	if r.InstanceSpace[replicaId][instance] == nil {
+		r.InstanceSpace[replicaId][instance] = &Instance{
+			Status:     NONE,
+			State:      READY,
+			Deps:       nildeps,
+			CL:         nilcl,
+			instanceId: &instanceId{replicaId, instance},
+		}
+	}
+
+	inst := r.InstanceSpace[replicaId][instance]
+
+	if inst.lb == nil {
+		inst.lb = &LeaderBookkeeping{
+			maxRecvBallot: -1,
+			preparing:     true,
+		}
+	} else {
+		inst.lb = &LeaderBookkeeping{
+			clientProposals: inst.lb.clientProposals,
+			maxRecvBallot:   -1,
+			preparing:       true,
+		}
+	}
+
+	if inst.Status == ACCEPTED {
+		inst.lb.recoveryInst = &RecoveryInstance{
+			cmds:   inst.Cmds,
+			status: inst.Status,
+			seq:    inst.Seq,
+			deps:   inst.Deps,
+			cl:     inst.CL,
+		}
+		inst.lb.maxRecvBallot = inst.bal
+	} else if inst.Status >= PREACCEPTED {
+		inst.lb.recoveryInst = &RecoveryInstance{
+			cmds:            inst.Cmds,
+			status:          inst.Status,
+			seq:             inst.Seq,
+			deps:            inst.Deps,
+			cl:              inst.CL,
+			preAcceptCount:  1,
+			leaderResponded: (r.Id == replicaId),
+		}
+	}
+
+	inst.bal = r.makeBallotLargerThan(inst.bal)
+
+	r.bcastPrepare(replicaId, instance, inst.bal)
+}
+
+// bcastTryPreAccept broadcasts a TryPreAccept message to all alive peers.
+func (r *Replica) bcastTryPreAccept(replicaId int32, instance int32, ballot int32, cmds []state.Command, seq int32, deps []int32, cl []int32) {
+	defer func() {
+		if err := recover(); err != nil {
+			dlog.Println("TryPreAccept bcast failed:", err)
+		}
+	}()
+
+	args := &TryPreAccept{
+		LeaderId: r.Id,
+		Replica:  replicaId,
+		Instance: instance,
+		Ballot:   ballot,
+		Command:  cmds,
+		Seq:      seq,
+		CL:       cl,
+		Deps:     deps,
+	}
+
+	for q := int32(0); q < int32(r.N); q++ {
+		if q == r.Id {
+			continue
+		}
+		if !r.Alive[q] {
+			continue
+		}
+		r.SendMsg(q, r.tryPreAcceptRPC, args)
+	}
+}
+
+// findPreAcceptConflicts checks if the given instance's attributes conflict with
+// any known instance. Used during recovery (TryPreAccept phase).
+// Returns: (conflict found, conflicting replica, conflicting instance)
+func (r *Replica) findPreAcceptConflicts(cmds []state.Command, replicaId int32, instance int32, seq int32, deps []int32) (bool, int32, int32) {
+	inst := r.InstanceSpace[replicaId][instance]
+	if inst != nil && len(inst.Cmds) > 0 {
+		if inst.Status >= ACCEPTED {
+			return true, replicaId, instance
+		}
+		if inst.Seq == seq && equalDeps(inst.Deps, deps) {
+			return false, replicaId, instance
+		}
+	}
+	for q := int32(0); q < int32(r.N); q++ {
+		for i := r.ExecedUpTo[q]; i < r.crtInstance[q]; i++ {
+			if replicaId == q && instance == i {
+				break
+			}
+			if i == deps[q] {
+				continue
+			}
+			other := r.InstanceSpace[q][i]
+			if other == nil || other.Cmds == nil || len(other.Cmds) == 0 {
+				continue
+			}
+			if other.Deps[replicaId] >= instance {
+				continue
+			}
+			if state.ConflictBatch(other.Cmds, cmds) {
+				if i > deps[q] ||
+					(i < deps[q] && other.Seq >= seq && (q != replicaId || other.Status > PREACCEPTED_EQ)) {
+					return true, q, i
+				}
+			}
+		}
+	}
+	return false, -1, -1
 }
 
 func (r *Replica) executeCommands() {

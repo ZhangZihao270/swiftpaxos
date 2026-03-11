@@ -213,9 +213,7 @@ func TestStubHandlersDoNotPanic(t *testing.T) {
 	// a minimal Replica with just the fields the stubs need.
 	r := &Replica{}
 
-	t.Run("handlePrepare", func(t *testing.T) {
-		r.handlePrepare(&Prepare{})
-	})
+	// handlePrepare tested separately — it now requires initialized InstanceSpace
 	// handlePreAccept tested separately — it now requires initialized InstanceSpace and conflict maps
 	// handleAccept tested separately — it now requires initialized InstanceSpace
 	// handleCommit tested separately — it now requires initialized InstanceSpace
@@ -233,9 +231,7 @@ func TestStubHandlersDoNotPanic(t *testing.T) {
 	t.Run("handleTryPreAcceptReply", func(t *testing.T) {
 		r.handleTryPreAcceptReply(&TryPreAcceptReply{})
 	})
-	t.Run("startRecoveryForInstance", func(t *testing.T) {
-		r.startRecoveryForInstance(0, 0)
-	})
+	// startRecoveryForInstance tested separately — it now requires initialized InstanceSpace
 	t.Run("executeCommands", func(t *testing.T) {
 		r.executeCommands()
 	})
@@ -2507,5 +2503,352 @@ func TestHandleCommitShort_UpdatesCrtInstance(t *testing.T) {
 
 	if r.crtInstance[1] != 11 {
 		t.Errorf("crtInstance[1]=%d, want 11", r.crtInstance[1])
+	}
+}
+
+// =============================================================================
+// Phase 99.3g-i: handlePrepare, startRecoveryForInstance, bcastTryPreAccept,
+//                findPreAcceptConflicts
+// =============================================================================
+
+// TestHandlePrepare_NilInstance verifies that handlePrepare creates a NONE instance
+// when the instance has never been seen.
+func TestHandlePrepare_NilInstance(t *testing.T) {
+	r := newTestReplica(3)
+	r.Id = 1
+
+	prepare := &Prepare{
+		LeaderId: 0,
+		Replica:  2,
+		Instance: 5,
+		Ballot:   (1 << 4) | 0, // ballot from replica 0
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handlePrepare(prepare)
+	}()
+
+	inst := r.InstanceSpace[2][5]
+	if inst == nil {
+		t.Fatal("instance should have been created")
+	}
+	if inst.Status != NONE {
+		t.Errorf("Status=%d, want NONE(%d)", inst.Status, NONE)
+	}
+	if inst.bal != prepare.Ballot {
+		t.Errorf("bal=%d, want %d", inst.bal, prepare.Ballot)
+	}
+}
+
+// TestHandlePrepare_ExistingInstance verifies that handlePrepare returns the
+// existing instance's attributes and updates the ballot.
+func TestHandlePrepare_ExistingInstance(t *testing.T) {
+	r := newTestReplica(3)
+	r.Id = 1
+
+	cmds := []state.Command{{Op: state.PUT, K: 42, V: state.NIL(), CL: state.STRONG}}
+	r.InstanceSpace[2][5] = &Instance{
+		Cmds:   cmds,
+		Status: PREACCEPTED,
+		Seq:    10,
+		Deps:   []int32{1, 2, 3},
+		CL:     []int32{0, 0, 0},
+		bal:    (0 << 4) | 2, // initial ballot from replica 2
+		vbal:   (0 << 4) | 2,
+		State:  READY,
+	}
+
+	prepare := &Prepare{
+		LeaderId: 0,
+		Replica:  2,
+		Instance: 5,
+		Ballot:   (1 << 4) | 0, // higher ballot
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handlePrepare(prepare)
+	}()
+
+	inst := r.InstanceSpace[2][5]
+	if inst.bal != prepare.Ballot {
+		t.Errorf("bal=%d, want %d (should be updated)", inst.bal, prepare.Ballot)
+	}
+}
+
+// TestHandlePrepare_LowerBallotRejected verifies that a Prepare with a lower
+// ballot than the current one is rejected (OK=FALSE).
+func TestHandlePrepare_LowerBallotRejected(t *testing.T) {
+	r := newTestReplica(3)
+	r.Id = 1
+
+	r.InstanceSpace[2][5] = &Instance{
+		Status: PREACCEPTED,
+		Seq:    10,
+		Deps:   []int32{1, 2, 3},
+		CL:     []int32{0, 0, 0},
+		bal:    (2 << 4) | 2, // high ballot
+		vbal:   (0 << 4) | 2,
+		State:  READY,
+	}
+
+	prepare := &Prepare{
+		LeaderId: 0,
+		Replica:  2,
+		Instance: 5,
+		Ballot:   (1 << 4) | 0, // lower than current bal
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handlePrepare(prepare)
+	}()
+
+	inst := r.InstanceSpace[2][5]
+	// Ballot should NOT be updated since prepare.Ballot < inst.bal
+	if inst.bal != (2<<4)|2 {
+		t.Errorf("bal=%d, should stay %d (prepare ballot was lower)", inst.bal, (2<<4)|2)
+	}
+}
+
+// TestHandlePrepare_WaitingTreatedAsNone verifies that WAITING instances are
+// treated the same as nil (never-seen) instances.
+func TestHandlePrepare_WaitingTreatedAsNone(t *testing.T) {
+	r := newTestReplica(3)
+	r.Id = 1
+
+	r.InstanceSpace[2][5] = &Instance{
+		Status: NONE,
+		State:  WAITING,
+		Deps:   []int32{0, 0, 0},
+		CL:     []int32{0, 0, 0},
+	}
+
+	prepare := &Prepare{
+		LeaderId: 0,
+		Replica:  2,
+		Instance: 5,
+		Ballot:   (1 << 4) | 0,
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handlePrepare(prepare)
+	}()
+
+	inst := r.InstanceSpace[2][5]
+	// For WAITING, we create a fresh NONE instance
+	if inst.Status != NONE {
+		t.Errorf("Status=%d, want NONE(%d) for WAITING instance", inst.Status, NONE)
+	}
+	if inst.State != DONE {
+		t.Errorf("State=%d, want DONE(%d)", inst.State, DONE)
+	}
+}
+
+// TestStartRecoveryForInstance_NilInstance verifies that startRecoveryForInstance
+// creates an instance, sets up LeaderBookkeeping, and bumps the ballot.
+func TestStartRecoveryForInstance_NilInstance(t *testing.T) {
+	r := newTestReplica(3)
+	r.Id = 0
+
+	r.startRecoveryForInstance(1, 5)
+
+	inst := r.InstanceSpace[1][5]
+	if inst == nil {
+		t.Fatal("instance should have been created")
+	}
+	if inst.Status != NONE {
+		t.Errorf("Status=%d, want NONE", inst.Status)
+	}
+	if inst.lb == nil {
+		t.Fatal("LeaderBookkeeping should be set")
+	}
+	if !inst.lb.preparing {
+		t.Error("preparing should be true")
+	}
+	if inst.lb.recoveryInst != nil {
+		t.Error("recoveryInst should be nil for NONE instance")
+	}
+	// Ballot should be > 0 (bumped from 0)
+	if inst.bal == 0 {
+		t.Error("ballot should have been bumped")
+	}
+}
+
+// TestStartRecoveryForInstance_PreacceptedInstance verifies that recovery for
+// a PREACCEPTED instance creates a recoveryInst with preAcceptCount=1.
+func TestStartRecoveryForInstance_PreacceptedInstance(t *testing.T) {
+	r := newTestReplica(3)
+	r.Id = 1 // not the original leader (replica 2)
+
+	cmds := []state.Command{{Op: state.PUT, K: 42, V: state.NIL(), CL: state.STRONG}}
+	r.InstanceSpace[2][5] = &Instance{
+		Cmds:       cmds,
+		Status:     PREACCEPTED,
+		Seq:        10,
+		Deps:       []int32{1, 2, 3},
+		CL:         []int32{0, 0, 0},
+		bal:        (0 << 4) | 2,
+		instanceId: &instanceId{2, 5},
+	}
+
+	r.startRecoveryForInstance(2, 5)
+
+	inst := r.InstanceSpace[2][5]
+	if inst.lb == nil {
+		t.Fatal("LeaderBookkeeping should be set")
+	}
+	if inst.lb.recoveryInst == nil {
+		t.Fatal("recoveryInst should be set for PREACCEPTED instance")
+	}
+	if inst.lb.recoveryInst.preAcceptCount != 1 {
+		t.Errorf("preAcceptCount=%d, want 1", inst.lb.recoveryInst.preAcceptCount)
+	}
+	if inst.lb.recoveryInst.leaderResponded {
+		t.Error("leaderResponded should be false (we are not the original leader)")
+	}
+	// Ballot should be larger than original
+	if inst.bal <= (0<<4)|2 {
+		t.Errorf("bal=%d, should be larger than original %d", inst.bal, (0<<4)|2)
+	}
+}
+
+// TestStartRecoveryForInstance_AcceptedInstance verifies that recovery for
+// an ACCEPTED instance creates a recoveryInst with maxRecvBallot set.
+func TestStartRecoveryForInstance_AcceptedInstance(t *testing.T) {
+	r := newTestReplica(3)
+	r.Id = 0
+
+	cmds := []state.Command{{Op: state.PUT, K: 42, V: state.NIL(), CL: state.STRONG}}
+	origBal := int32((1 << 4) | 2)
+	r.InstanceSpace[2][5] = &Instance{
+		Cmds:       cmds,
+		Status:     ACCEPTED,
+		Seq:        10,
+		Deps:       []int32{1, 2, 3},
+		CL:         []int32{0, 0, 0},
+		bal:        origBal,
+		instanceId: &instanceId{2, 5},
+	}
+
+	r.startRecoveryForInstance(2, 5)
+
+	inst := r.InstanceSpace[2][5]
+	if inst.lb.recoveryInst == nil {
+		t.Fatal("recoveryInst should be set for ACCEPTED instance")
+	}
+	if inst.lb.recoveryInst.status != ACCEPTED {
+		t.Errorf("recoveryInst.status=%d, want ACCEPTED(%d)", inst.lb.recoveryInst.status, ACCEPTED)
+	}
+	if inst.lb.maxRecvBallot != origBal {
+		t.Errorf("maxRecvBallot=%d, want %d", inst.lb.maxRecvBallot, origBal)
+	}
+}
+
+// TestBcastTryPreAccept verifies bcastTryPreAccept sends to all alive peers except self.
+func TestBcastTryPreAccept(t *testing.T) {
+	r := newTestReplica(3)
+	r.Id = 0
+
+	// bcastTryPreAccept will call SendMsg which will panic without real network.
+	// We just verify it doesn't panic with the recover() inside.
+	cmds := []state.Command{{Op: state.PUT, K: 42, V: state.NIL(), CL: state.STRONG}}
+	deps := []int32{-1, -1, -1}
+	cl := []int32{0, 0, 0}
+
+	// Should not panic (has internal recover)
+	r.bcastTryPreAccept(0, 5, (1<<4)|0, cmds, 10, deps, cl)
+}
+
+// TestFindPreAcceptConflicts_NoConflicts verifies no conflict when instance space is empty.
+func TestFindPreAcceptConflicts_NoConflicts(t *testing.T) {
+	r := newTestReplica(3)
+
+	cmds := []state.Command{{Op: state.PUT, K: 42, V: state.NIL(), CL: state.STRONG}}
+	deps := []int32{-1, -1, -1}
+
+	conflict, _, _ := r.findPreAcceptConflicts(cmds, 0, 5, 10, deps)
+	if conflict {
+		t.Error("should not find conflicts in empty instance space")
+	}
+}
+
+// TestFindPreAcceptConflicts_AcceptedConflict verifies that an ACCEPTED instance
+// at the same position is detected as a conflict.
+func TestFindPreAcceptConflicts_AcceptedConflict(t *testing.T) {
+	r := newTestReplica(3)
+
+	existingCmds := []state.Command{{Op: state.PUT, K: 42, V: state.NIL(), CL: state.STRONG, Sid: 2}}
+	r.InstanceSpace[0][5] = &Instance{
+		Cmds:   existingCmds,
+		Status: ACCEPTED,
+		Seq:    10,
+		Deps:   []int32{-1, -1, -1},
+	}
+
+	cmds := []state.Command{{Op: state.PUT, K: 42, V: state.NIL(), CL: state.STRONG}}
+	deps := []int32{-1, -1, -1}
+
+	conflict, cRep, cInst := r.findPreAcceptConflicts(cmds, 0, 5, 10, deps)
+	if !conflict {
+		t.Error("should detect conflict with ACCEPTED instance at same position")
+	}
+	if cRep != 0 || cInst != 5 {
+		t.Errorf("conflict at (%d,%d), want (0,5)", cRep, cInst)
+	}
+}
+
+// TestFindPreAcceptConflicts_SameAttributesNoConflict verifies that if the
+// existing instance has the same seq and deps, no conflict is reported.
+func TestFindPreAcceptConflicts_SameAttributesNoConflict(t *testing.T) {
+	r := newTestReplica(3)
+
+	existingCmds := []state.Command{{Op: state.PUT, K: 42, V: state.NIL(), CL: state.STRONG}}
+	r.InstanceSpace[0][5] = &Instance{
+		Cmds:   existingCmds,
+		Status: PREACCEPTED,
+		Seq:    10,
+		Deps:   []int32{-1, -1, -1},
+	}
+
+	cmds := []state.Command{{Op: state.PUT, K: 42, V: state.NIL(), CL: state.STRONG}}
+	deps := []int32{-1, -1, -1}
+
+	conflict, _, _ := r.findPreAcceptConflicts(cmds, 0, 5, 10, deps)
+	if conflict {
+		t.Error("should not conflict when same seq and deps")
+	}
+}
+
+// TestFindPreAcceptConflicts_CrossReplicaConflict verifies that a conflict is
+// detected across replicas when instances have overlapping keys and mismatched deps.
+func TestFindPreAcceptConflicts_CrossReplicaConflict(t *testing.T) {
+	r := newTestReplica(3)
+
+	// Instance at replica 1, slot 3 has a conflicting command
+	otherCmds := []state.Command{{Op: state.PUT, K: 42, V: state.NIL(), CL: state.STRONG, Sid: 2}}
+	r.InstanceSpace[1][3] = &Instance{
+		Cmds:   otherCmds,
+		Status: PREACCEPTED,
+		Seq:    15,
+		Deps:   []int32{-1, -1, -1}, // does NOT depend on our instance
+	}
+	r.crtInstance[1] = 5 // so the loop covers slot 3
+	r.ExecedUpTo[0] = 0
+	r.ExecedUpTo[1] = 0
+	r.ExecedUpTo[2] = 0
+
+	// Our instance at replica 0, slot 5, deps say we depend on slot 2 of replica 1
+	cmds := []state.Command{{Op: state.PUT, K: 42, V: state.NIL(), CL: state.STRONG}}
+	deps := []int32{-1, 2, -1} // dep on replica 1 is slot 2, but conflict is at slot 3
+
+	conflict, cRep, cInst := r.findPreAcceptConflicts(cmds, 0, 5, 10, deps)
+	if !conflict {
+		t.Error("should detect cross-replica conflict")
+	}
+	if cRep != 1 || cInst != 3 {
+		t.Errorf("conflict at (%d,%d), want (1,3)", cRep, cInst)
 	}
 }
