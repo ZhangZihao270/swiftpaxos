@@ -6503,6 +6503,43 @@ case slot := <-r.deliverChan:
 
 ---
 
+### Phase 98: Re-run Exp 1.1 — Raft-HT Only (weak read revert 验证)
+
+**Goal**: Phase 97 的 Raft-HT 结果受 Phase 81 bug 影响（weak reads 错误走 leader log），
+已 revert 代码（weak reads 恢复为 bound replica 本地处理）。重跑 Exp 1.1 验证修复效果。
+
+**Setup**:
+- 5 replicas: .101, .103, .104, .125, .126 (每台 1 个 replica)
+- 3 clients: .101, .103, .104 (co-located with replica0/1/2)
+- reqs=3000, networkDelay=25, commandSize=100
+
+**Protocol**: 只跑 Raft-HT（raftht, weakRatio=50）
+
+**Write ratio 配置**:
+- writes=5, weakWrites=5（5% 写入）
+- writes=50, weakWrites=50（50% 写入）
+
+**Thread counts**: t=1, 2, 4, 8, 16, 32, 64, 96
+
+**验证目标**:
+- w_p50 应恢复到 ~0.2ms（writes=5 时，95% weak ops 是 local read）
+- 吞吐量应恢复到 Phase 72 水平（t=96 ~36K，而非 Phase 97 的 21K）
+- Phase 97 的 Raft 数据无需重跑（Raft 不受此 bug 影响）
+
+**Tasks**:
+- [x] 98a: 创建 eval-phase98.sh 脚本 + revert weak read code fix [26:03:11]
+  - Reverted weak reads from leader path back to nearest replica (undid Phase 81)
+  - weakReadLoop + processWeakRead on replica, SendWeakRead to ClosestId on client
+  - Removed Value field from MWeakReply (no longer needed for weak reads)
+- [ ] 98b: 跑 writes=5：1 protocol × 8 thread counts = 8 组实验
+  - Results: `results/eval-5r5m3c-phase98-YYYYMMDD/exp1.1-w5/`
+- [ ] 98c: 跑 writes=50：1 protocol × 8 thread counts = 8 组实验
+  - Results: `results/eval-5r5m3c-phase98-YYYYMMDD/exp1.1-w50/`
+- [ ] 98d: 对比 Phase 97 Raft-HT 数据 + Phase 72 参考数据，确认修复
+- [ ] 98e: 结果表格和分析写入 todo.md
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task

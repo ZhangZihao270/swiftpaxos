@@ -92,7 +92,6 @@ func TestMWeakReplySerialization(t *testing.T) {
 		Term:     5,
 		CmdId:    CommandId{ClientId: 100, SeqNum: 42},
 		Slot:     77,
-		Value:    []byte("hello"),
 	}
 
 	var buf bytes.Buffer
@@ -115,16 +114,16 @@ func TestMWeakReplySerialization(t *testing.T) {
 	if restored.Slot != original.Slot {
 		t.Errorf("Slot mismatch: got %d, want %d", restored.Slot, original.Slot)
 	}
-	if !bytes.Equal(restored.Value, original.Value) {
-		t.Errorf("Value mismatch: got %v, want %v", restored.Value, original.Value)
-	}
 }
 
 func TestMWeakReplyBinarySize(t *testing.T) {
 	wr := &MWeakReply{LeaderId: 1, Term: 2, CmdId: CommandId{3, 4}, Slot: 5}
-	_, known := wr.BinarySize()
-	if known {
-		t.Error("BinarySize should be unknown for MWeakReply (variable due to Value)")
+	size, known := wr.BinarySize()
+	if !known {
+		t.Error("BinarySize should be known for MWeakReply (fixed 20 bytes)")
+	}
+	if size != 20 {
+		t.Errorf("BinarySize should be 20, got %d", size)
 	}
 }
 
@@ -140,34 +139,8 @@ func TestMWeakReplyZeroValues(t *testing.T) {
 	}
 
 	if restored.LeaderId != original.LeaderId || restored.Term != original.Term ||
-		restored.CmdId != original.CmdId || restored.Slot != original.Slot ||
-		!bytes.Equal(restored.Value, original.Value) {
+		restored.CmdId != original.CmdId || restored.Slot != original.Slot {
 		t.Errorf("Zero-value mismatch: got %+v, want %+v", restored, original)
-	}
-}
-
-func TestMWeakReplyWithNilValue(t *testing.T) {
-	original := &MWeakReply{
-		LeaderId: 1,
-		Term:     2,
-		CmdId:    CommandId{ClientId: 3, SeqNum: 4},
-		Slot:     5,
-		Value:    nil,
-	}
-
-	var buf bytes.Buffer
-	original.Marshal(&buf)
-
-	restored := &MWeakReply{}
-	if err := restored.Unmarshal(&buf); err != nil {
-		t.Fatalf("Unmarshal failed: %v", err)
-	}
-
-	if restored.Slot != original.Slot {
-		t.Errorf("Slot mismatch: got %d, want %d", restored.Slot, original.Slot)
-	}
-	if len(restored.Value) != 0 {
-		t.Errorf("Value should be empty for nil, got %v", restored.Value)
 	}
 }
 

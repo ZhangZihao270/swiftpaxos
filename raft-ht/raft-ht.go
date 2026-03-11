@@ -210,8 +210,7 @@ func (r *Replica) run() {
 	// Launch command execution goroutine
 	go r.executeCommands()
 
-	// Note: weak reads now go through handleWeakPropose (same as weak writes)
-	// so there is no separate weakReadLoop.
+	go r.weakReadLoop()
 
 	// Set up batch timer
 	var batchClockChan chan bool
@@ -815,12 +814,51 @@ func (r *Replica) notifyCommit() {
 	}
 }
 
+// --- Raft-HT: Weak Read Path ---
+
+// weakReadLoop processes weak reads in a dedicated goroutine,
+// decoupled from both the event loop and executeCommands.
+// Uses stateMu read lock to safely read committed state concurrently
+// with executeCommands' write lock.
+func (r *Replica) weakReadLoop() {
+	for !r.Shutdown {
+		m, ok := <-r.cs.weakReadChan
+		if !ok {
+			return
+		}
+		msg := m.(*MWeakRead)
+		r.processWeakRead(msg)
+	}
+}
+
+// processWeakRead reads committed state and replies to client.
+// Safe to call from any goroutine — acquires stateMu read lock.
+func (r *Replica) processWeakRead(msg *MWeakRead) {
+	r.stateMu.RLock()
+	cmd := state.Command{Op: state.GET, K: msg.Key, V: state.NIL()}
+	value := cmd.Execute(r.State)
+
+	version := int32(0)
+	if v, ok := r.keyVersions[int64(msg.Key)]; ok {
+		version = v
+	}
+	r.stateMu.RUnlock()
+
+	reply := &MWeakReadReply{
+		Replica: r.id,
+		Term:    0,
+		CmdId:   CommandId{ClientId: msg.ClientId, SeqNum: msg.CommandId},
+		Rep:     value,
+		Version: version,
+	}
+	r.sender.SendToClient(msg.ClientId, reply, r.cs.weakReadReplyRPC)
+}
+
 // --- Raft-HT: Weak Write Path ---
 
-// handleWeakPropose handles weak writes and weak reads from clients.
+// handleWeakPropose handles weak writes from clients.
 // Batches all pending weak proposals (drains weakProposeChan), appends to log,
-// replies immediately to each client (for reads: includes the value from current state),
-// then broadcasts AppendEntries once for async replication.
+// replies immediately to each client, then broadcasts AppendEntries once for async replication.
 func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
 	if r.role != LEADER {
 		// Reject: send a WeakReply with the real leader ID so the client
@@ -878,18 +916,12 @@ func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
 	r.logMu.Unlock()
 
 	// Reply IMMEDIATELY — don't wait for commit (1 WAN RTT)
-	// For GET ops (weak reads), compute the value from current state before replying.
 	for _, we := range batch {
 		reply := &MWeakReply{
 			LeaderId: r.id,
 			Term:     r.currentTerm,
 			CmdId:    we.cmdId,
 			Slot:     we.idx,
-		}
-		if we.wp.Command.Op == state.GET {
-			r.stateMu.RLock()
-			reply.Value = we.wp.Command.Execute(r.State)
-			r.stateMu.RUnlock()
 		}
 		r.sender.SendToClient(we.wp.ClientId, reply, r.cs.weakReplyRPC)
 	}

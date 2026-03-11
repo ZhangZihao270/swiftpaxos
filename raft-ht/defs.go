@@ -637,7 +637,6 @@ type MWeakReply struct {
 	Term     int32
 	CmdId    CommandId // ClientId + SeqNum
 	Slot     int32     // Log index (version for client cache)
-	Value    []byte    // Read result (non-nil for weak reads, nil for weak writes)
 }
 
 func (t *MWeakReply) New() fastrpc.Serializable {
@@ -645,7 +644,7 @@ func (t *MWeakReply) New() fastrpc.Serializable {
 }
 
 func (t *MWeakReply) BinarySize() (nbytes int, sizeKnown bool) {
-	return 0, false // variable due to Value
+	return 20, true // 5 x int32
 }
 
 func (t *MWeakReply) Marshal(wire io.Writer) {
@@ -677,20 +676,12 @@ func (t *MWeakReply) Marshal(wire io.Writer) {
 	bs[18] = byte(tmp32 >> 16)
 	bs[19] = byte(tmp32 >> 24)
 	wire.Write(bs)
-
-	var vb [10]byte
-	alen := int64(len(t.Value))
-	wlen := binary.PutVarint(vb[:], alen)
-	wire.Write(vb[:wlen])
-	if alen > 0 {
-		wire.Write(t.Value)
-	}
 }
 
-func (t *MWeakReply) Unmarshal(rr io.Reader) error {
+func (t *MWeakReply) Unmarshal(wire io.Reader) error {
 	var b [20]byte
 	bs := b[:20]
-	if _, err := io.ReadAtLeast(rr, bs, 20); err != nil {
+	if _, err := io.ReadAtLeast(wire, bs, 20); err != nil {
 		return err
 	}
 	t.LeaderId = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
@@ -698,22 +689,6 @@ func (t *MWeakReply) Unmarshal(rr io.Reader) error {
 	t.CmdId.ClientId = int32((uint32(bs[8]) | (uint32(bs[9]) << 8) | (uint32(bs[10]) << 16) | (uint32(bs[11]) << 24)))
 	t.CmdId.SeqNum = int32((uint32(bs[12]) | (uint32(bs[13]) << 8) | (uint32(bs[14]) << 16) | (uint32(bs[15]) << 24)))
 	t.Slot = int32((uint32(bs[16]) | (uint32(bs[17]) << 8) | (uint32(bs[18]) << 16) | (uint32(bs[19]) << 24)))
-
-	var wire byteReader
-	var ok bool
-	if wire, ok = rr.(byteReader); !ok {
-		wire = bufio.NewReader(rr)
-	}
-	alen, err := binary.ReadVarint(wire)
-	if err != nil {
-		return err
-	}
-	t.Value = make([]byte, alen)
-	if alen > 0 {
-		if _, err := io.ReadFull(wire, t.Value); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
