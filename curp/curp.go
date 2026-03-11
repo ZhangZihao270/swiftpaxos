@@ -186,19 +186,7 @@ func (r *Replica) run() {
 	for !r.Shutdown {
 		select {
 		case slot := <-r.deliverChan:
-			for {
-				for r.delivered.Has(strconv.Itoa(slot)) {
-					if !r.executed.Has(strconv.Itoa(slot)) {
-						r.executed.Set(strconv.Itoa(slot), struct{}{})
-						r.notifyExecute(slot)
-					}
-					slot++
-				}
-				if r.getCmdDesc(slot, "deliver", -1) != nil {
-					break
-				}
-				slot++
-			}
+			r.getCmdDesc(slot, "deliver", -1)
 
 		case propose := <-r.ProposeChan:
 			if r.isLeader {

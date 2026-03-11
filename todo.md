@@ -6251,6 +6251,37 @@ case slot := <-r.deliverChan:
 
 ---
 
+### Phase 95: Exp 3.1 with 50% Write Ratio (5r/5m/3c)
+
+**Goal**: 重跑 Exp 3.1，将 write ratio 从 ~5% 提高到 50%，观察高写入比例对各协议吞吐量和延迟的影响。
+
+**Setup**: 与 Phase 94 相同的集群布局
+- 5 replicas: .101, .103, .104, .125, .126
+- 3 clients: .101, .103, .104 (co-located with replica0/1/2)
+- reqs=3000, networkDelay=25, commandSize=100
+- **关键变更**: `writes=50`（之前所有 phase 都是 `writes=5`）
+
+**Protocols & configs**:
+1. **CURP baseline** (curp): weakRatio=0, writes=50
+2. **CURP-HT** (curpht): weakRatio=50, writes=50, weakWrites=50
+3. **CURP-HO** (curpho): weakRatio=50, writes=50, weakWrites=50
+
+**Thread counts**: t=1, 2, 4, 8, 16, 32, 64, 96
+
+**注意事项**:
+- curp/curp.go 的 deliverChan 已 revert 回简单版本（Phase 94 确认修复有效）
+- 高写入比例会增加 key 冲突概率（keySpace=1000000，50% writes），可能影响 CURP-HO fast path
+- 预期 CURP baseline 吞吐量下降（更多写入 = 更多 leader 负载）
+
+**Tasks**:
+- [x] 95a: 创建 eval-phase95.sh 脚本（基于 eval-phase94.sh，修改 writes=50, weakWrites=50）[26:03:10]
+- [ ] 95b: 跑 3 protocols × 8 thread counts = 24 组实验
+  - Results: `results/eval-5r5m3c-phase95-YYYYMMDD/summary-exp3.1.csv`
+- [ ] 95c: 对比 Phase 94（writes=5）结果，分析 write ratio 对性能的影响
+- [ ] 95d: 结果表格和分析写入 todo.md
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
