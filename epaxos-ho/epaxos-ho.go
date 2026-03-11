@@ -1975,12 +1975,132 @@ func (r *Replica) handleAcceptReply(areply *AcceptReply) {
 	}
 }
 
-func (r *Replica) handleTryPreAccept(msg *TryPreAccept) {
-	// TODO: Phase 99.3g — recovery path
+func (r *Replica) handleTryPreAccept(tpa *TryPreAccept) {
+	inst := r.InstanceSpace[tpa.Replica][tpa.Instance]
+
+	if inst != nil && inst.bal > tpa.Ballot {
+		// Ballot number too small.
+		r.replyTryPreAccept(tpa.LeaderId, &TryPreAcceptReply{
+			AcceptorId:       r.Id,
+			Replica:          tpa.Replica,
+			Instance:         tpa.Instance,
+			OK:               FALSE,
+			Ballot:           inst.bal,
+			ConflictReplica:  tpa.Replica,
+			ConflictInstance: tpa.Instance,
+			ConflictStatus:   inst.Status,
+		})
+		return
+	}
+
+	if conflict, confRep, confInst := r.findPreAcceptConflicts(tpa.Command, tpa.Replica, tpa.Instance, tpa.Seq, tpa.Deps); conflict {
+		// Conflict found — reject.
+		conflictBal := int32(0)
+		if inst != nil {
+			conflictBal = inst.bal
+		}
+		r.replyTryPreAccept(tpa.LeaderId, &TryPreAcceptReply{
+			AcceptorId:       r.Id,
+			Replica:          tpa.Replica,
+			Instance:         tpa.Instance,
+			OK:               FALSE,
+			Ballot:           conflictBal,
+			ConflictReplica:  confRep,
+			ConflictInstance: confInst,
+			ConflictStatus:   r.InstanceSpace[confRep][confInst].Status,
+		})
+	} else {
+		// No conflict — can pre-accept.
+		if tpa.Instance >= r.crtInstance[tpa.Replica] {
+			r.crtInstance[tpa.Replica] = tpa.Instance + 1
+		}
+		if inst != nil {
+			inst.Cmds = tpa.Command
+			inst.Deps = tpa.Deps
+			inst.CL = tpa.CL
+			inst.Seq = tpa.Seq
+			inst.Status = PREACCEPTED
+			inst.State = READY
+			inst.bal = tpa.Ballot
+			inst.vbal = tpa.Ballot
+		} else {
+			r.InstanceSpace[tpa.Replica][tpa.Instance] = &Instance{
+				Cmds:       tpa.Command,
+				bal:        tpa.Ballot,
+				vbal:       tpa.Ballot,
+				Status:     PREACCEPTED,
+				State:      READY,
+				Seq:        tpa.Seq,
+				Deps:       tpa.Deps,
+				CL:         tpa.CL,
+				instanceId: &instanceId{tpa.Replica, tpa.Instance},
+			}
+			inst = r.InstanceSpace[tpa.Replica][tpa.Instance]
+		}
+		r.replyTryPreAccept(tpa.LeaderId, &TryPreAcceptReply{
+			AcceptorId: r.Id,
+			Replica:    tpa.Replica,
+			Instance:   tpa.Instance,
+			OK:         TRUE,
+			Ballot:     inst.bal,
+		})
+	}
 }
 
-func (r *Replica) handleTryPreAcceptReply(reply *TryPreAcceptReply) {
-	// TODO: Phase 99.3g — recovery path
+func (r *Replica) handleTryPreAcceptReply(tpar *TryPreAcceptReply) {
+	inst := r.InstanceSpace[tpar.Replica][tpar.Instance]
+	if inst == nil || inst.lb == nil || !inst.lb.tryingToPreAccept || inst.lb.recoveryInst == nil {
+		return
+	}
+
+	ir := inst.lb.recoveryInst
+
+	if tpar.OK == TRUE {
+		inst.lb.preAcceptOKs++
+		inst.lb.tpaOKs++
+		if inst.lb.preAcceptOKs >= r.N/2 {
+			// Safe to start Accept phase.
+			inst.Cmds = ir.cmds
+			inst.Seq = ir.seq
+			inst.Deps = ir.deps
+			inst.CL = ir.cl
+			inst.Status = ACCEPTED
+			inst.State = READY
+			inst.lb.tryingToPreAccept = false
+			inst.lb.acceptOKs = 0
+			r.bcastAccept(tpar.Replica, tpar.Instance, inst.bal, int32(len(inst.Cmds)), inst.Seq, inst.Deps, inst.CL)
+			return
+		}
+	} else {
+		inst.lb.nacks++
+		if tpar.Ballot > inst.bal {
+			// Higher ballot seen — should retry later.
+			return
+		}
+		inst.lb.tpaOKs++
+		if tpar.ConflictReplica == tpar.Replica && tpar.ConflictInstance == tpar.Instance {
+			// Conflict with the same instance — re-run prepare.
+			inst.lb.tryingToPreAccept = false
+			return
+		}
+		inst.lb.possibleQuorum[tpar.AcceptorId] = false
+		inst.lb.possibleQuorum[tpar.ConflictReplica] = false
+		notInQuorum := 0
+		for q := 0; q < r.N; q++ {
+			if !inst.lb.possibleQuorum[q] {
+				notInQuorum++
+			}
+		}
+		if tpar.ConflictStatus >= STRONGLY_COMMITTED || notInQuorum > r.N/2 {
+			// Abandon recovery, restart from Phase 1.
+			inst.lb.tryingToPreAccept = false
+			r.startStrongCommit(tpar.Replica, tpar.Instance, inst.bal, inst.lb.clientProposals, ir.cmds)
+		}
+		if inst.lb.tpaOKs >= r.N/2 {
+			// Defer recovery.
+			inst.lb.tryingToPreAccept = false
+		}
+	}
 }
 
 // startRecoveryForInstance initiates recovery for a stalled instance by

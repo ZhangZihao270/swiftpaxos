@@ -223,12 +223,8 @@ func TestStubHandlersDoNotPanic(t *testing.T) {
 	// handlePreAcceptReply tested separately — it now requires initialized InstanceSpace
 	// handlePreAcceptOK tested separately — it now requires initialized InstanceSpace
 	// handleAcceptReply tested separately — it now requires initialized InstanceSpace
-	t.Run("handleTryPreAccept", func(t *testing.T) {
-		r.handleTryPreAccept(&TryPreAccept{})
-	})
-	t.Run("handleTryPreAcceptReply", func(t *testing.T) {
-		r.handleTryPreAcceptReply(&TryPreAcceptReply{})
-	})
+	// handleTryPreAccept tested separately — it now requires initialized InstanceSpace
+	// handleTryPreAcceptReply tested separately — it now requires initialized InstanceSpace
 	// startRecoveryForInstance tested separately — it now requires initialized InstanceSpace
 	t.Run("executeCommands", func(t *testing.T) {
 		r.executeCommands()
@@ -3198,5 +3194,302 @@ func TestHandlePrepareReply_NotEnoughReplies(t *testing.T) {
 	}
 	if inst.lb.prepareOKs != 1 {
 		t.Errorf("prepareOKs=%d, want 1", inst.lb.prepareOKs)
+	}
+}
+
+// =============================================================================
+// Phase 99.3g-iii: handleTryPreAccept, handleTryPreAcceptReply
+// =============================================================================
+
+// TestHandleTryPreAccept_BallotReject verifies rejection when ballot is too small.
+func TestHandleTryPreAccept_BallotReject(t *testing.T) {
+	r := newTestReplica(3)
+
+	r.InstanceSpace[1][5] = &Instance{
+		Status: PREACCEPTED, State: READY,
+		Seq: 10, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+		bal: (2 << 4) | 1, // high ballot
+	}
+
+	tpa := &TryPreAccept{
+		LeaderId: 0, Replica: 1, Instance: 5,
+		Ballot:  (1 << 4) | 0, // lower ballot
+		Command: []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.STRONG}},
+		Seq:     10, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handleTryPreAccept(tpa)
+	}()
+
+	// Instance should not be modified
+	if r.InstanceSpace[1][5].bal != (2<<4)|1 {
+		t.Errorf("bal should stay %d", (2<<4)|1)
+	}
+}
+
+// TestHandleTryPreAccept_NoConflictNewInstance verifies successful TryPreAccept
+// when no conflict and instance is nil.
+func TestHandleTryPreAccept_NoConflictNewInstance(t *testing.T) {
+	r := newTestReplica(3)
+	r.ExecedUpTo[0] = 0
+	r.ExecedUpTo[1] = 0
+	r.ExecedUpTo[2] = 0
+
+	cmds := []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.STRONG}}
+	tpa := &TryPreAccept{
+		LeaderId: 0, Replica: 1, Instance: 5,
+		Ballot: (1 << 4) | 0, Command: cmds,
+		Seq: 10, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handleTryPreAccept(tpa)
+	}()
+
+	inst := r.InstanceSpace[1][5]
+	if inst == nil {
+		t.Fatal("instance should be created")
+	}
+	if inst.Status != PREACCEPTED {
+		t.Errorf("Status=%d, want PREACCEPTED(%d)", inst.Status, PREACCEPTED)
+	}
+	if inst.State != READY {
+		t.Errorf("State=%d, want READY(%d)", inst.State, READY)
+	}
+	if inst.bal != (1<<4)|0 {
+		t.Errorf("bal=%d, want %d", inst.bal, (1<<4)|0)
+	}
+	if r.crtInstance[1] != 6 {
+		t.Errorf("crtInstance[1]=%d, want 6", r.crtInstance[1])
+	}
+}
+
+// TestHandleTryPreAccept_NoConflictExistingInstance verifies successful
+// TryPreAccept updates an existing instance.
+func TestHandleTryPreAccept_NoConflictExistingInstance(t *testing.T) {
+	r := newTestReplica(3)
+	r.ExecedUpTo[0] = 0
+	r.ExecedUpTo[1] = 0
+	r.ExecedUpTo[2] = 0
+
+	r.InstanceSpace[1][5] = &Instance{
+		Status: NONE, State: READY,
+		Seq: 0, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+		bal: 0,
+	}
+
+	cmds := []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.STRONG}}
+	tpa := &TryPreAccept{
+		LeaderId: 0, Replica: 1, Instance: 5,
+		Ballot: (1 << 4) | 0, Command: cmds,
+		Seq: 15, Deps: []int32{2, 3, 4}, CL: []int32{1, 1, 1},
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handleTryPreAccept(tpa)
+	}()
+
+	inst := r.InstanceSpace[1][5]
+	if inst.Status != PREACCEPTED {
+		t.Errorf("Status=%d, want PREACCEPTED", inst.Status)
+	}
+	if inst.Seq != 15 {
+		t.Errorf("Seq=%d, want 15", inst.Seq)
+	}
+	if inst.bal != (1<<4)|0 {
+		t.Errorf("bal=%d, want %d", inst.bal, (1<<4)|0)
+	}
+}
+
+// TestHandleTryPreAccept_ConflictRejected verifies that conflicts cause rejection.
+func TestHandleTryPreAccept_ConflictRejected(t *testing.T) {
+	r := newTestReplica(3)
+	r.ExecedUpTo[0] = 0
+	r.ExecedUpTo[1] = 0
+	r.ExecedUpTo[2] = 0
+
+	// Existing ACCEPTED instance at same position → conflict
+	existingCmds := []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.STRONG}}
+	r.InstanceSpace[1][5] = &Instance{
+		Cmds: existingCmds, Status: ACCEPTED, State: READY,
+		Seq: 10, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+		bal: (0 << 4) | 1,
+	}
+
+	cmds := []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.STRONG}}
+	tpa := &TryPreAccept{
+		LeaderId: 0, Replica: 1, Instance: 5,
+		Ballot: (1 << 4) | 0, Command: cmds,
+		Seq: 10, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handleTryPreAccept(tpa)
+	}()
+
+	// Instance should not be changed to PREACCEPTED
+	if r.InstanceSpace[1][5].Status != ACCEPTED {
+		t.Errorf("Status=%d, should stay ACCEPTED", r.InstanceSpace[1][5].Status)
+	}
+}
+
+// TestHandleTryPreAcceptReply_DelayedIgnored verifies delayed replies are ignored.
+func TestHandleTryPreAcceptReply_DelayedIgnored(t *testing.T) {
+	r := newTestReplica(3)
+	r.InstanceSpace[1][5] = &Instance{
+		Status: PREACCEPTED, State: READY,
+		Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+		// lb is nil → delayed
+	}
+
+	tpar := &TryPreAcceptReply{
+		AcceptorId: 2, Replica: 1, Instance: 5,
+		OK: TRUE, Ballot: 0,
+	}
+
+	r.handleTryPreAcceptReply(tpar)
+	// Should not panic
+}
+
+// TestHandleTryPreAcceptReply_OK verifies successful TryPreAcceptReply counting.
+func TestHandleTryPreAcceptReply_OK(t *testing.T) {
+	r := newTestReplica(3)
+	cmds := []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.STRONG}}
+	r.InstanceSpace[1][5] = &Instance{
+		Cmds: cmds, Status: PREACCEPTED, State: READY,
+		Seq: 10, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+		bal: (1 << 4) | 0,
+		lb: &LeaderBookkeeping{
+			tryingToPreAccept: true,
+			recoveryInst: &RecoveryInstance{
+				cmds: cmds, status: PREACCEPTED,
+				seq: 10, deps: []int32{-1, -1, -1}, cl: []int32{0, 0, 0},
+			},
+		},
+	}
+
+	tpar := &TryPreAcceptReply{
+		AcceptorId: 2, Replica: 1, Instance: 5,
+		OK: TRUE, Ballot: (1 << 4) | 0,
+	}
+
+	r.handleTryPreAcceptReply(tpar)
+
+	inst := r.InstanceSpace[1][5]
+	if inst.lb.preAcceptOKs != 1 {
+		t.Errorf("preAcceptOKs=%d, want 1", inst.lb.preAcceptOKs)
+	}
+	if inst.lb.tpaOKs != 1 {
+		t.Errorf("tpaOKs=%d, want 1", inst.lb.tpaOKs)
+	}
+}
+
+// TestHandleTryPreAcceptReply_QuorumAccepts verifies that reaching quorum
+// transitions to Accept phase.
+func TestHandleTryPreAcceptReply_QuorumAccepts(t *testing.T) {
+	r := newTestReplica(3) // N=3, quorum = 1 (N/2=1)
+	cmds := []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.STRONG}}
+	r.InstanceSpace[1][5] = &Instance{
+		Cmds: cmds, Status: PREACCEPTED, State: READY,
+		Seq: 10, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+		bal: (1 << 4) | 0,
+		lb: &LeaderBookkeeping{
+			tryingToPreAccept: true,
+			recoveryInst: &RecoveryInstance{
+				cmds: cmds, status: PREACCEPTED,
+				seq: 10, deps: []int32{-1, -1, -1}, cl: []int32{0, 0, 0},
+			},
+		},
+	}
+
+	tpar := &TryPreAcceptReply{
+		AcceptorId: 2, Replica: 1, Instance: 5,
+		OK: TRUE, Ballot: (1 << 4) | 0,
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handleTryPreAcceptReply(tpar)
+	}()
+
+	inst := r.InstanceSpace[1][5]
+	if inst.Status != ACCEPTED {
+		t.Errorf("Status=%d, want ACCEPTED(%d)", inst.Status, ACCEPTED)
+	}
+	if inst.lb.tryingToPreAccept {
+		t.Error("tryingToPreAccept should be false after quorum")
+	}
+	if inst.lb.acceptOKs != 0 {
+		t.Errorf("acceptOKs=%d, want 0 (reset for Accept phase)", inst.lb.acceptOKs)
+	}
+}
+
+// TestHandleTryPreAcceptReply_NackHigherBallot verifies nack with higher ballot.
+func TestHandleTryPreAcceptReply_NackHigherBallot(t *testing.T) {
+	r := newTestReplica(3)
+	cmds := []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.STRONG}}
+	r.InstanceSpace[1][5] = &Instance{
+		Cmds: cmds, Status: PREACCEPTED, State: READY,
+		Seq: 10, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+		bal: (1 << 4) | 0,
+		lb: &LeaderBookkeeping{
+			tryingToPreAccept: true,
+			possibleQuorum:    []bool{true, true, true},
+			recoveryInst: &RecoveryInstance{
+				cmds: cmds, status: PREACCEPTED,
+				seq: 10, deps: []int32{-1, -1, -1}, cl: []int32{0, 0, 0},
+			},
+		},
+	}
+
+	tpar := &TryPreAcceptReply{
+		AcceptorId: 2, Replica: 1, Instance: 5,
+		OK: FALSE, Ballot: (3 << 4) | 2, // higher ballot
+		ConflictReplica: 0, ConflictInstance: 0, ConflictStatus: PREACCEPTED,
+	}
+
+	r.handleTryPreAcceptReply(tpar)
+
+	inst := r.InstanceSpace[1][5]
+	if inst.lb.nacks != 1 {
+		t.Errorf("nacks=%d, want 1", inst.lb.nacks)
+	}
+}
+
+// TestHandleTryPreAcceptReply_SameInstanceConflict verifies that a conflict
+// with the same instance stops the TryPreAccept process.
+func TestHandleTryPreAcceptReply_SameInstanceConflict(t *testing.T) {
+	r := newTestReplica(3)
+	cmds := []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.STRONG}}
+	r.InstanceSpace[1][5] = &Instance{
+		Cmds: cmds, Status: PREACCEPTED, State: READY,
+		Seq: 10, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+		bal: (1 << 4) | 0,
+		lb: &LeaderBookkeeping{
+			tryingToPreAccept: true,
+			possibleQuorum:    []bool{true, true, true},
+			recoveryInst: &RecoveryInstance{
+				cmds: cmds, status: PREACCEPTED,
+				seq: 10, deps: []int32{-1, -1, -1}, cl: []int32{0, 0, 0},
+			},
+		},
+	}
+
+	tpar := &TryPreAcceptReply{
+		AcceptorId: 2, Replica: 1, Instance: 5,
+		OK: FALSE, Ballot: (1 << 4) | 0,
+		ConflictReplica: 1, ConflictInstance: 5, // same instance
+		ConflictStatus: ACCEPTED,
+	}
+
+	r.handleTryPreAcceptReply(tpar)
+
+	if r.InstanceSpace[1][5].lb.tryingToPreAccept {
+		t.Error("tryingToPreAccept should be false (same instance conflict)")
 	}
 }
