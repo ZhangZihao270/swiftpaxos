@@ -6531,12 +6531,220 @@ case slot := <-r.deliverChan:
   - Reverted weak reads from leader path back to nearest replica (undid Phase 81)
   - weakReadLoop + processWeakRead on replica, SendWeakRead to ClosestId on client
   - Removed Value field from MWeakReply (no longer needed for weak reads)
-- [ ] 98b: 跑 writes=5：1 protocol × 8 thread counts = 8 组实验
-  - Results: `results/eval-5r5m3c-phase98-YYYYMMDD/exp1.1-w5/`
-- [ ] 98c: 跑 writes=50：1 protocol × 8 thread counts = 8 组实验
-  - Results: `results/eval-5r5m3c-phase98-YYYYMMDD/exp1.1-w50/`
-- [ ] 98d: 对比 Phase 97 Raft-HT 数据 + Phase 72 参考数据，确认修复
-- [ ] 98e: 结果表格和分析写入 todo.md
+- [x] 98b: 跑 writes=5：8/8 succeeded [26:03:11]
+  - Results: `results/eval-5r5m3c-phase98-20260311/summary-exp1.1-w5.csv`
+- [x] 98c: 跑 writes=50：8/8 succeeded [26:03:11]
+  - Results: `results/eval-5r5m3c-phase98-20260311/summary-exp1.1-w50.csv`
+- [x] 98d: 对比分析 [26:03:11]
+- [x] 98e: 结果表格和分析 [26:03:11]
+
+**Phase 98 Results — Raft-HT with Weak Read Fix (5r/5m/3c)**:
+
+**writes=5 (5% writes) — Phase 98 vs Phase 97**:
+
+| Threads | P98 tput  | P97 tput  | Δ     | P98 w_p50 | P97 w_p50 | P98 s_p50 | P97 s_p50 |
+|---------|-----------|-----------|-------|-----------|-----------|-----------|-----------|
+| t=1     | 1,161     | 991       | +17%  | 0.13ms    | 34.0ms    | 85.3ms    | 85.1ms    |
+| t=4     | 4,584     | 3,825     | +20%  | 0.16ms    | 34.2ms    | 85.1ms    | 85.3ms    |
+| t=8     | 8,398     | 6,771     | +24%  | 0.14ms    | 34.7ms    | 87.2ms    | 88.1ms    |
+| t=16    | 15,106    | 11,467    | +32%  | 0.58ms    | 36.0ms    | 90.4ms    | 94.1ms    |
+| t=32    | 23,971    | 16,249    | +48%  | 2.44ms    | 43.7ms    | 117.8ms   | 136.2ms   |
+| t=64    | 31,590    | 19,089    | +66%  | 11.5ms    | 74.7ms    | 166.6ms   | 207.9ms   |
+| t=96    | 32,269    | 21,574    | +50%  | 22.8ms    | 70.5ms    | 234.2ms   | 274.8ms   |
+
+**writes=50 (50% writes) — Phase 98 vs Phase 97**:
+
+| Threads | P98 tput  | P97 tput  | Δ     | P98 w_p50 | P97 w_p50 | P98 s_p50 | P97 s_p50 |
+|---------|-----------|-----------|-------|-----------|-----------|-----------|-----------|
+| t=1     | 1,039     | 972       | +7%   | 33.7ms    | 34.1ms    | 85.4ms    | 85.3ms    |
+| t=4     | 3,670     | 3,342     | +10%  | 33.7ms    | 34.5ms    | 88.5ms    | 88.6ms    |
+| t=8     | 5,890     | 5,503     | +7%   | 34.4ms    | 35.6ms    | 108.6ms   | 97.8ms    |
+| t=16    | 8,551     | 8,046     | +6%   | 40.9ms    | 51.8ms    | 146.6ms   | 137.9ms   |
+| t=32    | 10,464    | 10,745    | -3%   | 61.5ms    | 81.5ms    | 208.2ms   | 194.0ms   |
+| t=64    | 11,808    | 12,449    | -5%   | 98.1ms    | 172.2ms   | 339.3ms   | 306.9ms   |
+| t=96    | 11,665    | 11,117    | +5%   | 116.6ms   | 163.1ms   | 495.5ms   | 444.5ms   |
+
+**Analysis**:
+
+1. **Weak read fix confirmed (writes=5)**:
+   - w_p50 restored to **0.13ms** (was 34ms in Phase 97) — **260x faster**
+   - This confirms Phase 97's weak reads were incorrectly going through the leader
+   - Throughput improved by **+17% to +66%** across all thread counts
+   - Peak throughput: 32.3K (Phase 98) vs 21.6K (Phase 97) — **+50%**
+
+2. **writes=50 shows modest improvement**:
+   - w_p50 improved from ~34-163ms to ~34-117ms (weak writes still go through leader)
+   - Throughput improvement only +5-10% at low load, nearly flat at high load
+   - At writes=50, 50% of weak ops are writes that still require leader roundtrip,
+     so the local read optimization only helps the other 50% of weak ops
+
+3. **Strong latency unchanged**: s_p50 ≈ 85ms at low load in both Phase 97 and 98
+   (strong path is independent of weak read routing)
+
+4. **vs Vanilla Raft (Phase 97 data)**:
+   - writes=5: Raft-HT 32.3K vs Raft 21.2K at t=96 (+52%) — significant advantage restored
+   - writes=50: Raft-HT 11.7K vs Raft 13.4K at t=96 (-13%) — still worse due to hybrid overhead
+   - The fix restores Raft-HT's advantage for read-heavy workloads but doesn't help write-heavy
+
+---
+
+### Phase 99: Port Orca's EPaxos-HO (Hybrid Protocol) to SwiftPaxos
+
+**Goal**: 将 Orca (`/home/users/zihao/Orca/`) 的 hybrid EPaxos 协议移植到 SwiftPaxos，
+复用 SwiftPaxos 的 client/benchmark/config 基础设施跑实验，方便与 CURP-HT/HO 直接对比。
+
+**Source**: `Orca/src/hybrid/hybrid.go` (3900行) + `hybrid-exec.go` (481行)
+**Target**: `swiftpaxos/epaxos-ho/` 新包（package `epaxosho`）
+
+**两个 codebase 的核心差异**:
+- Go module vs GOPATH（Orca 无 go.mod，用相对 import）
+- `state.Command`: Orca 有 `CL`(consistency level) + `Sid`(session ID) 字段，Value=int64；SwiftPaxos 无 CL/Sid，Value=[]byte
+- `genericsmr.Replica` vs `replica.Replica`: 接口类似但方法签名不同
+- `fastrpc`: 两边都有但独立实现
+- Client: Orca 用独立 binary；SwiftPaxos 用 `HybridClient` 接口 + `HybridBufferClient`
+- Latency injection: Orca 无；SwiftPaxos 在 `handleClient`/`SendClientMsg` 注入 delay
+
+**移植策略**: 最小化协议代码改动，主要写 adapter 层
+
+---
+
+#### Phase 99.1: state.Command 扩展
+
+**Goal**: 在 SwiftPaxos 的 `state.Command` 中加入 Orca 需要的 `CL` 和 `Sid` 字段。
+
+- [ ] 99.1a: 在 `state/state.go` 的 `Command` struct 加 `CL Operation` 和 `Sid int32` 字段
+  - 默认值 CL=0 (NONE) 不影响现有协议
+  - 更新 `Command` 的 `Marshal/Unmarshal` 序列化（追加 CL + Sid 到末尾）
+- [ ] 99.1b: 在 `state/state.go` 加 `CAUSAL` 和 `STRONG` 常量（如果不存在）
+- [ ] 99.1c: 确保 `Conflict()` 函数行为不变（CL/Sid 不参与冲突判断）
+- [ ] 99.1d: 跑 `go test ./...` 确认所有现有协议测试通过
+
+**注意**: Command 序列化格式变了，新旧 binary 不兼容。这 OK 因为我们每次重新部署。
+
+---
+
+#### Phase 99.2: 创建 epaxos-ho 包骨架
+
+**Goal**: 创建 `swiftpaxos/epaxos-ho/` 目录，搭建包骨架。
+
+- [ ] 99.2a: 创建 `epaxos-ho/` 目录，package 名 `epaxosho`
+- [ ] 99.2b: 创建 `epaxos-ho/defs.go` — 移植 Orca `hybridproto/` 的所有消息类型
+  - Prepare, PrepareReply, PreAccept, PreAcceptReply, PreAcceptOK
+  - Accept, AcceptReply, CausalCommit, Commit, CommitShort
+  - TryPreAccept, TryPreAcceptReply
+  - 每个消息的 Marshal/Unmarshal 从 Orca 直接复制，改 import
+  - 状态常量: PREACCEPTED, ACCEPTED, CAUSALLY_COMMITTED, STRONGLY_COMMITTED, EXECUTED, DISCARDED
+- [ ] 99.2c: 创建 `epaxos-ho/defs_test.go` — 序列化 round-trip 测试
+- [ ] 99.2d: `go build ./epaxos-ho/` 通过
+
+---
+
+#### Phase 99.3: 移植 hybrid.go 核心协议
+
+**Goal**: 将 Orca 的 `hybrid.go` 移植为 `epaxos-ho/epaxos-ho.go`。
+
+- [ ] 99.3a: 定义 `Replica` struct（嵌入 `*replica.Replica`）
+  - Instance, InstanceSpace, LeaderBookkeeping 等内部结构从 Orca 直接搬
+  - 替换 `genericsmr.Replica` 引用 → `replica.Replica`
+- [ ] 99.3b: 实现 `New()` 构造函数
+  - 初始化 InstanceSpace、conflict maps、channels
+  - 注册 RPC 消息类型（用 SwiftPaxos 的 `fastrpc.Table`）
+- [ ] 99.3c: 移植 `run()` 主事件循环
+  - 所有 channel select cases 从 Orca 搬过来
+  - 替换 `genericsmr.SendMsg()` → `replica.SendMsg()`
+  - 替换 `genericsmr.ReplyProposeTS()` → `replica.SendClientMsg()` 或 `SendClientMsgFast()`
+- [ ] 99.3d: 移植 handlePropose — 分离 causal/strong batches
+  - Orca 的 `handlePropose` 读 `cmd.CL` 来区分
+  - 在 SwiftPaxos 中：weak ops → CL=CAUSAL，strong ops → CL=STRONG
+  - ProposeChan 里的 `defs.GPropose` 需要携带 CL 信息
+- [ ] 99.3e: 移植 startCausalCommit + causal dependency computation
+  - `updateCausalAttributes()` 原样搬
+  - `bcastCausalCommit()` 用 SwiftPaxos 的 `SendMsg`
+- [ ] 99.3f: 移植 startStrongCommit + strong dependency computation + PreAccept/Accept/Commit phases
+  - `updateStrongAttributes1/2()`, `mergeStrongAttributes()` 原样搬
+  - `handlePreAccept`, `handlePreAcceptReply`, `handleAccept`, `handleAcceptReply`
+  - `handleCommit`, `handleCommitShort`, `handleCausalCommit`
+- [ ] 99.3g: 移植 recovery path（Prepare/TryPreAccept）
+- [ ] 99.3h: `go build ./epaxos-ho/` 通过
+
+**关键适配点**:
+- `genericsmr.SendMsg(peerId, code, msg)` → `r.SendMsg(peerId, code, msg)` 或 `r.SendMsgNoFlush()` + `r.FlushPeers()`
+- `genericsmr.ReplyProposeTS(reply, writer)` → `r.SendClientMsg(clientId, reply, rpc)` 或 `r.SendClientMsgFast()`
+- `r.ProposeChan` 类型不同：Orca 是 `*genericsmr.Propose`（含 writer），SwiftPaxos 是 `*defs.GPropose`（含 clientId）
+- Orca 用 `r.Peers[peerId].Write()` 直接写；SwiftPaxos 通过 `replica.SendMsg()` 封装
+
+---
+
+#### Phase 99.4: 移植 hybrid-exec.go 执行引擎
+
+**Goal**: 移植执行逻辑。
+
+- [ ] 99.4a: 移植 `executeCommands()` 主循环
+- [ ] 99.4b: 移植 `executeCausalCommand()` — causal 命令执行
+  - 使用 `state.Command.Execute(r.State)` 执行命令
+  - 执行后通过 `SendClientMsg` 回复客户端
+- [ ] 99.4c: 移植 `findSCC()` — Tarjan SCC 算法 + strong 命令执行
+  - 依赖图遍历、cycle 检测、按 Seq 排序执行
+- [ ] 99.4d: 移植 `latestWriteSeq()` — last-write-wins 语义
+
+---
+
+#### Phase 99.5: 实现 Client 端
+
+**Goal**: 实现 `epaxos-ho/client.go`，满足 `HybridClient` 接口。
+
+- [ ] 99.5a: 定义 `Client` struct（嵌入 `*client.BufferClient`）
+  - CommunicationSupply（proposeReply channel）
+  - 注册 RPC table 接收 replica 回复
+- [ ] 99.5b: 实现 `NewClient(b *client.BufferClient) *Client`
+- [ ] 99.5c: 实现 `SendStrongWrite/Read` — 发 Propose 消息，CL=STRONG
+  - 走 `client.SendProposal()` 但设置 `cmd.CL = state.STRONG`
+- [ ] 99.5d: 实现 `SendWeakWrite/Read` — 发 Propose 消息，CL=CAUSAL
+  - 走 `client.SendProposal()` 但设置 `cmd.CL = state.CAUSAL`
+- [ ] 99.5e: 实现 `handleMsgs()` — 接收 ProposeReply，调用 `RegisterReply()`
+- [ ] 99.5f: 实现 `SupportsWeak() → true`，`MarkAllSent()`
+- [ ] 99.5g: `go build ./epaxos-ho/` 通过
+
+**注意**: EPaxos-HO 的 client 比 CURP-HO 简单很多 — 不需要 fast path/slow path 判断、
+不需要 checkCausalDeps、不需要 RecordAck。Client 只发 Propose，设 CL 字段，等回复。
+
+---
+
+#### Phase 99.6: 注册协议 + 集成测试
+
+**Goal**: 在 main.go/run.go 注册 epaxosho 协议，端到端测试。
+
+- [ ] 99.6a: `main.go` 加 `case "epaxosho":` 设置 `c.Leaderless = true`（EPaxos 无固定 leader）
+- [ ] 99.6b: `run.go` 加 `case "epaxosho":` 创建 `epaxosho.New(...)` replica
+- [ ] 99.6c: `main.go` client switch 加 `case "epaxosho":` 创建 `epaxosho.NewClient(b)`
+- [ ] 99.6d: 本地单机测试（3 replica, 1 client, no delay）验证基本功能
+- [ ] 99.6e: `go test ./epaxos-ho/` 单元测试通过
+- [ ] 99.6f: `go build -o swiftpaxos .` 编译通过
+
+---
+
+#### Phase 99.7: 分布式集群验证
+
+**Goal**: 在 5r/5m/3c 集群上跑 EPaxos-HO，验证正确性和性能。
+
+- [ ] 99.7a: 创建 eval-phase99.sh 脚本
+- [ ] 99.7b: 跑 Exp 3.1（throughput sweep）：t=1,2,4,8,16,32,64,96
+  - weakRatio=50, writes=5
+  - 对比 CURP-HT/HO 结果
+- [ ] 99.7c: 跑 Exp 3.2（T property）：t=8, sweep weakRatio=0/25/50/75/100
+  - 验证 strong P50 是否随 weakRatio 平稳
+- [ ] 99.7d: 结果表格和分析写入 todo.md
+
+---
+
+**总工作量估算**:
+- Phase 99.1: ~50 LOC（state.Command 扩展）
+- Phase 99.2: ~500 LOC（消息类型定义 + 序列化，大部分从 Orca 复制）
+- Phase 99.3: ~2000 LOC（核心协议移植，80% 从 Orca 复制 + 20% adapter）
+- Phase 99.4: ~300 LOC（执行引擎移植）
+- Phase 99.5: ~200 LOC（Client 端）
+- Phase 99.6: ~50 LOC（注册 + 集成）
+- Phase 99.7: 实验脚本
 
 ---
 
