@@ -6440,8 +6440,8 @@ case slot := <-r.deliverChan:
 
 **Tasks**:
 - [x] 97a: 创建 eval-phase97.sh 脚本（基于 eval-exp1.1-5r-dist.sh，适配 5r/5m/3c + dual write ratio）[26:03:11]
-- [ ] 97b: 跑 writes=5：2 protocols × 8 thread counts = 16 组实验
-  - Results: `results/eval-5r5m3c-phase97-YYYYMMDD/exp1.1-w5/`
+- [x] 97b: 跑 writes=5：2 protocols × 8 thread counts = 16 组实验（16/16 succeeded）[26:03:11]
+  - Results: `results/eval-5r5m3c-phase97-20260311/summary-exp1.1-w5.csv`
 - [ ] 97c: 跑 writes=50：2 protocols × 8 thread counts = 16 组实验
   - Results: `results/eval-5r5m3c-phase97-YYYYMMDD/exp1.1-w50/`
 - [ ] 97d: 对比 Phase 72（5r/2-1-2 布局, writes=5）及 writes=5 vs writes=50 结果
