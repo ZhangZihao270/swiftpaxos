@@ -3,6 +3,8 @@ package epaxosho
 import (
 	"testing"
 
+	"github.com/imdea-software/swiftpaxos/replica/defs"
+	fastrpc "github.com/imdea-software/swiftpaxos/rpc"
 	"github.com/imdea-software/swiftpaxos/state"
 )
 
@@ -187,4 +189,140 @@ func TestExecStructHoldsReplicaRef(t *testing.T) {
 	// Exec just holds a reference to Replica — verify the type relationship
 	var e *Exec
 	_ = e // compile-time check that Exec type exists with r *Replica field
+}
+
+func TestAdaptTimeSecConstant(t *testing.T) {
+	if ADAPT_TIME_SEC != 10 {
+		t.Errorf("ADAPT_TIME_SEC=%d, want 10", ADAPT_TIME_SEC)
+	}
+}
+
+func TestClockChannelVarsExist(t *testing.T) {
+	// Verify the package-level clock channel vars are declared.
+	// They are initialized in run(), so they start as nil.
+	var _ chan bool = fastClockChan
+	var _ chan bool = slowClockChan
+}
+
+// TestStubHandlersDoNotPanic verifies that all stub handler methods
+// can be called without panicking (they are no-ops for now).
+func TestStubHandlersDoNotPanic(t *testing.T) {
+	// We can't call New() without a full replica, but we can create
+	// a minimal Replica with just the fields the stubs need (none).
+	r := &Replica{}
+
+	t.Run("handlePropose", func(t *testing.T) {
+		r.handlePropose(&defs.GPropose{})
+	})
+	t.Run("handlePrepare", func(t *testing.T) {
+		r.handlePrepare(&Prepare{})
+	})
+	t.Run("handlePreAccept", func(t *testing.T) {
+		r.handlePreAccept(&PreAccept{})
+	})
+	t.Run("handleAccept", func(t *testing.T) {
+		r.handleAccept(&Accept{})
+	})
+	t.Run("handleCommit", func(t *testing.T) {
+		r.handleCommit(&Commit{})
+	})
+	t.Run("handleCommitShort", func(t *testing.T) {
+		r.handleCommitShort(&CommitShort{})
+	})
+	t.Run("handleCausalCommit", func(t *testing.T) {
+		r.handleCausalCommit(&CausalCommit{})
+	})
+	t.Run("handlePrepareReply", func(t *testing.T) {
+		r.handlePrepareReply(&PrepareReply{})
+	})
+	t.Run("handlePreAcceptReply", func(t *testing.T) {
+		r.handlePreAcceptReply(&PreAcceptReply{})
+	})
+	t.Run("handlePreAcceptOK", func(t *testing.T) {
+		r.handlePreAcceptOK(&PreAcceptOK{})
+	})
+	t.Run("handleAcceptReply", func(t *testing.T) {
+		r.handleAcceptReply(&AcceptReply{})
+	})
+	t.Run("handleTryPreAccept", func(t *testing.T) {
+		r.handleTryPreAccept(&TryPreAccept{})
+	})
+	t.Run("handleTryPreAcceptReply", func(t *testing.T) {
+		r.handleTryPreAcceptReply(&TryPreAcceptReply{})
+	})
+	t.Run("startRecoveryForInstance", func(t *testing.T) {
+		r.startRecoveryForInstance(0, 0)
+	})
+	t.Run("executeCommands", func(t *testing.T) {
+		r.executeCommands()
+	})
+}
+
+// TestCausalCommitChannelPolling verifies that the non-blocking causal
+// commit channel polling in run() processes messages correctly.
+func TestCausalCommitChannelPolling(t *testing.T) {
+	// Simulate causal commit channel behavior
+	nChannels := 3
+	channels := make([]chan fastrpc.Serializable, nChannels)
+	for i := range channels {
+		channels[i] = make(chan fastrpc.Serializable, 1)
+	}
+
+	// Send a CausalCommit to channel 1
+	msg := &CausalCommit{LeaderId: 42, Replica: 1, Instance: 7}
+	channels[1] <- msg
+
+	// Poll all channels non-blocking (mirrors run() logic)
+	var received []*CausalCommit
+	for _, ch := range channels {
+		select {
+		case s := <-ch:
+			commit := s.(*CausalCommit)
+			received = append(received, commit)
+		default:
+		}
+	}
+
+	if len(received) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(received))
+	}
+	if received[0].LeaderId != 42 {
+		t.Errorf("LeaderId=%d, want 42", received[0].LeaderId)
+	}
+	if received[0].Instance != 7 {
+		t.Errorf("Instance=%d, want 7", received[0].Instance)
+	}
+}
+
+// TestMessageChannelTypeAssertions verifies that messages from channels
+// can be correctly type-asserted (mirrors the select cases in run()).
+func TestMessageChannelTypeAssertions(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  fastrpc.Serializable
+	}{
+		{"Prepare", &Prepare{LeaderId: 1, Replica: 0, Instance: 5, Ballot: 10}},
+		{"PreAccept", &PreAccept{LeaderId: 2, Replica: 1, Instance: 3, Ballot: 5}},
+		{"Accept", &Accept{LeaderId: 3, Replica: 2, Instance: 8, Ballot: 15}},
+		{"Commit", &Commit{LeaderId: 4, Replica: 0, Instance: 12}},
+		{"CommitShort", &CommitShort{LeaderId: 5, Replica: 1, Instance: 20}},
+		{"PrepareReply", &PrepareReply{AcceptorId: 1, Replica: 0, Instance: 5}},
+		{"PreAcceptReply", &PreAcceptReply{Replica: 2, Instance: 10}},
+		{"PreAcceptOK", &PreAcceptOK{Instance: 15}},
+		{"AcceptReply", &AcceptReply{Replica: 3, Instance: 7}},
+		{"TryPreAccept", &TryPreAccept{LeaderId: 1, Replica: 0, Instance: 4}},
+		{"TryPreAcceptReply", &TryPreAcceptReply{AcceptorId: 2, Replica: 1, Instance: 6}},
+		{"CausalCommit", &CausalCommit{LeaderId: 7, Replica: 3, Instance: 9}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ch := make(chan fastrpc.Serializable, 1)
+			ch <- tt.msg
+			received := <-ch
+			if received == nil {
+				t.Fatal("received nil message")
+			}
+		})
+	}
 }

@@ -3,6 +3,7 @@ package epaxosho
 import (
 	"encoding/binary"
 	"sync"
+	"time"
 
 	"github.com/imdea-software/swiftpaxos/config"
 	"github.com/imdea-software/swiftpaxos/dlog"
@@ -19,6 +20,7 @@ const TRUE = uint8(1)
 const FALSE = uint8(0)
 
 const COMMIT_GRACE_PERIOD = 10 * 1e9 // 10 seconds
+const ADAPT_TIME_SEC = 10
 
 const HT_INIT_SIZE = 11000
 
@@ -229,6 +231,8 @@ func New(alias string, id int, peerAddrList []string, exec, beacon, durable bool
 
 	r.Stats.M["weird"], r.Stats.M["conflicted"], r.Stats.M["slow"], r.Stats.M["fast"], r.Stats.M["totalCommitTime"] = 0, 0, 0, 0, 0
 
+	go r.run()
+
 	return r
 }
 
@@ -269,4 +273,210 @@ func (r *Replica) recordCommands(cmds []state.Command) {
 	for i := 0; i < len(cmds); i++ {
 		cmds[i].Marshal(r.StableStore)
 	}
+}
+
+func (r *Replica) sync() {
+	if !r.Durable {
+		return
+	}
+	r.StableStore.Sync()
+}
+
+var fastClockChan chan bool
+var slowClockChan chan bool
+
+func (r *Replica) slowClock() {
+	for !r.Shutdown {
+		time.Sleep(150 * time.Millisecond)
+		slowClockChan <- true
+	}
+}
+
+func (r *Replica) fastClock() {
+	for !r.Shutdown {
+		time.Sleep(5 * time.Millisecond)
+		fastClockChan <- true
+	}
+}
+
+func (r *Replica) stopAdapting() {
+	time.Sleep(1000 * 1000 * 1000 * ADAPT_TIME_SEC)
+	r.Beacon = false
+	time.Sleep(1000 * 1000 * 1000)
+
+	for i := 0; i < r.N-1; i++ {
+		min := i
+		for j := i + 1; j < r.N-1; j++ {
+			if r.Ewma[r.PreferredPeerOrder[j]] < r.Ewma[r.PreferredPeerOrder[min]] {
+				min = j
+			}
+		}
+		aux := r.PreferredPeerOrder[i]
+		r.PreferredPeerOrder[i] = r.PreferredPeerOrder[min]
+		r.PreferredPeerOrder[min] = aux
+	}
+
+	r.Println(r.PreferredPeerOrder)
+}
+
+func (r *Replica) run() {
+	r.ConnectToPeers()
+
+	r.ComputeClosestPeers()
+
+	if r.Exec {
+		go r.executeCommands()
+	}
+
+	slowClockChan = make(chan bool, 1)
+	fastClockChan = make(chan bool, 1)
+	go r.slowClock()
+
+	if r.Beacon {
+		go r.stopAdapting()
+	}
+
+	go r.WaitForClientConnections()
+
+	for !r.Shutdown {
+		// Poll causal commit channels (non-blocking) before the main select.
+		// Multiple channels per replica avoid serialization bottlenecks.
+		for _, ch := range r.causalCommitChan {
+			select {
+			case causalCommitS := <-ch:
+				commit := causalCommitS.(*CausalCommit)
+				r.handleCausalCommit(commit)
+			default:
+			}
+		}
+
+		select {
+		case propose := <-r.ProposeChan:
+			r.handlePropose(propose)
+
+		case prepareS := <-r.prepareChan:
+			prepare := prepareS.(*Prepare)
+			r.handlePrepare(prepare)
+
+		case preAcceptS := <-r.preAcceptChan:
+			preAccept := preAcceptS.(*PreAccept)
+			r.handlePreAccept(preAccept)
+
+		case acceptS := <-r.acceptChan:
+			accept := acceptS.(*Accept)
+			r.handleAccept(accept)
+
+		case commitS := <-r.commitChan:
+			commit := commitS.(*Commit)
+			r.handleCommit(commit)
+
+		case commitS := <-r.commitShortChan:
+			commit := commitS.(*CommitShort)
+			r.handleCommitShort(commit)
+
+		case prepareReplyS := <-r.prepareReplyChan:
+			prepareReply := prepareReplyS.(*PrepareReply)
+			r.handlePrepareReply(prepareReply)
+
+		case preAcceptReplyS := <-r.preAcceptReplyChan:
+			preAcceptReply := preAcceptReplyS.(*PreAcceptReply)
+			r.handlePreAcceptReply(preAcceptReply)
+
+		case preAcceptOKS := <-r.preAcceptOKChan:
+			preAcceptOK := preAcceptOKS.(*PreAcceptOK)
+			r.handlePreAcceptOK(preAcceptOK)
+
+		case acceptReplyS := <-r.acceptReplyChan:
+			acceptReply := acceptReplyS.(*AcceptReply)
+			r.handleAcceptReply(acceptReply)
+
+		case tryPreAcceptS := <-r.tryPreAcceptChan:
+			tryPreAccept := tryPreAcceptS.(*TryPreAccept)
+			r.handleTryPreAccept(tryPreAccept)
+
+		case tryPreAcceptReplyS := <-r.tryPreAcceptReplyChan:
+			tryPreAcceptReply := tryPreAcceptReplyS.(*TryPreAcceptReply)
+			r.handleTryPreAcceptReply(tryPreAcceptReply)
+
+		case beacon := <-r.BeaconChan:
+			r.ReplyBeacon(beacon)
+
+		case <-slowClockChan:
+			if r.Beacon {
+				r.Printf("weird %d; conflicted %d; slow %d; fast %d\n",
+					r.Stats.M["weird"], r.Stats.M["conflicted"], r.Stats.M["slow"], r.Stats.M["fast"])
+				for q := int32(0); q < int32(r.N); q++ {
+					if q == r.Id {
+						continue
+					}
+					r.SendBeacon(q)
+				}
+			}
+
+		case iid := <-r.instancesToRecover:
+			r.startRecoveryForInstance(iid.replica, iid.instance)
+		}
+	}
+}
+
+// --- Stub handlers (to be implemented in phases 99.3d-g) ---
+
+func (r *Replica) handlePropose(propose *defs.GPropose) {
+	// TODO: Phase 99.3d — separate causal/strong batches based on cmd.CL
+}
+
+func (r *Replica) handlePrepare(prepare *Prepare) {
+	// TODO: Phase 99.3g — recovery path
+}
+
+func (r *Replica) handlePreAccept(preAccept *PreAccept) {
+	// TODO: Phase 99.3f — strong commit path
+}
+
+func (r *Replica) handleAccept(accept *Accept) {
+	// TODO: Phase 99.3f — strong commit path
+}
+
+func (r *Replica) handleCommit(commit *Commit) {
+	// TODO: Phase 99.3f — strong commit handling
+}
+
+func (r *Replica) handleCommitShort(commit *CommitShort) {
+	// TODO: Phase 99.3f — short commit handling
+}
+
+func (r *Replica) handleCausalCommit(commit *CausalCommit) {
+	// TODO: Phase 99.3e — causal commit handling
+}
+
+func (r *Replica) handlePrepareReply(reply *PrepareReply) {
+	// TODO: Phase 99.3g — recovery path
+}
+
+func (r *Replica) handlePreAcceptReply(reply *PreAcceptReply) {
+	// TODO: Phase 99.3f — strong commit path
+}
+
+func (r *Replica) handlePreAcceptOK(msg *PreAcceptOK) {
+	// TODO: Phase 99.3f — fast path acknowledgment
+}
+
+func (r *Replica) handleAcceptReply(reply *AcceptReply) {
+	// TODO: Phase 99.3f — strong commit path
+}
+
+func (r *Replica) handleTryPreAccept(msg *TryPreAccept) {
+	// TODO: Phase 99.3g — recovery path
+}
+
+func (r *Replica) handleTryPreAcceptReply(reply *TryPreAcceptReply) {
+	// TODO: Phase 99.3g — recovery path
+}
+
+func (r *Replica) startRecoveryForInstance(replicaId int32, instanceId int32) {
+	// TODO: Phase 99.3g — initiate recovery for a stalled instance
+}
+
+func (r *Replica) executeCommands() {
+	// TODO: Phase 99.4 — execution engine with Tarjan SCC
 }

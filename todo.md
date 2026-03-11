@@ -6689,10 +6689,12 @@ case slot := <-r.deliverChan:
   - New() initializes all maps/channels, registers 12+ RPC types (including N*10 causal commit channels)
   - recordInstanceMetadata/recordCommands for durable storage
   - 8 unit tests covering struct types, constants, status transitions
-- [ ] 99.3c: 移植 `run()` 主事件循环
-  - 所有 channel select cases 从 Orca 搬过来
-  - 替换 `genericsmr.SendMsg()` → `replica.SendMsg()`
-  - 替换 `genericsmr.ReplyProposeTS()` → `replica.SendClientMsg()` 或 `SendClientMsgFast()`
+- [x] 99.3c: 移植 `run()` 主事件循环 + clock helpers + stub handlers [26:03:11]
+  - run(): ConnectToPeers, ComputeClosestPeers, start executeCommands goroutine, main select loop
+  - Non-blocking causal commit channel polling before main select (N*10 channels)
+  - slowClock/fastClock/stopAdapting helper goroutines, sync() for durable storage
+  - 15 stub handler methods (handlePropose through executeCommands) — to be filled in 99.3d-g
+  - 5 new tests: stub handler no-panic, causal channel polling, message type assertions, clock vars, constants
 - [ ] 99.3d: 移植 handlePropose — 分离 causal/strong batches
   - Orca 的 `handlePropose` 读 `cmd.CL` 来区分
   - 在 SwiftPaxos 中：weak ops → CL=CAUSAL，strong ops → CL=STRONG
