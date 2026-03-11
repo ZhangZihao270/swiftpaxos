@@ -219,9 +219,7 @@ func TestStubHandlersDoNotPanic(t *testing.T) {
 	// handleCommit tested separately — it now requires initialized InstanceSpace
 	// handleCommitShort tested separately — it now requires initialized InstanceSpace
 	// handleCausalCommit tested separately — it now requires initialized InstanceSpace
-	t.Run("handlePrepareReply", func(t *testing.T) {
-		r.handlePrepareReply(&PrepareReply{})
-	})
+	// handlePrepareReply tested separately — it now requires initialized InstanceSpace
 	// handlePreAcceptReply tested separately — it now requires initialized InstanceSpace
 	// handlePreAcceptOK tested separately — it now requires initialized InstanceSpace
 	// handleAcceptReply tested separately — it now requires initialized InstanceSpace
@@ -2850,5 +2848,355 @@ func TestFindPreAcceptConflicts_CrossReplicaConflict(t *testing.T) {
 	}
 	if cRep != 1 || cInst != 3 {
 		t.Errorf("conflict at (%d,%d), want (1,3)", cRep, cInst)
+	}
+}
+
+// =============================================================================
+// Phase 99.3g-ii: handlePrepareReply
+// =============================================================================
+
+// setupPreparingInstance creates a PREACCEPTED instance with preparing=true
+// for testing handlePrepareReply.
+func setupPreparingInstance(r *Replica, rep int32, inst int32, bal int32) *Instance {
+	cmds := []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.STRONG}}
+	instance := &Instance{
+		Cmds:   cmds,
+		Status: PREACCEPTED,
+		State:  READY,
+		Seq:    10,
+		Deps:   []int32{-1, -1, -1},
+		CL:     []int32{0, 0, 0},
+		bal:    bal,
+		vbal:   bal,
+		lb: &LeaderBookkeeping{
+			preparing:     true,
+			maxRecvBallot: -1,
+		},
+		instanceId: &instanceId{rep, inst},
+	}
+	r.InstanceSpace[rep][inst] = instance
+	return instance
+}
+
+// TestHandlePrepareReply_DelayedIgnored verifies delayed replies are ignored.
+func TestHandlePrepareReply_DelayedIgnored(t *testing.T) {
+	r := newTestReplica(3)
+	inst := setupPreparingInstance(r, 1, 5, (1<<4)|0)
+	inst.lb.preparing = false // no longer preparing
+
+	preply := &PrepareReply{
+		AcceptorId: 2, Replica: 1, Instance: 5,
+		OK: TRUE, Bal: (1 << 4) | 0, VBal: 0,
+		Status: NONE, Seq: -1, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handlePrepareReply(preply)
+	}()
+
+	if inst.lb.prepareOKs != 0 {
+		t.Errorf("prepareOKs=%d, want 0 (delayed reply should be ignored)", inst.lb.prepareOKs)
+	}
+}
+
+// TestHandlePrepareReply_NilLBIgnored verifies nil LeaderBookkeeping is ignored.
+func TestHandlePrepareReply_NilLBIgnored(t *testing.T) {
+	r := newTestReplica(3)
+	r.InstanceSpace[1][5] = &Instance{
+		Status: PREACCEPTED, State: READY,
+		Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	preply := &PrepareReply{
+		AcceptorId: 2, Replica: 1, Instance: 5,
+		OK: TRUE, Bal: 0, VBal: 0,
+		Status: NONE, Seq: -1, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handlePrepareReply(preply)
+	}()
+	// Should not panic beyond SendMsg
+}
+
+// TestHandlePrepareReply_Nack verifies nack counting.
+func TestHandlePrepareReply_Nack(t *testing.T) {
+	r := newTestReplica(3)
+	inst := setupPreparingInstance(r, 1, 5, (1<<4)|0)
+
+	preply := &PrepareReply{
+		AcceptorId: 2, Replica: 1, Instance: 5,
+		OK: FALSE, Bal: (2 << 4) | 2, VBal: 0,
+		Status: NONE, Seq: -1, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	r.handlePrepareReply(preply)
+
+	if inst.lb.nacks != 1 {
+		t.Errorf("nacks=%d, want 1", inst.lb.nacks)
+	}
+	if inst.lb.prepareOKs != 0 {
+		t.Errorf("prepareOKs=%d, want 0", inst.lb.prepareOKs)
+	}
+}
+
+// TestHandlePrepareReply_StrongCommitted verifies that a STRONGLY_COMMITTED reply
+// with strong commands causes immediate commit broadcast.
+func TestHandlePrepareReply_StrongCommitted(t *testing.T) {
+	r := newTestReplica(3)
+	bal := int32((1 << 4) | 0)
+	setupPreparingInstance(r, 1, 5, bal)
+
+	cmds := []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.STRONG}}
+	preply := &PrepareReply{
+		AcceptorId: 2, Replica: 1, Instance: 5,
+		OK: TRUE, Bal: bal, VBal: bal,
+		Status: STRONGLY_COMMITTED, Command: cmds,
+		Seq: 20, Deps: []int32{3, 4, 5}, CL: []int32{1, 1, 1},
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handlePrepareReply(preply)
+	}()
+
+	inst := r.InstanceSpace[1][5]
+	if inst.Status != STRONGLY_COMMITTED {
+		t.Errorf("Status=%d, want STRONGLY_COMMITTED(%d)", inst.Status, STRONGLY_COMMITTED)
+	}
+	if inst.State != READY {
+		t.Errorf("State=%d, want READY(%d)", inst.State, READY)
+	}
+	if inst.Seq != 20 {
+		t.Errorf("Seq=%d, want 20", inst.Seq)
+	}
+}
+
+// TestHandlePrepareReply_CausalCommitted verifies that a CAUSALLY_COMMITTED reply
+// with causal commands causes causal commit broadcast.
+func TestHandlePrepareReply_CausalCommitted(t *testing.T) {
+	r := newTestReplica(3)
+	bal := int32((1 << 4) | 0)
+	setupPreparingInstance(r, 1, 5, bal)
+
+	cmds := []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.CAUSAL}}
+	preply := &PrepareReply{
+		AcceptorId: 2, Replica: 1, Instance: 5,
+		OK: TRUE, Bal: bal, VBal: bal,
+		Status: CAUSALLY_COMMITTED, Command: cmds,
+		Seq: 15, Deps: []int32{1, 2, 3}, CL: []int32{0, 0, 0},
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handlePrepareReply(preply)
+	}()
+
+	inst := r.InstanceSpace[1][5]
+	if inst.Status != CAUSALLY_COMMITTED {
+		t.Errorf("Status=%d, want CAUSALLY_COMMITTED(%d)", inst.Status, CAUSALLY_COMMITTED)
+	}
+}
+
+// TestHandlePrepareReply_StrongCommittedNoCommand verifies status-based commit
+// when command is nil but status indicates committed.
+func TestHandlePrepareReply_StrongCommittedNoCommand(t *testing.T) {
+	r := newTestReplica(3)
+	bal := int32((1 << 4) | 0)
+	setupPreparingInstance(r, 1, 5, bal)
+
+	preply := &PrepareReply{
+		AcceptorId: 2, Replica: 1, Instance: 5,
+		OK: TRUE, Bal: bal, VBal: bal,
+		Status: STRONGLY_COMMITTED, Command: nil,
+		Seq: 20, Deps: []int32{3, 4, 5}, CL: []int32{1, 1, 1},
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handlePrepareReply(preply)
+	}()
+
+	inst := r.InstanceSpace[1][5]
+	if inst.Status != STRONGLY_COMMITTED {
+		t.Errorf("Status=%d, want STRONGLY_COMMITTED(%d)", inst.Status, STRONGLY_COMMITTED)
+	}
+}
+
+// TestHandlePrepareReply_AcceptedTracked verifies that ACCEPTED replies update
+// the recovery instance with the highest ballot.
+func TestHandlePrepareReply_AcceptedTracked(t *testing.T) {
+	r := newTestReplica(3)
+	bal := int32((1 << 4) | 0)
+	inst := setupPreparingInstance(r, 1, 5, bal)
+
+	cmds := []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.STRONG}}
+	preply := &PrepareReply{
+		AcceptorId: 2, Replica: 1, Instance: 5,
+		OK: TRUE, Bal: bal, VBal: (0 << 4) | 1,
+		Status: ACCEPTED, Command: cmds,
+		Seq: 20, Deps: []int32{3, 4, 5}, CL: []int32{1, 1, 1},
+	}
+
+	r.handlePrepareReply(preply)
+
+	if inst.lb.recoveryInst == nil {
+		t.Fatal("recoveryInst should be set for ACCEPTED reply")
+	}
+	if inst.lb.recoveryInst.status != ACCEPTED {
+		t.Errorf("recoveryInst.status=%d, want ACCEPTED(%d)", inst.lb.recoveryInst.status, ACCEPTED)
+	}
+	if inst.lb.maxRecvBallot != (0<<4)|1 {
+		t.Errorf("maxRecvBallot=%d, want %d", inst.lb.maxRecvBallot, (0<<4)|1)
+	}
+}
+
+// TestHandlePrepareReply_PreacceptedTracked verifies PREACCEPTED replies are tracked.
+func TestHandlePrepareReply_PreacceptedTracked(t *testing.T) {
+	r := newTestReplica(3)
+	bal := int32((1 << 4) | 0)
+	inst := setupPreparingInstance(r, 1, 5, bal)
+
+	cmds := []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.STRONG}}
+	preply := &PrepareReply{
+		AcceptorId: 2, Replica: 1, Instance: 5,
+		OK: TRUE, Bal: bal, VBal: 0,
+		Status: PREACCEPTED, Command: cmds,
+		Seq: 10, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	r.handlePrepareReply(preply)
+
+	if inst.lb.recoveryInst == nil {
+		t.Fatal("recoveryInst should be set")
+	}
+	if inst.lb.recoveryInst.preAcceptCount != 1 {
+		t.Errorf("preAcceptCount=%d, want 1", inst.lb.recoveryInst.preAcceptCount)
+	}
+}
+
+// TestHandlePrepareReply_LeaderResponded verifies that a reply from the original
+// leader sets leaderResponded=true and returns early.
+func TestHandlePrepareReply_LeaderResponded(t *testing.T) {
+	r := newTestReplica(3)
+	bal := int32((1 << 4) | 0)
+	inst := setupPreparingInstance(r, 1, 5, bal)
+
+	cmds := []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.STRONG}}
+	// AcceptorId == Replica means this is from the original leader.
+	preply := &PrepareReply{
+		AcceptorId: 1, Replica: 1, Instance: 5,
+		OK: TRUE, Bal: bal, VBal: 0,
+		Status: PREACCEPTED, Command: cmds,
+		Seq: 10, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+
+	r.handlePrepareReply(preply)
+
+	if !inst.lb.recoveryInst.leaderResponded {
+		t.Error("leaderResponded should be true when AcceptorId == Replica")
+	}
+}
+
+// TestHandlePrepareReply_MajorityNOOP verifies that when majority has no recovery
+// instance, a NO-OP is proposed via Accept.
+func TestHandlePrepareReply_MajorityNOOP(t *testing.T) {
+	r := newTestReplica(3)
+	bal := int32((1 << 4) | 0)
+	setupPreparingInstance(r, 1, 5, bal)
+
+	// Send 2 NONE replies (from replicas 0 and 2) to reach majority (2 >= 3/2+1=2).
+	for _, aid := range []int32{0, 2} {
+		preply := &PrepareReply{
+			AcceptorId: aid, Replica: 1, Instance: 5,
+			OK: TRUE, Bal: -1, VBal: -1,
+			Status: NONE, Seq: -1, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+		}
+		func() {
+			defer func() { recover() }()
+			r.handlePrepareReply(preply)
+		}()
+	}
+
+	inst := r.InstanceSpace[1][5]
+	if inst.Status != ACCEPTED {
+		t.Errorf("Status=%d, want ACCEPTED(%d) (NO-OP)", inst.Status, ACCEPTED)
+	}
+	if inst.Cmds != nil {
+		t.Error("Cmds should be nil for NO-OP")
+	}
+	if !inst.lb.preparing == true {
+		// preparing should be false after majority
+	}
+	if inst.Deps[1] != 4 {
+		t.Errorf("NO-OP Deps[1]=%d, want 4 (Instance-1)", inst.Deps[1])
+	}
+}
+
+// TestHandlePrepareReply_MajorityAccepted verifies that when recovery finds an
+// ACCEPTED instance, it goes to Accept phase.
+func TestHandlePrepareReply_MajorityAccepted(t *testing.T) {
+	r := newTestReplica(3)
+	bal := int32((1 << 4) | 0)
+	setupPreparingInstance(r, 1, 5, bal)
+
+	cmds := []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.STRONG}}
+
+	// First reply: ACCEPTED
+	preply1 := &PrepareReply{
+		AcceptorId: 0, Replica: 1, Instance: 5,
+		OK: TRUE, Bal: bal, VBal: (0 << 4) | 1,
+		Status: ACCEPTED, Command: cmds,
+		Seq: 20, Deps: []int32{3, 4, 5}, CL: []int32{1, 1, 1},
+	}
+	r.handlePrepareReply(preply1)
+
+	// Second reply: NONE (reaches majority)
+	preply2 := &PrepareReply{
+		AcceptorId: 2, Replica: 1, Instance: 5,
+		OK: TRUE, Bal: -1, VBal: -1,
+		Status: NONE, Seq: -1, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
+	}
+	func() {
+		defer func() { recover() }()
+		r.handlePrepareReply(preply2)
+	}()
+
+	inst := r.InstanceSpace[1][5]
+	if inst.Status != ACCEPTED {
+		t.Errorf("Status=%d, want ACCEPTED(%d)", inst.Status, ACCEPTED)
+	}
+	if inst.Seq != 20 {
+		t.Errorf("Seq=%d, want 20 (from recovery)", inst.Seq)
+	}
+	if !inst.lb.preparing == true {
+		// preparing should be false
+	}
+}
+
+// TestHandlePrepareReply_NotEnoughReplies verifies that we wait for majority.
+func TestHandlePrepareReply_NotEnoughReplies(t *testing.T) {
+	r := newTestReplica(5) // N=5, majority = 3
+	bal := int32((1 << 4) | 0)
+	inst := setupPreparingInstance(r, 1, 5, bal)
+	inst.Deps = []int32{-1, -1, -1, -1, -1}
+	inst.CL = []int32{0, 0, 0, 0, 0}
+
+	// Send 1 NONE reply (not enough for majority of 3)
+	preply := &PrepareReply{
+		AcceptorId: 0, Replica: 1, Instance: 5,
+		OK: TRUE, Bal: -1, VBal: -1,
+		Status: NONE, Seq: -1, Deps: []int32{-1, -1, -1, -1, -1}, CL: []int32{0, 0, 0, 0, 0},
+	}
+	r.handlePrepareReply(preply)
+
+	// Should still be preparing
+	if !inst.lb.preparing {
+		t.Error("should still be preparing (not enough replies)")
+	}
+	if inst.lb.prepareOKs != 1 {
+		t.Errorf("prepareOKs=%d, want 1", inst.lb.prepareOKs)
 	}
 }

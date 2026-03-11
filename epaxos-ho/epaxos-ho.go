@@ -1561,8 +1561,207 @@ func equalDeps(deps1 []int32, deps2 []int32) bool {
 	return true
 }
 
-func (r *Replica) handlePrepareReply(reply *PrepareReply) {
-	// TODO: Phase 99.3g — recovery path
+func (r *Replica) handlePrepareReply(preply *PrepareReply) {
+	inst := r.InstanceSpace[preply.Replica][preply.Instance]
+
+	if inst.lb == nil || !inst.lb.preparing {
+		// Delayed reply — we've moved on.
+		return
+	}
+
+	if preply.OK == FALSE {
+		inst.lb.nacks++
+		return
+	}
+
+	inst.lb.prepareOKs++
+
+	// If a replica already committed/executed this instance, we can commit directly.
+	if preply.Command != nil && len(preply.Command) > 0 {
+		if preply.Command[0].CL == state.STRONG &&
+			(preply.Status == STRONGLY_COMMITTED || preply.Status == EXECUTED || preply.Status == DISCARDED) {
+			r.InstanceSpace[preply.Replica][preply.Instance] = &Instance{
+				Cmds:       preply.Command,
+				bal:        inst.bal,
+				vbal:       inst.bal,
+				Status:     STRONGLY_COMMITTED,
+				State:      READY,
+				Seq:        preply.Seq,
+				Deps:       preply.Deps,
+				CL:         preply.CL,
+				instanceId: &instanceId{preply.Replica, preply.Instance},
+			}
+			r.bcastStrongCommit(preply.Replica, preply.Instance, preply.Command, preply.Seq, preply.Deps, preply.CL, state.STRONG)
+			return
+		} else if preply.Command[0].CL == state.CAUSAL &&
+			(preply.Status == CAUSALLY_COMMITTED || preply.Status == EXECUTED || preply.Status == DISCARDED) {
+			r.InstanceSpace[preply.Replica][preply.Instance] = &Instance{
+				Cmds:       preply.Command,
+				bal:        inst.bal,
+				vbal:       inst.bal,
+				Status:     CAUSALLY_COMMITTED,
+				State:      READY,
+				Seq:        preply.Seq,
+				Deps:       preply.Deps,
+				CL:         preply.CL,
+				instanceId: &instanceId{preply.Replica, preply.Instance},
+			}
+			r.bcastCausalCommit(preply.Replica, preply.Instance, preply.Command, preply.Seq, preply.Deps, preply.CL, state.CAUSAL)
+			return
+		}
+	} else if preply.Status == STRONGLY_COMMITTED || preply.Status == EXECUTED || preply.Status == DISCARDED {
+		r.InstanceSpace[preply.Replica][preply.Instance] = &Instance{
+			Cmds:       preply.Command,
+			bal:        inst.bal,
+			vbal:       inst.bal,
+			Status:     STRONGLY_COMMITTED,
+			State:      READY,
+			Seq:        preply.Seq,
+			Deps:       preply.Deps,
+			CL:         preply.CL,
+			instanceId: &instanceId{preply.Replica, preply.Instance},
+		}
+		r.bcastStrongCommit(preply.Replica, preply.Instance, preply.Command, preply.Seq, preply.Deps, preply.CL, state.STRONG)
+		return
+	} else if preply.Status == CAUSALLY_COMMITTED {
+		r.InstanceSpace[preply.Replica][preply.Instance] = &Instance{
+			Cmds:       preply.Command,
+			bal:        inst.bal,
+			vbal:       inst.bal,
+			Status:     CAUSALLY_COMMITTED,
+			State:      READY,
+			Seq:        preply.Seq,
+			Deps:       preply.Deps,
+			CL:         preply.CL,
+			instanceId: &instanceId{preply.Replica, preply.Instance},
+		}
+		r.bcastCausalCommit(preply.Replica, preply.Instance, preply.Command, preply.Seq, preply.Deps, preply.CL, state.CAUSAL)
+		return
+	}
+
+	// Track ACCEPTED replies — take the one with the highest ballot.
+	if preply.Status == ACCEPTED {
+		if inst.lb.recoveryInst == nil || inst.lb.maxRecvBallot < preply.VBal {
+			inst.lb.recoveryInst = &RecoveryInstance{
+				cmds:   preply.Command,
+				status: preply.Status,
+				seq:    preply.Seq,
+				deps:   preply.Deps,
+				cl:     preply.CL,
+			}
+			inst.lb.maxRecvBallot = preply.VBal
+		}
+	}
+
+	// Track PREACCEPTED replies — count matching attributes.
+	if (preply.Status == PREACCEPTED || preply.Status == PREACCEPTED_EQ) &&
+		(inst.lb.recoveryInst == nil || inst.lb.recoveryInst.status < ACCEPTED) {
+		if inst.lb.recoveryInst == nil {
+			inst.lb.recoveryInst = &RecoveryInstance{
+				cmds:           preply.Command,
+				status:         preply.Status,
+				seq:            preply.Seq,
+				deps:           preply.Deps,
+				cl:             preply.CL,
+				preAcceptCount: 1,
+			}
+		} else if preply.Seq == inst.Seq && equalDeps(preply.Deps, inst.Deps) {
+			inst.lb.recoveryInst.preAcceptCount++
+		} else if preply.Status == PREACCEPTED_EQ {
+			// Different attributes but PREACCEPTED_EQ: take these (they agreed with original leader).
+			inst.lb.recoveryInst = &RecoveryInstance{
+				cmds:           preply.Command,
+				status:         preply.Status,
+				seq:            preply.Seq,
+				deps:           preply.Deps,
+				cl:             preply.CL,
+				preAcceptCount: 1,
+			}
+		}
+		if preply.AcceptorId == preply.Replica {
+			// Reply from the initial command leader — safe to restart phase 1.
+			inst.lb.recoveryInst.leaderResponded = true
+			return
+		}
+	}
+
+	if inst.lb.prepareOKs < r.N/2+1 {
+		return
+	}
+
+	// Received Prepare replies from a majority.
+	ir := inst.lb.recoveryInst
+
+	if ir != nil {
+		// At least one replica has (pre-)accepted this instance.
+		if ir.status == ACCEPTED ||
+			(!ir.leaderResponded && ir.preAcceptCount >= r.N/2 && (r.Thrifty || ir.status == PREACCEPTED_EQ)) {
+			// Safe to go to Accept phase.
+			inst.Cmds = ir.cmds
+			inst.Seq = ir.seq
+			inst.Deps = ir.deps
+			inst.CL = ir.cl
+			inst.vbal = inst.bal
+			inst.Status = ACCEPTED
+			inst.State = READY
+			inst.lb.preparing = false
+			r.bcastAccept(preply.Replica, preply.Instance, inst.bal, int32(len(inst.Cmds)), inst.Seq, inst.Deps, inst.CL)
+		} else if !ir.leaderResponded && ir.preAcceptCount >= (r.N/2+1)/2 {
+			// Send TryPreAccepts — but first try to pre-accept locally.
+			inst.lb.preAcceptOKs = 0
+			inst.lb.nacks = 0
+			inst.lb.possibleQuorum = make([]bool, r.N)
+			for q := 0; q < r.N; q++ {
+				inst.lb.possibleQuorum[q] = true
+			}
+			if conf, q, i := r.findPreAcceptConflicts(ir.cmds, preply.Replica, preply.Instance, ir.seq, ir.deps); conf {
+				if r.InstanceSpace[q][i].Status > CAUSALLY_COMMITTED {
+					// Restart Phase 1.
+					inst.lb.preparing = false
+					r.startStrongCommit(preply.Replica, preply.Instance, inst.bal, inst.lb.clientProposals, ir.cmds)
+					return
+				} else {
+					inst.lb.nacks = 1
+					inst.lb.possibleQuorum[r.Id] = false
+				}
+			} else {
+				inst.Cmds = ir.cmds
+				inst.Seq = ir.seq
+				inst.Deps = ir.deps
+				inst.vbal = inst.bal
+				inst.CL = ir.cl
+				inst.Status = PREACCEPTED
+				inst.State = READY
+				inst.lb.preAcceptOKs = 1
+			}
+			inst.lb.preparing = false
+			inst.lb.tryingToPreAccept = true
+			r.bcastTryPreAccept(preply.Replica, preply.Instance, inst.bal, inst.Cmds, inst.Seq, inst.Deps, inst.CL)
+		} else {
+			// Restart Phase 1.
+			inst.lb.preparing = false
+			r.startStrongCommit(preply.Replica, preply.Instance, inst.bal, inst.lb.clientProposals, ir.cmds)
+		}
+	} else {
+		// No recovery instance — propose NO-OP.
+		noopDeps := make([]int32, r.N)
+		noopCL := make([]int32, r.N)
+		noopDeps[preply.Replica] = preply.Instance - 1
+		inst.lb.preparing = false
+		r.InstanceSpace[preply.Replica][preply.Instance] = &Instance{
+			Cmds:       nil,
+			bal:        inst.bal,
+			vbal:       inst.bal,
+			Status:     ACCEPTED,
+			State:      READY,
+			Seq:        0,
+			Deps:       noopDeps,
+			CL:         noopCL,
+			lb:         inst.lb,
+			instanceId: &instanceId{preply.Replica, preply.Instance},
+		}
+		r.bcastAccept(preply.Replica, preply.Instance, inst.bal, 0, 0, noopDeps, noopCL)
+	}
 }
 
 // handlePreAcceptReply processes a PreAcceptReply from a follower (leader side).
