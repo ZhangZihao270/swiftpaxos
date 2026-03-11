@@ -6700,9 +6700,11 @@ case slot := <-r.deliverChan:
   - Batches from ProposeChan, allocates separate instances for causal and strong batches
   - startCausalCommit/startStrongCommit stubs ready for 99.3e/f
   - 7 new tests: classification, default-to-strong, instance allocation, all-causal/all-strong, stub calls
-- [ ] 99.3e: 移植 startCausalCommit + causal dependency computation
-  - `updateCausalAttributes()` 原样搬
-  - `bcastCausalCommit()` 用 SwiftPaxos 的 `SendMsg`
+- [x] 99.3e: 移植 startCausalCommit + causal dependency computation + handleCausalCommit [26:03:11]
+  - Full startCausalCommit: dependency computation, instance creation, client reply at commit time, broadcast, checkpointing
+  - Full handleCausalCommit: new/existing instance handling, idempotency, checkpoint detection
+  - Helper functions: updateCommitted, clearHashtables, updateCausalConflicts (unified leader/follower), updateCausalAttributes (session + read-from + seq), bcastCausalCommit
+  - 12 new tests: updateCommitted (gap/discard), clearHashtables, updateCausalConflicts (leader/follower), updateCausalAttributes (session/read-from), handleCausalCommit (new/existing/idempotent/checkpoint)
 - [ ] 99.3f: 移植 startStrongCommit + strong dependency computation + PreAccept/Accept/Commit phases
   - `updateStrongAttributes1/2()`, `mergeStrongAttributes()` 原样搬
   - `handlePreAccept`, `handlePreAcceptReply`, `handleAccept`, `handleAcceptReply`

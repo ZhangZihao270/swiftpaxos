@@ -2,6 +2,7 @@ package epaxosho
 
 import (
 	"encoding/binary"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -23,6 +24,9 @@ const COMMIT_GRACE_PERIOD = 10 * 1e9 // 10 seconds
 const ADAPT_TIME_SEC = 10
 
 const HT_INIT_SIZE = 11000
+
+const DO_CHECKPOINTING = true
+const CHECKPOINT_PERIOD = 10000
 
 // NO_CAUSAL_CHANNEL is the number of causal commit channels per replica.
 // Multiple channels avoid serialization bottlenecks for causal commits.
@@ -478,7 +482,100 @@ func (r *Replica) handlePropose(propose *defs.GPropose) {
 // startCausalCommit initiates a 1-RTT causal commit for the given commands.
 // Causal commands are committed immediately and broadcast to all replicas.
 func (r *Replica) startCausalCommit(replicaId int32, instance int32, ballot int32, proposals []*defs.GPropose, cmds []state.Command) {
-	// TODO: Phase 99.3e — causal dependency computation + broadcast
+	seq := int32(0)
+	deps := make([]int32, r.N)
+	cl := make([]int32, r.N)
+	for q := 0; q < r.N; q++ {
+		deps[q] = -1
+		cl[q] = 0
+	}
+
+	seq, deps, cl = r.updateCausalAttributes(cmds, seq, deps, cl, replicaId, instance)
+
+	comDeps := make([]int32, r.N)
+	for i := 0; i < r.N; i++ {
+		comDeps[i] = -1
+	}
+
+	r.InstanceSpace[replicaId][instance] = &Instance{
+		Cmds:       cmds,
+		bal:        ballot,
+		vbal:       ballot,
+		Status:     CAUSALLY_COMMITTED,
+		State:      READY,
+		Seq:        seq,
+		Deps:       deps,
+		CL:         cl,
+		lb:         &LeaderBookkeeping{clientProposals: proposals, allEqual: true, originalDeps: deps, committedDeps: comDeps},
+		instanceId: &instanceId{replicaId, instance},
+	}
+
+	if seq >= r.maxSeq {
+		r.maxSeq = seq + 1
+	}
+
+	r.updateCommitted(replicaId)
+
+	// Reply to clients at commit time for causal ops (1-RTT fast path)
+	if r.InstanceSpace[replicaId][instance].lb.clientProposals != nil && !r.Dreply {
+		for i := 0; i < len(r.InstanceSpace[replicaId][instance].lb.clientProposals); i++ {
+			prop := r.InstanceSpace[replicaId][instance].lb.clientProposals[i]
+			r.ReplyProposeTS(
+				&defs.ProposeReplyTS{
+					OK:        TRUE,
+					CommandId: prop.CommandId,
+					Value:     state.NIL(),
+					Timestamp: prop.Timestamp,
+				},
+				prop.Reply,
+				prop.Mutex)
+		}
+	}
+
+	r.updateCausalConflicts(cmds, replicaId, instance, seq, true)
+
+	r.recordInstanceMetadata(r.InstanceSpace[replicaId][instance])
+	r.recordCommands(cmds)
+	r.sync()
+	r.bcastCausalCommit(replicaId, instance, cmds, seq, deps, cl, state.CAUSAL)
+
+	cpcounter += len(cmds)
+
+	if replicaId == r.Id && DO_CHECKPOINTING && cpcounter >= CHECKPOINT_PERIOD {
+		cpcounter = 0
+
+		r.crtInstance[r.Id]++
+		instance++
+
+		r.maxSeq++
+		for q := 0; q < r.N; q++ {
+			deps[q] = r.crtInstance[int32(q)] - 1
+			cl[q] = 0
+		}
+
+		r.InstanceSpace[replicaId][instance] = &Instance{
+			Cmds:       cpMarker,
+			bal:        0,
+			vbal:       0,
+			Status:     CAUSALLY_COMMITTED,
+			State:      READY,
+			Seq:        r.maxSeq,
+			Deps:       deps,
+			CL:         cl,
+			lb:         &LeaderBookkeeping{allEqual: true, originalDeps: deps, committedDeps: comDeps},
+			instanceId: &instanceId{replicaId, instance},
+		}
+
+		r.latestCPReplica = replicaId
+		r.latestCPInstance = instance
+
+		r.clearHashtables()
+
+		r.recordInstanceMetadata(r.InstanceSpace[replicaId][instance])
+		r.sync()
+
+		r.bcastCausalCommit(replicaId, instance, cpMarker, r.maxSeq, deps, cl, state.CAUSAL)
+	}
 }
 
 // startStrongCommit initiates the EPaxos-style 2-RTT commit for strong commands.
@@ -508,7 +605,190 @@ func (r *Replica) handleCommitShort(commit *CommitShort) {
 }
 
 func (r *Replica) handleCausalCommit(commit *CausalCommit) {
-	// TODO: Phase 99.3e — causal commit handling
+	inst := r.InstanceSpace[commit.Replica][commit.Instance]
+
+	if commit.Seq >= r.maxSeq {
+		r.maxSeq = commit.Seq + 1
+	}
+
+	if commit.Instance >= r.crtInstance[commit.Replica] {
+		r.crtInstance[commit.Replica] = commit.Instance + 1
+	}
+
+	if inst != nil && (inst.Status == CAUSALLY_COMMITTED || inst.Status == EXECUTED || inst.Status == DISCARDED) {
+		return
+	}
+
+	if inst != nil {
+		if inst.lb != nil && inst.lb.clientProposals != nil && len(commit.Command) == 0 {
+			// Someone committed a NO-OP but we have proposals — re-propose them
+			for _, p := range inst.lb.clientProposals {
+				r.ProposeChan <- p
+			}
+			inst.lb = nil
+		}
+
+		inst.Cmds = commit.Command
+		inst.State = READY
+		inst.Seq = commit.Seq
+		inst.Deps = commit.Deps
+		inst.CL = commit.CL
+		inst.Status = CAUSALLY_COMMITTED
+	} else {
+		r.InstanceSpace[commit.Replica][commit.Instance] = &Instance{
+			Cmds:       commit.Command,
+			Status:     CAUSALLY_COMMITTED,
+			State:      READY,
+			Seq:        commit.Seq,
+			Deps:       commit.Deps,
+			CL:         commit.CL,
+			instanceId: &instanceId{commit.Replica, commit.Instance},
+		}
+
+		if len(commit.Command) == 0 {
+			// Checkpoint
+			r.latestCPReplica = commit.Replica
+			r.latestCPInstance = commit.Instance
+			r.clearHashtables()
+		}
+	}
+
+	r.updateCommitted(commit.Replica)
+	r.updateCausalConflicts(commit.Command, commit.Replica, commit.Instance, commit.Seq, false)
+
+	r.recordInstanceMetadata(r.InstanceSpace[commit.Replica][commit.Instance])
+	r.recordCommands(commit.Command)
+}
+
+// --- Causal commit helpers ---
+
+// updateCommitted advances CommittedUpTo[q] by scanning forward while
+// the next instance is committed (causal or strong), executed, or discarded.
+func (r *Replica) updateCommitted(q int32) {
+	for r.InstanceSpace[q][r.CommittedUpTo[q]+1] != nil &&
+		(r.InstanceSpace[q][r.CommittedUpTo[q]+1].Status == STRONGLY_COMMITTED ||
+			r.InstanceSpace[q][r.CommittedUpTo[q]+1].Status == CAUSALLY_COMMITTED ||
+			r.InstanceSpace[q][r.CommittedUpTo[q]+1].Status == EXECUTED ||
+			r.InstanceSpace[q][r.CommittedUpTo[q]+1].Status == DISCARDED) {
+		r.CommittedUpTo[q]++
+	}
+}
+
+// clearHashtables reinitializes all per-replica conflict and session conflict maps
+// after a checkpoint, discarding stale dependency information.
+func (r *Replica) clearHashtables() {
+	for q := 0; q < r.N; q++ {
+		r.conflicts[q] = make(map[state.Key]int32, HT_INIT_SIZE)
+		r.sessionConflicts[q] = make(map[int32]int32, HT_INIT_SIZE)
+	}
+}
+
+// updateCausalConflicts updates conflict tracking maps after a causal commit.
+// For each command, it updates the per-key conflict map and maxSeqPerKey.
+// If includeSession is true (leader path), it also updates session conflict maps.
+func (r *Replica) updateCausalConflicts(cmds []state.Command, replicaId int32, instance int32, seq int32, includeSession bool) {
+	for i := 0; i < len(cmds); i++ {
+		r.conflictMutex.Lock()
+		if d, present := r.conflicts[replicaId][cmds[i].K]; !present || d < instance {
+			r.conflicts[replicaId][cmds[i].K] = instance
+		}
+		r.conflictMutex.Unlock()
+
+		r.maxSeqPerKeyMu.Lock()
+		if s, present := r.maxSeqPerKey[cmds[i].K]; !present || s < seq {
+			r.maxSeqPerKey[cmds[i].K] = seq
+		}
+		r.maxSeqPerKeyMu.Unlock()
+	}
+
+	if includeSession {
+		for i := 0; i < len(cmds); i++ {
+			sid := cmds[i].Sid
+			r.sessionConflictsMu.Lock()
+			if d, present := r.sessionConflicts[replicaId][sid]; !present || d < instance {
+				r.sessionConflicts[replicaId][sid] = instance
+			}
+			r.sessionConflictsMu.Unlock()
+		}
+	}
+}
+
+// updateCausalAttributes computes causal dependencies for a batch of commands.
+// It tracks: (1) session dependencies, (2) read-from dependencies (GET reads from latest PUT),
+// (3) max sequence per key for causal ordering.
+func (r *Replica) updateCausalAttributes(cmds []state.Command, seq int32, deps []int32, cl []int32, replicaId int32, instance int32) (int32, []int32, []int32) {
+	// Track session dependency: find the latest committed command from the same session
+	for i := 0; i < len(cmds); i++ {
+		r.sessionConflictsMu.RLock()
+		d, present := r.sessionConflicts[replicaId][cmds[i].Sid]
+		r.sessionConflictsMu.RUnlock()
+
+		if present && d > deps[replicaId] {
+			deps[replicaId] = d
+			if r.InstanceSpace[replicaId][d] != nil && len(r.InstanceSpace[replicaId][d].Cmds) > 0 {
+				cl[replicaId] = int32(r.InstanceSpace[replicaId][d].Cmds[0].CL)
+			}
+			if r.InstanceSpace[replicaId][d] != nil && seq <= r.InstanceSpace[replicaId][d].Seq {
+				seq = r.InstanceSpace[replicaId][d].Seq + 1
+			}
+			break
+		}
+	}
+
+	// Track read-from dependency: GET commands depend on the latest write to that key
+	for i := 0; i < len(cmds); i++ {
+		if cmds[i].Op == state.GET {
+			r.maxWriteInstancePerKeyMu.RLock()
+			d, present := r.maxWriteInstancePerKey[cmds[i].K]
+			r.maxWriteInstancePerKeyMu.RUnlock()
+			if present && d.instance > deps[d.replica] {
+				deps[d.replica] = d.instance
+				if r.InstanceSpace[d.replica][d.instance] != nil && len(r.InstanceSpace[d.replica][d.instance].Cmds) > 0 {
+					cl[d.replica] = int32(r.InstanceSpace[d.replica][d.instance].Cmds[0].CL)
+				}
+				if r.InstanceSpace[d.replica][d.instance] != nil && seq <= r.InstanceSpace[d.replica][d.instance].Seq {
+					seq = r.InstanceSpace[d.replica][d.instance].Seq + 1
+				}
+				break
+			}
+		}
+	}
+
+	// Update seq from maxSeqPerKey for all affected keys
+	for i := 0; i < len(cmds); i++ {
+		r.maxSeqPerKeyMu.RLock()
+		s, present := r.maxSeqPerKey[cmds[i].K]
+		r.maxSeqPerKeyMu.RUnlock()
+		if present && seq <= s {
+			seq = s + 1
+		}
+	}
+
+	return seq, deps, cl
+}
+
+// bcastCausalCommit broadcasts a CausalCommit message to all peer replicas.
+// Uses a random causal commit RPC channel to balance load across channels.
+func (r *Replica) bcastCausalCommit(replicaId int32, instance int32, cmds []state.Command, seq int32, deps []int32, cl []int32, consistency state.Operation) {
+	defer func() {
+		if err := recover(); err != nil {
+			dlog.Println("Causal commit bcast failed:", err)
+		}
+	}()
+
+	args := &CausalCommit{
+		Consistency: consistency,
+		LeaderId:    r.Id,
+		Replica:     replicaId,
+		Instance:    instance,
+		Command:     cmds,
+		Seq:         seq,
+		Deps:        deps,
+		CL:          cl,
+	}
+	for q := 0; q < r.N-1; q++ {
+		r.SendMsg(r.PreferredPeerOrder[q], r.causalCommitRPC[rand.Intn(r.N*NO_CAUSAL_CHANNEL)], args)
+	}
 }
 
 func (r *Replica) handlePrepareReply(reply *PrepareReply) {

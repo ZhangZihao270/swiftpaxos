@@ -1,8 +1,11 @@
 package epaxosho
 
 import (
+	"sync"
 	"testing"
 
+	"github.com/imdea-software/swiftpaxos/replica"
+	"github.com/imdea-software/swiftpaxos/replica/defs"
 	fastrpc "github.com/imdea-software/swiftpaxos/rpc"
 	"github.com/imdea-software/swiftpaxos/state"
 )
@@ -225,9 +228,7 @@ func TestStubHandlersDoNotPanic(t *testing.T) {
 	t.Run("handleCommitShort", func(t *testing.T) {
 		r.handleCommitShort(&CommitShort{})
 	})
-	t.Run("handleCausalCommit", func(t *testing.T) {
-		r.handleCausalCommit(&CausalCommit{})
-	})
+	// handleCausalCommit tested separately — it now requires initialized InstanceSpace
 	t.Run("handlePrepareReply", func(t *testing.T) {
 		r.handlePrepareReply(&PrepareReply{})
 	})
@@ -292,22 +293,42 @@ func TestCausalCommitChannelPolling(t *testing.T) {
 
 // --- handlePropose tests ---
 
-// newTestReplica creates a minimal Replica for testing handlePropose.
-// It has ProposeChan, crtInstance, and InstanceSpace initialized.
+// newTestReplica creates a minimal Replica for testing.
+// It has all the fields needed for causal commit testing initialized.
 func newTestReplica(n int) *Replica {
 	r := &Replica{
-		InstanceSpace: make([][]*Instance, n),
-		crtInstance:   make([]int32, n),
+		Replica: &replica.Replica{
+			N:                  n,
+			Id:                 0,
+			PreferredPeerOrder: make([]int32, n),
+			Stats:              &defs.Stats{M: make(map[string]int)},
+			ProposeChan:        make(chan *defs.GPropose, defs.CHAN_BUFFER_SIZE),
+		},
+		InstanceSpace:            make([][]*Instance, n),
+		crtInstance:              make([]int32, n),
+		CommittedUpTo:            make([]int32, n),
+		ExecedUpTo:               make([]int32, n),
+		conflicts:                make([]map[state.Key]int32, n),
+		conflictMutex:            new(sync.RWMutex),
+		maxSeqPerKey:             make(map[state.Key]int32),
+		maxSeqPerKeyMu:           new(sync.RWMutex),
+		sessionConflicts:         make([]map[int32]int32, n),
+		sessionConflictsMu:       new(sync.RWMutex),
+		maxWriteInstancePerKey:   make(map[state.Key]*instanceId),
+		maxWriteInstancePerKeyMu: new(sync.RWMutex),
+		maxWriteSeqPerKey:        make(map[state.Key]int32),
+		maxWriteSeqPerKeyMu:      new(sync.RWMutex),
+		clientMutex:              new(sync.Mutex),
+		causalCommitRPC:          make([]uint8, n*NO_CAUSAL_CHANNEL),
 	}
-	// Use a mock Replica with Id=0, N=n
-	// We set these via the embedded struct fields indirectly — but since
-	// we can't embed replica.Replica without network, we access through
-	// the Replica's own fields. The handlePropose reads r.Id and r.ProposeChan
-	// from the embedded replica.
-	// Instead, build a minimal wrapper that works.
 	for i := 0; i < n; i++ {
-		r.InstanceSpace[i] = make([]*Instance, MAX_INSTANCE)
+		r.InstanceSpace[i] = make([]*Instance, 1024)
 		r.crtInstance[i] = 0
+		r.CommittedUpTo[i] = -1
+		r.ExecedUpTo[i] = -1
+		r.conflicts[i] = make(map[state.Key]int32, HT_INIT_SIZE)
+		r.sessionConflicts[i] = make(map[int32]int32, 10)
+		r.PreferredPeerOrder[i] = int32(i)
 	}
 	return r
 }
@@ -455,16 +476,348 @@ func TestHandleProposeAllStrong(t *testing.T) {
 	}
 }
 
-func TestStartCausalCommitStub(t *testing.T) {
-	r := &Replica{}
-	// Should not panic — it's a stub
-	r.startCausalCommit(0, 0, 0, nil, nil)
-}
-
 func TestStartStrongCommitStub(t *testing.T) {
 	r := &Replica{}
 	// Should not panic — it's a stub
 	r.startStrongCommit(0, 0, 0, nil, nil)
+}
+
+// --- Causal commit helper tests ---
+
+func TestUpdateCommitted(t *testing.T) {
+	r := newTestReplica(3)
+
+	// No instances → CommittedUpTo stays at -1
+	r.updateCommitted(0)
+	if r.CommittedUpTo[0] != -1 {
+		t.Errorf("CommittedUpTo[0]=%d, want -1", r.CommittedUpTo[0])
+	}
+
+	// Add causally committed instances 0, 1, 2
+	r.InstanceSpace[0][0] = &Instance{Status: CAUSALLY_COMMITTED}
+	r.InstanceSpace[0][1] = &Instance{Status: CAUSALLY_COMMITTED}
+	r.InstanceSpace[0][2] = &Instance{Status: EXECUTED}
+	r.updateCommitted(0)
+	if r.CommittedUpTo[0] != 2 {
+		t.Errorf("CommittedUpTo[0]=%d, want 2", r.CommittedUpTo[0])
+	}
+
+	// Gap at instance 3 (nil) → stops at 2
+	r.InstanceSpace[0][4] = &Instance{Status: CAUSALLY_COMMITTED}
+	r.updateCommitted(0)
+	if r.CommittedUpTo[0] != 2 {
+		t.Errorf("CommittedUpTo[0]=%d, want 2 (gap at 3)", r.CommittedUpTo[0])
+	}
+
+	// Fill gap → advances to 4
+	r.InstanceSpace[0][3] = &Instance{Status: STRONGLY_COMMITTED}
+	r.updateCommitted(0)
+	if r.CommittedUpTo[0] != 4 {
+		t.Errorf("CommittedUpTo[0]=%d, want 4", r.CommittedUpTo[0])
+	}
+}
+
+func TestUpdateCommittedWithDiscarded(t *testing.T) {
+	r := newTestReplica(3)
+	r.InstanceSpace[0][0] = &Instance{Status: DISCARDED}
+	r.InstanceSpace[0][1] = &Instance{Status: CAUSALLY_COMMITTED}
+	r.updateCommitted(0)
+	if r.CommittedUpTo[0] != 1 {
+		t.Errorf("CommittedUpTo[0]=%d, want 1", r.CommittedUpTo[0])
+	}
+}
+
+func TestClearHashtables(t *testing.T) {
+	r := newTestReplica(3)
+	// Populate conflicts
+	r.conflicts[0][state.Key(1)] = 5
+	r.conflicts[1][state.Key(2)] = 10
+	r.sessionConflicts[0][42] = 3
+
+	r.clearHashtables()
+
+	// All maps should be freshly initialized (empty)
+	if len(r.conflicts[0]) != 0 {
+		t.Errorf("conflicts[0] should be empty, got %d", len(r.conflicts[0]))
+	}
+	if len(r.conflicts[1]) != 0 {
+		t.Errorf("conflicts[1] should be empty, got %d", len(r.conflicts[1]))
+	}
+	if len(r.sessionConflicts[0]) != 0 {
+		t.Errorf("sessionConflicts[0] should be empty, got %d", len(r.sessionConflicts[0]))
+	}
+}
+
+func TestUpdateCausalConflicts(t *testing.T) {
+	r := newTestReplica(3)
+	cmds := []state.Command{
+		{Op: state.PUT, K: 10, V: state.NIL(), CL: state.CAUSAL, Sid: 1},
+		{Op: state.GET, K: 20, V: state.NIL(), CL: state.CAUSAL, Sid: 2},
+	}
+
+	// Leader path (includeSession=true)
+	r.updateCausalConflicts(cmds, 0, 5, 10, true)
+
+	// Check conflicts updated
+	if r.conflicts[0][state.Key(10)] != 5 {
+		t.Errorf("conflicts[0][10]=%d, want 5", r.conflicts[0][state.Key(10)])
+	}
+	if r.conflicts[0][state.Key(20)] != 5 {
+		t.Errorf("conflicts[0][20]=%d, want 5", r.conflicts[0][state.Key(20)])
+	}
+
+	// Check maxSeqPerKey updated
+	if r.maxSeqPerKey[state.Key(10)] != 10 {
+		t.Errorf("maxSeqPerKey[10]=%d, want 10", r.maxSeqPerKey[state.Key(10)])
+	}
+
+	// Check session conflicts updated
+	if r.sessionConflicts[0][1] != 5 {
+		t.Errorf("sessionConflicts[0][1]=%d, want 5", r.sessionConflicts[0][1])
+	}
+	if r.sessionConflicts[0][2] != 5 {
+		t.Errorf("sessionConflicts[0][2]=%d, want 5", r.sessionConflicts[0][2])
+	}
+
+	// Higher instance should replace
+	r.updateCausalConflicts(cmds, 0, 8, 15, true)
+	if r.conflicts[0][state.Key(10)] != 8 {
+		t.Errorf("conflicts[0][10]=%d, want 8", r.conflicts[0][state.Key(10)])
+	}
+	if r.maxSeqPerKey[state.Key(10)] != 15 {
+		t.Errorf("maxSeqPerKey[10]=%d, want 15", r.maxSeqPerKey[state.Key(10)])
+	}
+
+	// Lower instance should NOT replace
+	r.updateCausalConflicts(cmds, 0, 3, 5, true)
+	if r.conflicts[0][state.Key(10)] != 8 {
+		t.Errorf("conflicts[0][10]=%d, want 8 (should not decrease)", r.conflicts[0][state.Key(10)])
+	}
+}
+
+func TestUpdateCausalConflictsFollowerPath(t *testing.T) {
+	r := newTestReplica(3)
+	cmds := []state.Command{
+		{Op: state.PUT, K: 10, V: state.NIL(), CL: state.CAUSAL, Sid: 1},
+	}
+
+	// Follower path (includeSession=false)
+	r.updateCausalConflicts(cmds, 1, 5, 10, false)
+
+	// Conflicts should be updated
+	if r.conflicts[1][state.Key(10)] != 5 {
+		t.Errorf("conflicts[1][10]=%d, want 5", r.conflicts[1][state.Key(10)])
+	}
+
+	// Session conflicts should NOT be updated
+	if _, present := r.sessionConflicts[1][1]; present {
+		t.Error("follower path should not update session conflicts")
+	}
+}
+
+func TestUpdateCausalAttributes(t *testing.T) {
+	r := newTestReplica(3)
+
+	// No prior state → seq=0, deps all -1
+	cmds := []state.Command{
+		{Op: state.PUT, K: 1, V: state.NIL(), CL: state.CAUSAL, Sid: 42},
+	}
+	deps := make([]int32, 3)
+	cl := make([]int32, 3)
+	for i := range deps {
+		deps[i] = -1
+	}
+	seq, deps, cl := r.updateCausalAttributes(cmds, 0, deps, cl, 0, 0)
+	if seq != 0 {
+		t.Errorf("seq=%d, want 0 (no prior state)", seq)
+	}
+	for i, d := range deps {
+		if d != -1 {
+			t.Errorf("deps[%d]=%d, want -1", i, d)
+		}
+	}
+
+	// Add a prior session conflict
+	r.sessionConflicts[0][42] = 5
+	r.InstanceSpace[0][5] = &Instance{
+		Cmds: []state.Command{{CL: state.CAUSAL}},
+		Seq:  3,
+	}
+	deps2 := []int32{-1, -1, -1}
+	cl2 := []int32{0, 0, 0}
+	seq2, deps2, cl2 := r.updateCausalAttributes(cmds, 0, deps2, cl2, 0, 6)
+	if deps2[0] != 5 {
+		t.Errorf("deps[0]=%d, want 5 (session dep)", deps2[0])
+	}
+	if seq2 != 4 {
+		t.Errorf("seq=%d, want 4 (session dep seq 3 + 1)", seq2)
+	}
+	_ = cl
+	_ = cl2
+}
+
+func TestUpdateCausalAttributesReadFrom(t *testing.T) {
+	r := newTestReplica(3)
+
+	// Set up a write instance for key 10 on replica 1
+	r.maxWriteInstancePerKey[state.Key(10)] = &instanceId{replica: 1, instance: 3}
+	r.InstanceSpace[1][3] = &Instance{
+		Cmds: []state.Command{{CL: state.STRONG}},
+		Seq:  7,
+	}
+
+	// A GET on key 10 should pick up the read-from dependency
+	cmds := []state.Command{
+		{Op: state.GET, K: 10, V: state.NIL(), CL: state.CAUSAL, Sid: 1},
+	}
+	deps := []int32{-1, -1, -1}
+	cl := []int32{0, 0, 0}
+	seq, deps, _ := r.updateCausalAttributes(cmds, 0, deps, cl, 0, 0)
+
+	if deps[1] != 3 {
+		t.Errorf("deps[1]=%d, want 3 (read-from dep)", deps[1])
+	}
+	if seq != 8 {
+		t.Errorf("seq=%d, want 8 (read-from seq 7 + 1)", seq)
+	}
+}
+
+func TestHandleCausalCommitNewInstance(t *testing.T) {
+	r := newTestReplica(3)
+
+	commit := &CausalCommit{
+		Consistency: state.CAUSAL,
+		LeaderId:    1,
+		Replica:     1,
+		Instance:    0,
+		Command:     []state.Command{{Op: state.PUT, K: 5, V: state.NIL(), CL: state.CAUSAL, Sid: 1}},
+		Seq:         10,
+		Deps:        []int32{-1, -1, -1},
+		CL:          []int32{0, 0, 0},
+	}
+
+	r.handleCausalCommit(commit)
+
+	inst := r.InstanceSpace[1][0]
+	if inst == nil {
+		t.Fatal("instance should be created")
+	}
+	if inst.Status != CAUSALLY_COMMITTED {
+		t.Errorf("Status=%d, want CAUSALLY_COMMITTED(%d)", inst.Status, CAUSALLY_COMMITTED)
+	}
+	if inst.State != READY {
+		t.Errorf("State=%d, want READY(%d)", inst.State, READY)
+	}
+	if inst.Seq != 10 {
+		t.Errorf("Seq=%d, want 10", inst.Seq)
+	}
+	if r.maxSeq != 11 {
+		t.Errorf("maxSeq=%d, want 11", r.maxSeq)
+	}
+	if r.crtInstance[1] != 1 {
+		t.Errorf("crtInstance[1]=%d, want 1", r.crtInstance[1])
+	}
+	if r.CommittedUpTo[1] != 0 {
+		t.Errorf("CommittedUpTo[1]=%d, want 0", r.CommittedUpTo[1])
+	}
+}
+
+func TestHandleCausalCommitExistingInstance(t *testing.T) {
+	r := newTestReplica(3)
+
+	// Pre-existing instance in PREACCEPTED state
+	r.InstanceSpace[1][0] = &Instance{
+		Status: PREACCEPTED,
+		State:  WAITING,
+	}
+
+	commit := &CausalCommit{
+		Consistency: state.CAUSAL,
+		LeaderId:    1,
+		Replica:     1,
+		Instance:    0,
+		Command:     []state.Command{{Op: state.PUT, K: 5, V: state.NIL(), CL: state.CAUSAL}},
+		Seq:         5,
+		Deps:        []int32{-1, -1, -1},
+		CL:          []int32{0, 0, 0},
+	}
+
+	r.handleCausalCommit(commit)
+
+	inst := r.InstanceSpace[1][0]
+	if inst.Status != CAUSALLY_COMMITTED {
+		t.Errorf("Status=%d, want CAUSALLY_COMMITTED", inst.Status)
+	}
+	if inst.State != READY {
+		t.Errorf("State=%d, want READY", inst.State)
+	}
+	if inst.Seq != 5 {
+		t.Errorf("Seq=%d, want 5", inst.Seq)
+	}
+}
+
+func TestHandleCausalCommitIdempotent(t *testing.T) {
+	r := newTestReplica(3)
+
+	// Already committed instance
+	r.InstanceSpace[1][0] = &Instance{
+		Status: CAUSALLY_COMMITTED,
+		Seq:    5,
+	}
+
+	commit := &CausalCommit{
+		Consistency: state.CAUSAL,
+		LeaderId:    1,
+		Replica:     1,
+		Instance:    0,
+		Command:     []state.Command{{Op: state.PUT, K: 5, V: state.NIL(), CL: state.CAUSAL}},
+		Seq:         10, // Different seq — should be ignored
+		Deps:        []int32{-1, -1, -1},
+		CL:          []int32{0, 0, 0},
+	}
+
+	r.handleCausalCommit(commit)
+
+	// Should not update — already committed
+	if r.InstanceSpace[1][0].Seq != 5 {
+		t.Errorf("Seq=%d, want 5 (should not be updated for already-committed)", r.InstanceSpace[1][0].Seq)
+	}
+}
+
+func TestHandleCausalCommitCheckpoint(t *testing.T) {
+	r := newTestReplica(3)
+
+	// Populate some conflicts
+	r.conflicts[0][state.Key(1)] = 5
+	r.sessionConflicts[0][42] = 3
+
+	// Checkpoint commit (empty command list)
+	commit := &CausalCommit{
+		Consistency: state.CAUSAL,
+		LeaderId:    0,
+		Replica:     0,
+		Instance:    100,
+		Command:     []state.Command{}, // empty = checkpoint
+		Seq:         50,
+		Deps:        []int32{99, 99, 99},
+		CL:          []int32{0, 0, 0},
+	}
+
+	r.handleCausalCommit(commit)
+
+	if r.latestCPReplica != 0 {
+		t.Errorf("latestCPReplica=%d, want 0", r.latestCPReplica)
+	}
+	if r.latestCPInstance != 100 {
+		t.Errorf("latestCPInstance=%d, want 100", r.latestCPInstance)
+	}
+	// Hashtables should be cleared
+	if len(r.conflicts[0]) != 0 {
+		t.Errorf("conflicts[0] should be cleared by checkpoint, got %d entries", len(r.conflicts[0]))
+	}
+	if len(r.sessionConflicts[0]) != 0 {
+		t.Errorf("sessionConflicts[0] should be cleared by checkpoint, got %d entries", len(r.sessionConflicts[0]))
+	}
 }
 
 // TestMessageChannelTypeAssertions verifies that messages from channels
