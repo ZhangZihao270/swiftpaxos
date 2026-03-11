@@ -6663,21 +6663,19 @@ case slot := <-r.deliverChan:
 **Goal**: 创建 `swiftpaxos/epaxos-ho/` 目录，搭建包骨架。
 
 - [x] 99.2a: 创建 `epaxos-ho/` 目录，package 名 `epaxosho` [26:03:11]
-- [ ] 99.2b: 创建 `epaxos-ho/defs.go` — 消息类型定义 + 状态常量
+- [x] 99.2b: 创建 `epaxos-ho/defs.go` — 消息类型定义 + 状态常量 [26:03:11]
   - 12 个 struct (Prepare, PrepareReply, PreAccept, PreAcceptReply, PreAcceptOK, Accept, AcceptReply, Commit, CausalCommit, CommitShort, TryPreAccept, TryPreAcceptReply)
   - 状态常量: PREACCEPTED, ACCEPTED, CAUSALLY_COMMITTED, STRONGLY_COMMITTED, EXECUTED, DISCARDED 等
   - 从 Orca `hybridproto/hybridproto.go` 搬，改 import path (~150 LOC)
-- [ ] 99.2b2: 创建 `epaxos-ho/defsmarsh.go` — 简单固定大小消息的 Marshal/Unmarshal
-  - Prepare (4×int32), PreAcceptOK (1×int32), AcceptReply (4×int32), TryPreAcceptReply (8×int32)
-  - 纯 int32 字段，无 slice (~200 LOC)
-- [ ] 99.2b3: `epaxos-ho/defsmarsh.go` — 含 []int32 slice 消息的 Marshal/Unmarshal
-  - PreAcceptReply (int32s + []int32×3), Accept (int32s + []int32×2), CommitShort (int32s + []int32×2)
-  - 需要 length-prefixed slice 编码 (~300 LOC)
-- [ ] 99.2b4: `epaxos-ho/defsmarsh.go` — 含 []Command + []int32 的复杂消息 Marshal/Unmarshal
+- [x] 99.2b2: 创建 `epaxos-ho/defsmarsh.go` — 简单固定大小消息的 Marshal/Unmarshal [26:03:11]
+  - Prepare (16B), PreAcceptOK (4B), AcceptReply (13B), TryPreAcceptReply (26B)
+- [x] 99.2b3: `epaxos-ho/defsmarsh.go` — 含 []int32 slice 消息的 Marshal/Unmarshal [26:03:11]
+  - PreAcceptReply (17B + 3 slices), Accept (24B + 2 slices), CommitShort (21B + 2 slices)
+- [x] 99.2b4: `epaxos-ho/defsmarsh.go` — 含 []Command + []int32 的复杂消息 Marshal/Unmarshal [26:03:11]
   - PrepareReply, PreAccept, Commit, CausalCommit, TryPreAccept
-  - 需要 []state.Command 序列化 (用 Command.Marshal/Unmarshal) (~400 LOC)
-- [ ] 99.2c: 创建 `epaxos-ho/defs_test.go` — 序列化 round-trip 测试
-- [ ] 99.2d: `go build ./epaxos-ho/` 通过
+  - 用 helper 函数压缩到 876 LOC (vs Orca 的 1723 LOC)
+- [x] 99.2c: 创建 `epaxos-ho/defs_test.go` — 序列化 round-trip 测试 (28 tests) [26:03:11]
+- [x] 99.2d: `go build ./epaxos-ho/` 通过 [26:03:11]
 
 ---
 
