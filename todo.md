@@ -10,7 +10,7 @@ This document tracks the implementation of multiple hybrid consistency protocols
 - **Phase 100**: Re-run Exp 1.1 (Raft vs Raft-HT, writes=5%/50%, all optimizations applied) — **DONE**
 - **Phase 101**: Exp 2.3 — Raft-HT Failure Recovery — **DONE** (no recovery: client lacks failover)
 - **Phase 102**: Client Leader Failover — **DONE** (failover works but election too slow)
-- **Phase 103**: Fix election blocking + kill logic + client timeout → full throughput recovery
+- **Phase 103**: Fix election blocking + kill logic + client timeout — **DONE** (recovery in ~2s, aggregate barely dips)
 
 ## Table of Contents
 
@@ -7072,10 +7072,16 @@ Requires client-side per-second throughput reporting (currently client only outp
   - Changed `replyTimeout` from const to `HybridBufferClient` field, passed from config
   - Updated all 7 `NewHybridBufferClient` callers in `main.go` to pass `c.ReplyTimeout`
   - Tests: config parsing (3 cases), default value (10s not 120s), custom timeout
-- [ ] 103d: Build & test `go build -o swiftpaxos-dist . && go test ./...`
-- [ ] 103e: Re-run Exp 2.3 with fixes — verify throughput recovery within 1-3s
+- [x] 103d: Build & test — all packages build, all tests pass [26:03:11]
+- [x] 103e: Re-run Exp 2.3 with fixes — full recovery in ~2s [26:03:11]
+  - Pre-kill aggregate: ~11,000 ops/s (3 clients × 16 threads)
+  - Kill leader (replica0) at t=60s → aggregate dips to ~4,680 ops/s for 1 second
+  - Recovery at t+2s: aggregate back to ~10,279 ops/s (client1+client2 absorb load)
+  - Post-kill steady state: ~9,000-9,500 ops/s (4 replicas, client0 exits since co-located with killed replica)
+  - Client0 co-located with killed replica → loses all connections, exits after 10s timeout (expected)
+  - Client1/client2 on surviving machines → immediate recovery, throughput spike then stabilize
 
-**Status**: ⬜ **TODO**
+**Status**: ✅ **DONE**
 
 ---
 
