@@ -243,19 +243,30 @@ func (r *Replica) run() {
 	}
 
 	onOffProposeChan := r.ProposeChan
+	onOffWeakProposeChan := r.cs.weakProposeChan
 
 	go r.WaitForClientConnections()
 
 	for !r.Shutdown {
 		select {
 		case propose := <-onOffProposeChan:
-			r.handlePropose(propose)
+			r.handleAllProposals(propose, nil)
 			if r.batchWait > 0 {
 				onOffProposeChan = nil
+				onOffWeakProposeChan = nil
+			}
+
+		case m := <-onOffWeakProposeChan:
+			wp := m.(*MWeakPropose)
+			r.handleAllProposals(nil, wp)
+			if r.batchWait > 0 {
+				onOffProposeChan = nil
+				onOffWeakProposeChan = nil
 			}
 
 		case <-batchClockChan:
 			onOffProposeChan = r.ProposeChan
+			onOffWeakProposeChan = r.cs.weakProposeChan
 
 		case m := <-r.cs.appendEntriesChan:
 			ae := m.(*AppendEntries)
@@ -267,7 +278,7 @@ func (r *Replica) run() {
 
 		case m := <-r.cs.appendEntriesReplyChan:
 			aer := m.(*AppendEntriesReply)
-			r.handleAppendEntriesReply(aer)
+			r.handleAppendEntriesReplyBatch(aer)
 
 		case m := <-r.cs.requestVoteChan:
 			rv := m.(*RequestVote)
@@ -276,11 +287,6 @@ func (r *Replica) run() {
 		case m := <-r.cs.requestVoteReplyChan:
 			rvr := m.(*RequestVoteReply)
 			r.handleRequestVoteReply(rvr)
-
-		// Raft-HT: weak write proposals (leader only)
-		case m := <-r.cs.weakProposeChan:
-			wp := m.(*MWeakPropose)
-			r.handleWeakPropose(wp)
 
 		case <-r.electionTimer.C:
 			if r.role != LEADER {
@@ -357,39 +363,81 @@ func (r *Replica) becomeLeader() {
 // 256 entries ≈ 50KB payload, safely under 1ms processing time.
 const maxBatchSize = 256
 
-// --- handlePropose: Batch proposals, append to log, broadcast AppendEntries ---
+// --- handleAllProposals: Unified strong+weak proposal handling with single broadcast ---
+// Drains BOTH ProposeChan and weakProposeChan to coalesce into a single
+// broadcastAppendEntries call, eliminating the double-broadcast problem.
 
-func (r *Replica) handlePropose(propose *defs.GPropose) {
+func (r *Replica) handleAllProposals(firstStrong *defs.GPropose, firstWeak *MWeakPropose) {
 	if r.role != LEADER {
-		// Reject: only leader accepts proposals.
-		// Send RaftReply with empty value — client treats any reply as success
-		// since Raft-HT always routes proposals to the designated leader.
-		reply := r.raftReplyCache.Get()
-		reply.CmdId = CommandId{ClientId: propose.ClientId, SeqNum: propose.CommandId}
-		reply.Value = state.NIL()
-		r.sender.SendToClient(propose.ClientId, reply, r.cs.raftReplyRPC)
+		if firstStrong != nil {
+			reply := r.raftReplyCache.Get()
+			reply.CmdId = CommandId{ClientId: firstStrong.ClientId, SeqNum: firstStrong.CommandId}
+			reply.Value = state.NIL()
+			reply.LeaderId = r.knownLeader
+			r.sender.SendToClient(firstStrong.ClientId, reply, r.cs.raftReplyRPC)
+		}
+		if firstWeak != nil {
+			reply := &MWeakReply{
+				LeaderId: r.knownLeader,
+				Term:     r.currentTerm,
+				CmdId:    CommandId{ClientId: firstWeak.ClientId, SeqNum: firstWeak.CommandId},
+				Slot:     -1,
+			}
+			r.sender.SendToClient(firstWeak.ClientId, reply, r.cs.weakReplyRPC)
+		}
 		return
 	}
 
-	// Batch: drain queued proposals up to maxBatchSize.
-	// Capping prevents event loop starvation when many proposals arrive simultaneously.
-	available := len(r.ProposeChan)
-	if available > maxBatchSize-1 {
-		available = maxBatchSize - 1
+	// Collect first proposals
+	strongs := make([]*defs.GPropose, 0, maxBatchSize)
+	weaks := make([]*MWeakPropose, 0, maxBatchSize)
+	if firstStrong != nil {
+		strongs = append(strongs, firstStrong)
 	}
-	batchSize := available + 1
-	proposals := make([]*defs.GPropose, batchSize)
-	proposals[0] = propose
-	for i := 1; i < batchSize; i++ {
-		proposals[i] = <-r.ProposeChan
+	if firstWeak != nil {
+		weaks = append(weaks, firstWeak)
 	}
 
-	// Append entries to log (under logMu for executeCommands safety)
-	entries := make([]state.Command, batchSize)
-	entryIds := make([]CommandId, batchSize)
+	// Drain both channels up to maxBatchSize total
+	total := len(strongs) + len(weaks)
+	// Drain strong proposals
+	for total < maxBatchSize {
+		select {
+		case p := <-r.ProposeChan:
+			strongs = append(strongs, p)
+			total++
+		default:
+			goto drainWeak
+		}
+	}
+drainWeak:
+	// Drain weak proposals
+	for total < maxBatchSize {
+		select {
+		case m := <-r.cs.weakProposeChan:
+			weaks = append(weaks, m.(*MWeakPropose))
+			total++
+		default:
+			goto drained
+		}
+	}
+drained:
+
+	if len(strongs) == 0 && len(weaks) == 0 {
+		return
+	}
+
+	// Append all entries under logMu
+	type weakEntry struct {
+		cmdId CommandId
+		idx   int32
+		wp    *MWeakPropose
+	}
+	weakBatch := make([]weakEntry, 0, len(weaks))
 
 	r.logMu.Lock()
-	for i, p := range proposals {
+	// Strong entries (reply on commit)
+	for _, p := range strongs {
 		cmdId := CommandId{ClientId: p.ClientId, SeqNum: p.CommandId}
 		entry := LogEntry{
 			Command: p.Command,
@@ -397,34 +445,122 @@ func (r *Replica) handlePropose(propose *defs.GPropose) {
 			CmdId:   cmdId,
 		}
 		r.log = append(r.log, entry)
-		entries[i] = p.Command
-		entryIds[i] = cmdId
-
-		// Store pending proposal for reply on commit.
 		logIdx := int32(len(r.log) - 1)
 		for int32(len(r.pendingProposals)) <= logIdx {
 			r.pendingProposals = append(r.pendingProposals, nil)
 		}
 		r.pendingProposals[logIdx] = p
 	}
-	// Update leader's own matchIndex (while still holding logMu)
+	// Weak entries (reply immediately, no pendingProposal)
+	for _, wp := range weaks {
+		cmdId := CommandId{ClientId: wp.ClientId, SeqNum: wp.CommandId}
+		entry := LogEntry{
+			Command: wp.Command,
+			Term:    r.currentTerm,
+			CmdId:   cmdId,
+		}
+		idx := int32(len(r.log))
+		r.log = append(r.log, entry)
+		for int32(len(r.pendingProposals)) <= idx {
+			r.pendingProposals = append(r.pendingProposals, nil)
+		}
+		weakBatch = append(weakBatch, weakEntry{cmdId: cmdId, idx: idx, wp: wp})
+	}
 	r.matchIndex[r.id] = int32(len(r.log) - 1)
 	r.logMu.Unlock()
 
-	// Broadcast AppendEntries to all followers
+	// Reply IMMEDIATELY for weak entries — don't wait for commit
+	for _, we := range weakBatch {
+		reply := &MWeakReply{
+			LeaderId: r.id,
+			Term:     r.currentTerm,
+			CmdId:    we.cmdId,
+			Slot:     we.idx,
+		}
+		r.sender.SendToClient(we.wp.ClientId, reply, r.cs.weakReplyRPC)
+	}
+
+	// Single broadcast for ALL entries (strong + weak)
 	r.broadcastAppendEntries()
 }
 
 // broadcastAppendEntries sends AppendEntries RPCs to all followers.
 func (r *Replica) broadcastAppendEntries() {
+	// Build all messages under a single logMu hold (was 4 separate acquisitions).
+	// When all followers are caught up (common case), entries/entryIds are shared.
+	type cachedEntries struct {
+		entries  []state.Command
+		entryIds []CommandId
+		prevTerm int32
+	}
+
+	msgs := make([]*AppendEntries, r.n)
+	cache := make(map[int32]*cachedEntries, 4)
+
+	r.logMu.Lock()
+	logLen := int32(len(r.log))
+	commitIdx := r.commitIndex
+
 	for i := int32(0); i < int32(r.n); i++ {
 		if i == r.id {
 			continue
 		}
-		ae := r.buildAppendEntries(i)
-		r.SendMsgNoFlush(i, r.cs.appendEntriesRPC, ae)
+		nextIdx := r.nextIndex[i]
+		if nextIdx < 0 {
+			nextIdx = 0
+		}
+		prevLogIndex := nextIdx - 1
+
+		ce, ok := cache[nextIdx]
+		if !ok {
+			ce = &cachedEntries{}
+			if prevLogIndex >= 0 && prevLogIndex < logLen {
+				ce.prevTerm = r.log[prevLogIndex].Term
+			}
+			if nextIdx < logLen {
+				count := logLen - nextIdx
+				ce.entries = make([]state.Command, count)
+				ce.entryIds = make([]CommandId, count)
+				for j := int32(0); j < count; j++ {
+					ce.entries[j] = r.log[nextIdx+j].Command
+					ce.entryIds[j] = r.log[nextIdx+j].CmdId
+				}
+			}
+			cache[nextIdx] = ce
+		}
+
+		ae := r.appendEntriesCache.Get()
+		ae.LeaderId = r.id
+		ae.Term = r.currentTerm
+		ae.PrevLogIndex = prevLogIndex
+		ae.PrevLogTerm = ce.prevTerm
+		ae.LeaderCommit = commitIdx
+		ae.EntryCnt = int32(len(ce.entries))
+		ae.Entries = ce.entries
+		ae.EntryIds = ce.entryIds
+		msgs[i] = ae
 	}
-	r.FlushPeers()
+	r.logMu.Unlock()
+
+	// Single r.M acquisition for all writes + flush.
+	r.M.Lock()
+	for i := int32(0); i < int32(r.n); i++ {
+		if i == r.id || msgs[i] == nil {
+			continue
+		}
+		w := r.PeerWriters[i]
+		if w == nil {
+			continue
+		}
+		w.WriteByte(r.cs.appendEntriesRPC)
+		msgs[i].Marshal(w)
+	}
+	for _, w := range r.PeerWriters {
+		if w != nil {
+			w.Flush()
+		}
+	}
+	r.M.Unlock()
 }
 
 // sendAppendEntries sends an AppendEntries RPC to a specific follower.
@@ -579,6 +715,50 @@ func (r *Replica) handleAppendEntries(msg *AppendEntries) {
 	reply.Success = 1
 	reply.MatchIndex = matchIdx
 	r.sender.SendTo(msg.LeaderId, reply, r.cs.appendEntriesReplyRPC)
+}
+
+// handleAppendEntriesReplyBatch drains all pending replies before calling
+// advanceCommitIndex once, reducing logMu contention.
+func (r *Replica) handleAppendEntriesReplyBatch(first *AppendEntriesReply) {
+	r.applyReplyUpdate(first)
+
+	// Drain additional replies
+	for {
+		select {
+		case m := <-r.cs.appendEntriesReplyChan:
+			r.applyReplyUpdate(m.(*AppendEntriesReply))
+		default:
+			goto done
+		}
+	}
+done:
+	if r.role == LEADER {
+		r.advanceCommitIndex()
+	}
+}
+
+// applyReplyUpdate processes a single AppendEntriesReply without calling advanceCommitIndex.
+func (r *Replica) applyReplyUpdate(msg *AppendEntriesReply) {
+	if r.role != LEADER {
+		return
+	}
+	if msg.Term > r.currentTerm {
+		r.becomeFollower(msg.Term)
+		return
+	}
+	if msg.Success == 1 {
+		if msg.MatchIndex >= r.matchIndex[msg.FollowerId] {
+			r.matchIndex[msg.FollowerId] = msg.MatchIndex
+			r.nextIndex[msg.FollowerId] = msg.MatchIndex + 1
+		}
+	} else {
+		if msg.MatchIndex >= 0 {
+			r.nextIndex[msg.FollowerId] = msg.MatchIndex + 1
+		} else {
+			r.nextIndex[msg.FollowerId] = 0
+		}
+		r.sendAppendEntries(msg.FollowerId)
+	}
 }
 
 // --- handleAppendEntriesReply: Update nextIndex/matchIndex, advance commitIndex ---
@@ -856,77 +1036,4 @@ func (r *Replica) processWeakRead(msg *MWeakRead) {
 
 // --- Raft-HT: Weak Write Path ---
 
-// handleWeakPropose handles weak writes from clients.
-// Batches all pending weak proposals (drains weakProposeChan), appends to log,
-// replies immediately to each client, then broadcasts AppendEntries once for async replication.
-func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
-	if r.role != LEADER {
-		// Reject: send a WeakReply with the real leader ID so the client
-		// can redirect future weak writes. Without this, weak proposals sent
-		// to a stale leader are silently dropped and the client hangs.
-		reply := &MWeakReply{
-			LeaderId: r.knownLeader,
-			Term:     r.currentTerm,
-			CmdId:    CommandId{ClientId: propose.ClientId, SeqNum: propose.CommandId},
-			Slot:     -1,
-		}
-		r.sender.SendToClient(propose.ClientId, reply, r.cs.weakReplyRPC)
-		return
-	}
-
-	// Batch: drain queued weak proposals up to maxBatchSize.
-	available := len(r.cs.weakProposeChan)
-	if available > maxBatchSize-1 {
-		available = maxBatchSize - 1
-	}
-	batchSize := available + 1
-	proposals := make([]*MWeakPropose, batchSize)
-	proposals[0] = propose
-	for i := 1; i < batchSize; i++ {
-		m := <-r.cs.weakProposeChan
-		proposals[i] = m.(*MWeakPropose)
-	}
-
-	// Append all entries under logMu (executeCommands reads concurrently).
-	type weakEntry struct {
-		cmdId CommandId
-		idx   int32
-		wp    *MWeakPropose
-	}
-	batch := make([]weakEntry, len(proposals))
-
-	r.logMu.Lock()
-	for i, wp := range proposals {
-		entry := LogEntry{
-			Command: wp.Command,
-			Term:    r.currentTerm,
-			CmdId:   CommandId{ClientId: wp.ClientId, SeqNum: wp.CommandId},
-		}
-		idx := int32(len(r.log))
-		r.log = append(r.log, entry)
-
-		// Ensure pendingProposals is large enough (no pending proposal for weak writes)
-		for int32(len(r.pendingProposals)) <= idx {
-			r.pendingProposals = append(r.pendingProposals, nil)
-		}
-
-		batch[i] = weakEntry{cmdId: entry.CmdId, idx: idx, wp: wp}
-	}
-	r.matchIndex[r.id] = int32(len(r.log) - 1)
-	r.logMu.Unlock()
-
-	// Reply IMMEDIATELY — don't wait for commit (1 WAN RTT)
-	for _, we := range batch {
-		reply := &MWeakReply{
-			LeaderId: r.id,
-			Term:     r.currentTerm,
-			CmdId:    we.cmdId,
-			Slot:     we.idx,
-		}
-		r.sender.SendToClient(we.wp.ClientId, reply, r.cs.weakReplyRPC)
-	}
-
-	// Broadcast AppendEntries once for the entire batch
-	r.broadcastAppendEntries()
-}
 

@@ -446,8 +446,9 @@ func (p *AppendEntriesReplyCache) Put(t *AppendEntriesReply) {
 // --- RaftReply ---
 
 type RaftReply struct {
-	CmdId CommandId
-	Value []byte
+	CmdId    CommandId
+	Value    []byte
+	LeaderId int32 // -1 = unknown, >=0 = leader hint for client failover
 }
 
 func (t *RaftReply) New() fastrpc.Serializable {
@@ -481,6 +482,13 @@ func (t *RaftReply) Marshal(wire io.Writer) {
 	if alen > 0 {
 		wire.Write(t.Value)
 	}
+	bs = b[:4]
+	tmp32 = t.LeaderId
+	bs[0] = byte(tmp32)
+	bs[1] = byte(tmp32 >> 8)
+	bs[2] = byte(tmp32 >> 16)
+	bs[3] = byte(tmp32 >> 24)
+	wire.Write(bs)
 }
 
 func (t *RaftReply) Unmarshal(rr io.Reader) error {
@@ -508,6 +516,11 @@ func (t *RaftReply) Unmarshal(rr io.Reader) error {
 			return err
 		}
 	}
+	bs = b[:4]
+	if _, err := io.ReadAtLeast(wire, bs, 4); err != nil {
+		return err
+	}
+	t.LeaderId = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
 	return nil
 }
 

@@ -1025,3 +1025,69 @@ func TestBeTheLeader_SetsKnownLeader(t *testing.T) {
 		t.Errorf("role = %d after BeTheLeader, want LEADER", r.role)
 	}
 }
+
+func TestRaftReplySerialization_WithLeaderId(t *testing.T) {
+	original := &RaftReply{
+		CmdId:    CommandId{ClientId: 42, SeqNum: 7},
+		Value:    []byte("hello"),
+		LeaderId: 3,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	decoded := &RaftReply{}
+	if err := decoded.Unmarshal(&buf); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if decoded.CmdId != original.CmdId {
+		t.Errorf("CmdId = %v, want %v", decoded.CmdId, original.CmdId)
+	}
+	if string(decoded.Value) != string(original.Value) {
+		t.Errorf("Value = %q, want %q", decoded.Value, original.Value)
+	}
+	if decoded.LeaderId != 3 {
+		t.Errorf("LeaderId = %d, want 3", decoded.LeaderId)
+	}
+}
+
+func TestRaftReplySerialization_LeaderIdNegative(t *testing.T) {
+	original := &RaftReply{
+		CmdId:    CommandId{ClientId: 1, SeqNum: 1},
+		Value:    nil,
+		LeaderId: -1,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	decoded := &RaftReply{}
+	if err := decoded.Unmarshal(&buf); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if decoded.LeaderId != -1 {
+		t.Errorf("LeaderId = %d, want -1", decoded.LeaderId)
+	}
+}
+
+func TestRaftReplySerialization_EmptyValueWithLeaderId(t *testing.T) {
+	original := &RaftReply{
+		CmdId:    CommandId{ClientId: 0, SeqNum: 0},
+		Value:    []byte{},
+		LeaderId: 4,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	decoded := &RaftReply{}
+	if err := decoded.Unmarshal(&buf); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if decoded.LeaderId != 4 {
+		t.Errorf("LeaderId = %d, want 4", decoded.LeaderId)
+	}
+}

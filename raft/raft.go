@@ -56,6 +56,7 @@ type Replica struct {
 	// Election state
 	votesReceived int
 	votesNeeded   int
+	knownLeader   int32 // best-known leader ID, -1 if unknown
 
 	// Communication
 	cs     CommunicationSupply
@@ -97,6 +98,7 @@ func New(alias string, id int, addrs []string, isLeader bool, f int,
 
 		currentTerm: 0,
 		votedFor:    -1,
+		knownLeader: -1,
 		log:         make([]LogEntry, 0),
 
 		commitIndex: -1,
@@ -242,7 +244,7 @@ func (r *Replica) run() {
 
 		case m := <-r.cs.appendEntriesReplyChan:
 			aer := m.(*AppendEntriesReply)
-			r.handleAppendEntriesReply(aer)
+			r.handleAppendEntriesReplyBatch(aer)
 
 		case m := <-r.cs.requestVoteChan:
 			rv := m.(*RequestVote)
@@ -298,6 +300,7 @@ func (r *Replica) becomeFollower(term int32) {
 // becomeLeader transitions to leader state after winning an election.
 func (r *Replica) becomeLeader() {
 	r.role = LEADER
+	r.knownLeader = r.id
 	r.println("Became Raft leader at term", r.currentTerm)
 
 	lastLogIndex := int32(len(r.log) - 1)
@@ -331,14 +334,15 @@ const maxBatchSize = 256
 
 func (r *Replica) handlePropose(propose *defs.GPropose) {
 	if r.role != LEADER {
-		// Reject: only leader accepts proposals
+		// Reject: only leader accepts proposals, hint the known leader
 		preply := &defs.ProposeReplyTS{
 			OK:        defs.FALSE,
 			CommandId: propose.CommandId,
 			Value:     state.NIL(),
 			Timestamp: propose.Timestamp,
+			LeaderId:  r.knownLeader,
 		}
-		r.ReplyProposeTS(preply, propose.Reply, propose.Mutex)
+		r.ReplyProposeTSDelayed(preply, propose.Reply, propose.Mutex, propose.ClientId)
 		return
 	}
 
@@ -392,14 +396,81 @@ func (r *Replica) handlePropose(propose *defs.GPropose) {
 // Uses SendMsgNoFlush for each follower, then flushes all peers once
 // to reduce per-follower flush syscalls.
 func (r *Replica) broadcastAppendEntries() {
+	// Build all messages under a single logMu hold (was 4 separate acquisitions).
+	// When all followers are caught up (common case), entries/entryIds are shared.
+	type cachedEntries struct {
+		entries  []state.Command
+		entryIds []CommandId
+		prevTerm int32
+	}
+
+	msgs := make([]*AppendEntries, r.n)
+	cache := make(map[int32]*cachedEntries, 4)
+
+	r.logMu.Lock()
+	logLen := int32(len(r.log))
+	commitIdx := r.commitIndex
+
 	for i := int32(0); i < int32(r.n); i++ {
 		if i == r.id {
 			continue
 		}
-		ae := r.buildAppendEntries(i)
-		r.SendMsgNoFlush(i, r.cs.appendEntriesRPC, ae)
+		nextIdx := r.nextIndex[i]
+		if nextIdx < 0 {
+			nextIdx = 0
+		}
+		prevLogIndex := nextIdx - 1
+
+		ce, ok := cache[nextIdx]
+		if !ok {
+			ce = &cachedEntries{}
+			if prevLogIndex >= 0 && prevLogIndex < logLen {
+				ce.prevTerm = r.log[prevLogIndex].Term
+			}
+			if nextIdx < logLen {
+				count := logLen - nextIdx
+				ce.entries = make([]state.Command, count)
+				ce.entryIds = make([]CommandId, count)
+				for j := int32(0); j < count; j++ {
+					ce.entries[j] = r.log[nextIdx+j].Command
+					ce.entryIds[j] = r.log[nextIdx+j].CmdId
+				}
+			}
+			cache[nextIdx] = ce
+		}
+
+		ae := r.appendEntriesCache.Get()
+		ae.LeaderId = r.id
+		ae.Term = r.currentTerm
+		ae.PrevLogIndex = prevLogIndex
+		ae.PrevLogTerm = ce.prevTerm
+		ae.LeaderCommit = commitIdx
+		ae.EntryCnt = int32(len(ce.entries))
+		ae.Entries = ce.entries
+		ae.EntryIds = ce.entryIds
+		msgs[i] = ae
 	}
-	r.FlushPeers()
+	r.logMu.Unlock()
+
+	// Single r.M acquisition for all writes + flush.
+	r.M.Lock()
+	for i := int32(0); i < int32(r.n); i++ {
+		if i == r.id || msgs[i] == nil {
+			continue
+		}
+		w := r.PeerWriters[i]
+		if w == nil {
+			continue
+		}
+		w.WriteByte(r.cs.appendEntriesRPC)
+		msgs[i].Marshal(w)
+	}
+	for _, w := range r.PeerWriters {
+		if w != nil {
+			w.Flush()
+		}
+	}
+	r.M.Unlock()
 }
 
 // sendAppendEntries sends an AppendEntries RPC to a specific follower
@@ -474,6 +545,9 @@ func (r *Replica) handleAppendEntries(msg *AppendEntries) {
 		r.role = FOLLOWER
 		r.votesReceived = 0
 	}
+
+	// Track the leader for client failover hints
+	r.knownLeader = msg.LeaderId
 
 	// Log consistency check, append, and commit under logMu for executeCommands safety.
 	r.logMu.Lock()
@@ -585,6 +659,45 @@ func (r *Replica) handleAppendEntriesReply(msg *AppendEntriesReply) {
 			r.nextIndex[msg.FollowerId] = 0
 		}
 		// Retry with earlier entries
+		r.sendAppendEntries(msg.FollowerId)
+	}
+}
+
+func (r *Replica) handleAppendEntriesReplyBatch(first *AppendEntriesReply) {
+	r.applyReplyUpdate(first)
+	for {
+		select {
+		case m := <-r.cs.appendEntriesReplyChan:
+			r.applyReplyUpdate(m.(*AppendEntriesReply))
+		default:
+			goto done
+		}
+	}
+done:
+	if r.role == LEADER {
+		r.advanceCommitIndex()
+	}
+}
+
+func (r *Replica) applyReplyUpdate(msg *AppendEntriesReply) {
+	if r.role != LEADER {
+		return
+	}
+	if msg.Term > r.currentTerm {
+		r.becomeFollower(msg.Term)
+		return
+	}
+	if msg.Success == 1 {
+		if msg.MatchIndex >= r.matchIndex[msg.FollowerId] {
+			r.matchIndex[msg.FollowerId] = msg.MatchIndex
+			r.nextIndex[msg.FollowerId] = msg.MatchIndex + 1
+		}
+	} else {
+		if msg.MatchIndex >= 0 {
+			r.nextIndex[msg.FollowerId] = msg.MatchIndex + 1
+		} else {
+			r.nextIndex[msg.FollowerId] = 0
+		}
 		r.sendAppendEntries(msg.FollowerId)
 	}
 }
@@ -764,7 +877,7 @@ func (r *Replica) executeCommands() {
 					Value:     val,
 					Timestamp: pe.propose.Timestamp,
 				}
-				r.ReplyProposeTS(propreply, pe.propose.Reply, pe.propose.Mutex)
+				r.ReplyProposeTSDelayed(propreply, pe.propose.Reply, pe.propose.Mutex, pe.propose.ClientId)
 			}
 		}
 

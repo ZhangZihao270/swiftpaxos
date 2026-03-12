@@ -8,7 +8,9 @@ This document tracks the implementation of multiple hybrid consistency protocols
 
 ## ⬜ Next TODOs:
 - **Phase 100**: Re-run Exp 1.1 (Raft vs Raft-HT, writes=5%/50%, all optimizations applied) — **DONE**
-- **Phase 101**: Exp 2.3 — Raft-HT Failure Recovery (leader kill + per-second throughput time series)
+- **Phase 101**: Exp 2.3 — Raft-HT Failure Recovery — **DONE** (no recovery: client lacks failover)
+- **Phase 102**: Client Leader Failover for Raft / Raft-HT
+- Then re-run Phase 101 (Exp 2.3) to verify recovery
 
 ## Table of Contents
 
@@ -6967,6 +6969,42 @@ Requires client-side per-second throughput reporting (currently client only outp
   - Data: tput-aggregated.csv (102 seconds, 48 with steady-state data)
 
 **Status**: ✅ **DONE**
+
+---
+
+### Phase 102: Client Leader Failover for Raft / Raft-HT
+
+**Goal**: Implement client-side leader failover so that when the current leader dies, clients automatically discover and switch to the new leader.
+
+**Background**: Phase 101 (Exp 2.3) showed that after killing the leader, throughput drops to 0 permanently because clients keep sending to the dead replica. Clients detect the broken connection (`ReadByte: EOF`) but have no logic to try other replicas.
+
+**Design**:
+- Client maintains `currentLeader int32` (initially set by master/config)
+- When a send fails or reply times out (e.g., 5s), client rotates `currentLeader` to the next replica: `(currentLeader + 1) % N`
+- On receiving a redirect/rejection from a non-leader replica, update `currentLeader` to the indicated leader
+- Replica side: non-leader replicas should reply with a `NOT_LEADER` response containing `knownLeader` ID, instead of silently dropping
+- Reader goroutine EOF detection should trigger leader rotation immediately (don't wait for timeout)
+
+**Scope**: Raft-HT and Raft only (CURP protocols are leaderless, don't need this)
+
+**Tasks**:
+- [x] 102a: Add `NOT_LEADER` reply type to Raft/Raft-HT — non-leader replicas reply with `{ok: false, leaderHint: knownLeader}` instead of dropping proposals
+  - Added `LeaderId int32` to `ProposeReplyTS` (replica/defs) with Marshal/Unmarshal
+  - Added `LeaderId int32` to Raft-HT `RaftReply` with Marshal/Unmarshal
+  - Raft: added `knownLeader` field, set from AppendEntries and becomeLeader
+  - Non-leader handlers now include `LeaderId: r.knownLeader` in rejection replies
+  - 6 serialization tests added (3 ProposeReplyTS + 3 RaftReply)
+- [ ] 102b: Client detects reader EOF → marks replica as dead, rotates to next replica
+- [ ] 102c: Client handles `NOT_LEADER` reply → updates `currentLeader` to hinted leader
+- [ ] 102d: Add reply timeout (5s) — if no reply within timeout, rotate leader
+- [ ] 102e: Build & test `go build -o swiftpaxos-dist . && go test ./raft-ht/ ./raft/`
+- [ ] 102f: Re-run Exp 2.3 with failover — verify throughput recovers after leader kill
+
+**Expected results**:
+- Kill leader at t=60s → throughput drops to 0 for ~2-5s (election + client failover) → throughput recovers to near steady-state
+- Recovery time = election timeout (~1s) + client detection + reconnection (~1-2s)
+
+**Status**: ⬜ **TODO**
 
 ---
 
