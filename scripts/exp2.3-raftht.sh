@@ -83,7 +83,8 @@ log "Scheduling leader kill in ${TOTAL_KILL_DELAY}s (startup=${STARTUP_DELAY} + 
     sleep "$TOTAL_KILL_DELAY"
     echo ""
     echo "[$(date '+%H:%M:%S')] *** KILLING LEADER replica0 on $LEADER_HOST ***"
-    ssh $SSH_OPTS "$LEADER_HOST" "pkill -9 -x $BINARY" 2>/dev/null || true
+    # Kill only the server process, NOT the co-located client
+    ssh $SSH_OPTS "$LEADER_HOST" "pkill -9 -f '$BINARY -run server'" 2>/dev/null || true
     echo "[$(date '+%H:%M:%S')] *** Leader killed ***"
 ) &
 KILL_PID=$!
@@ -138,11 +139,8 @@ if [[ -f "$TPUT_FILE" ]]; then
     tail -n +2 "$TPUT_FILE" | awk -F, '{
         sum[$1] += $3
     } END {
-        n = asorti(sum, sorted)
-        for (i = 1; i <= n; i++) {
-            print sorted[i] "," sum[sorted[i]]
-        }
-    }' >> "$AGG_FILE"
+        for (ts in sum) print ts "," sum[ts]
+    }' | sort -t, -k1,1n >> "$AGG_FILE"
 fi
 
 # Print summary

@@ -6954,11 +6954,19 @@ Requires client-side per-second throughput reporting (currently client only outp
   - Self-contained script: builds binary, starts 5r/5m/3c cluster, schedules leader kill at t=60s
   - Extracts TPUT lines from client logs → tput-all.csv + tput-aggregated.csv
   - Config: raftht, t=16, reqs=100000, writes=50%, weakWrites=50%, networkDelay=25
-- [ ] 101c: Build & test `go build -o swiftpaxos-dist . && go test ./...`
-- [ ] 101d: Run Exp 2.3 distributed, collect per-second throughput data
-- [ ] 101e: Parse TPUT data into CSV (time, throughput), verify recovery behavior
+- [x] 101c: Build & test `go build -o swiftpaxos-dist . && go test ./...`
+- [x] 101d: Run Exp 2.3 distributed, collect per-second throughput data
+  - Fixed: kill command now uses `pkill -f 'run server'` to avoid killing co-located client
+  - Fixed: asorti→portable awk in CSV aggregation
+  - Results in results/exp2.3-raftht/
+- [x] 101e: Parse TPUT data into CSV (time, throughput), verify recovery behavior
+  - Steady-state: ~10K ops/sec (t=0 to t=46)
+  - Kill at t=47: throughput drops 10.7K → 2.7K → 0 within 2 seconds
+  - **No recovery**: throughput stays at 0 — Raft-HT has no automatic leader failover
+  - Finding: clients stop receiving replies after leader death, never reconnect to new leader
+  - Data: tput-aggregated.csv (102 seconds, 48 with steady-state data)
 
-**Status**: ⬜ **TODO**
+**Status**: ✅ **DONE**
 
 ---
 
