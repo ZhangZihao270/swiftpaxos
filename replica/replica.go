@@ -338,6 +338,31 @@ func (r *Replica) ReplyProposeTS(reply *defs.ProposeReplyTS, w *bufio.Writer, lo
 	w.Flush()
 }
 
+// ReplyProposeTSDelayed is like ReplyProposeTS but injects replica→client
+// delay for WAN simulation parity. Used by Raft so its reply path matches
+// the delay injection that other protocols (Raft-HT, CURP, etc.) get via
+// SendClientMsg.
+func (r *Replica) ReplyProposeTSDelayed(reply *defs.ProposeReplyTS, w *bufio.Writer, lock *sync.Mutex, clientId int32) {
+	r.M.Lock()
+	d := r.ClientDelay[clientId]
+	r.M.Unlock()
+
+	if d > 0 {
+		go func() {
+			time.Sleep(d)
+			lock.Lock()
+			defer lock.Unlock()
+			reply.Marshal(w)
+			w.Flush()
+		}()
+		return
+	}
+	lock.Lock()
+	defer lock.Unlock()
+	reply.Marshal(w)
+	w.Flush()
+}
+
 func (r *Replica) SendBeacon(peerId int32) {
 	r.M.Lock()
 	defer r.M.Unlock()
@@ -568,8 +593,19 @@ func (r *Replica) replicaListener(rid int, reader *bufio.Reader) {
 		}
 	}
 
+	// Close the underlying TCP connection first (outside the lock).
+	// This forces any in-progress w.Flush() holding r.M to return
+	// immediately with an error, instead of blocking for ~2 min
+	// on the kernel TCP timeout. Without this, broadcastAppendEntries
+	// holds r.M while Flush() blocks, preventing RequestVote RPCs
+	// and stalling leader election.
+	if r.Peers[rid] != nil {
+		r.Peers[rid].Close()
+	}
+
 	r.M.Lock()
 	r.Alive[rid] = false
+	r.PeerWriters[rid] = nil
 	r.M.Unlock()
 }
 
@@ -615,12 +651,12 @@ func (r *Replica) clientListener(conn net.Conn) {
 			r.registerClient(propose.ClientId, writer, addr, mutex, clientDelay)
 			op := propose.Command.Op
 			if r.LRead && (op == state.GET || op == state.SCAN) {
-				r.ReplyProposeTS(&defs.ProposeReplyTS{
+				r.ReplyProposeTSDelayed(&defs.ProposeReplyTS{
 					OK:        defs.TRUE,
 					CommandId: propose.CommandId,
 					Value:     propose.Command.Execute(r.State),
 					Timestamp: propose.Timestamp,
-				}, writer, mutex)
+				}, writer, mutex, propose.ClientId)
 			} else {
 				gp := &defs.GPropose{
 					Propose: propose,

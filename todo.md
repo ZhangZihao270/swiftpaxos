@@ -9,7 +9,8 @@ This document tracks the implementation of multiple hybrid consistency protocols
 ## ⬜ Next TODOs:
 - **Phase 100**: Re-run Exp 1.1 (Raft vs Raft-HT, writes=5%/50%, all optimizations applied) — **DONE**
 - **Phase 101**: Exp 2.3 — Raft-HT Failure Recovery — **DONE** (no recovery: client lacks failover)
-- **Phase 102**: Client Leader Failover for Raft / Raft-HT — **DONE** (dead replica tracking + failover, weak reads survive leader failure)
+- **Phase 102**: Client Leader Failover — **DONE** (failover works but election too slow)
+- **Phase 103**: Fix election blocking + kill logic + client timeout → full throughput recovery
 
 ## Table of Contents
 
@@ -7018,6 +7019,55 @@ Requires client-side per-second throughput reporting (currently client only outp
     - **Conclusion**: Failover logic is correct. Weak ops survive leader failure immediately. Strong ops require Raft election to complete (configurable timeout). Client reply timeout (2 min) can race with election time — acceptable for now.
 
 **Status**: ✅ **COMPLETE** (all 102a-f done)
+
+---
+
+### Phase 103: Fix Leader Election & Kill Logic for Failure Recovery
+
+**Goal**: Make Raft/Raft-HT leader election complete in 1-3s (not 2-3 min), fix kill script to kill the actual leader, and achieve full throughput recovery after leader kill.
+
+**Background**: Phase 102 showed two critical bugs:
+1. **Kill script kills wrong node**: Master designates the first replica to register as leader (usually replica 1, co-located with master on .103), NOT replica 0. The kill script hardcodes `kill replica0`.
+2. **Election takes 2-3 minutes instead of 300-500ms**: Root cause is `SendMsg()` holds `r.M.Lock()` and calls `w.Flush()` on a dead peer's TCP writer. The TCP write blocks for ~2 min (kernel TCP timeout), and since `r.M` is held, ALL peer sends are blocked — including RequestVote RPCs to alive peers. Election can't proceed until the TCP timeout expires.
+3. **Client reply timeout (2 min) races with election**: Client exits before election completes.
+
+**Fixes**:
+
+#### 103a: Fix `SendMsg` blocking on dead peers
+- After peer reader EOF sets `Alive[rid] = false`, also set `PeerWriters[rid] = nil`
+- `SendMsg` already checks `w == nil` and returns early — this makes it work correctly
+- Alternative: add `Alive` check before `Flush()` and skip dead peers
+- Also fix `broadcastAppendEntries` in raft-ht and raft to skip dead peers
+
+#### 103b: Fix kill script to find and kill actual leader
+- Option A: Master always designates replica 0 as leader (deterministic)
+- Option B: Kill script queries replica logs to find which one printed "I am the Raft-HT leader"
+- Option C: Add a leader discovery endpoint (overkill)
+- Recommend Option A: simplest, deterministic, config-driven
+
+#### 103c: Reduce client reply timeout for failure experiment
+- Current 2-min timeout is too long — client exits before election completes
+- Reduce to 10s or make configurable via config
+- After timeout, resend to next replica (don't exit)
+
+#### 103d: Build & test
+- `go build -o swiftpaxos-dist . && go test ./...`
+
+#### 103e: Re-run Exp 2.3 — verify full recovery
+- Expected: steady-state ~10K ops/s → kill leader → tput drops to 0 for 1-3s → tput recovers to ~8-10K ops/s
+- Recovery time = election timeout (~500ms) + client EOF detection + resend
+
+**Tasks**:
+- [x] 103a: Fix `SendMsg`/`broadcastAppendEntries` to skip dead peers (set `PeerWriters[rid] = nil` on EOF) [26:03:11]
+  - `replicaListener` now closes `r.Peers[rid]` on EOF (unblocks any in-progress Flush), then nils `PeerWriters[rid]`
+  - `broadcastAppendEntries` already checks `w == nil` — automatically skips dead peers
+  - Added 5 tests in `replica/replica_test.go`: EOF nils writer, EOF closes conn, SendMsg nil writer, SendMsg after death, FlushPeers nil safety
+- [ ] 103b: Make master always designate replica 0 as leader (deterministic leader assignment)
+- [ ] 103c: Client reply timeout: reduce to 10s, resend instead of exit
+- [ ] 103d: Build & test `go build -o swiftpaxos-dist . && go test ./...`
+- [ ] 103e: Re-run Exp 2.3 with fixes — verify throughput recovery within 1-3s
+
+**Status**: ⬜ **TODO**
 
 ---
 
