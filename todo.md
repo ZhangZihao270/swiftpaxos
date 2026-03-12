@@ -7067,7 +7067,11 @@ Requires client-side per-second throughput reporting (currently client only outp
   - Master places replicas at their requested index instead of registration order
   - Replica 0 is always designated leader regardless of registration order
   - Added 5 tests in `master/master_test.go`: deterministic placement, replica 0 leader, invalid ID, duplicate idempotent, ready check
-- [ ] 103c: Client reply timeout: reduce to 10s, resend instead of exit
+- [x] 103c: Client reply timeout: reduce default from 120s to 10s, make configurable [26:03:11]
+  - Added `ReplyTimeout` config field (seconds, 0 = default 10s), parsed as `replytimeout`
+  - Changed `replyTimeout` from const to `HybridBufferClient` field, passed from config
+  - Updated all 7 `NewHybridBufferClient` callers in `main.go` to pass `c.ReplyTimeout`
+  - Tests: config parsing (3 cases), default value (10s not 120s), custom timeout
 - [ ] 103d: Build & test `go build -o swiftpaxos-dist . && go test ./...`
 - [ ] 103e: Re-run Exp 2.3 with fixes — verify throughput recovery within 1-3s
 

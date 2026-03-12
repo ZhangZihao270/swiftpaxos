@@ -449,3 +449,34 @@ func TestTputTrackerEmitsOutput(t *testing.T) {
 
 	tracker.stop()
 }
+
+// TestReplyTimeout_DefaultAndCustom verifies that NewHybridBufferClient
+// sets the reply timeout correctly from the replyTimeoutSec parameter.
+func TestReplyTimeout_DefaultAndCustom(t *testing.T) {
+	tests := []struct {
+		name       string
+		timeoutSec int
+		expected   time.Duration
+	}{
+		{"zero_uses_default", 0, defaultReplyTimeout},
+		{"custom_30s", 30, 30 * time.Second},
+		{"custom_5s", 5, 5 * time.Second},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			bc := &BufferClient{reqNum: 10, Reply: make(chan *ReqReply, 11)}
+			hbc := NewHybridBufferClient(bc, 0, 0, tc.timeoutSec)
+			if hbc.replyTimeout != tc.expected {
+				t.Errorf("replyTimeout = %v, want %v", hbc.replyTimeout, tc.expected)
+			}
+		})
+	}
+}
+
+// TestDefaultReplyTimeout_Is10Seconds verifies the default is 10s not 120s.
+func TestDefaultReplyTimeout_Is10Seconds(t *testing.T) {
+	if defaultReplyTimeout != 10*time.Second {
+		t.Errorf("defaultReplyTimeout = %v, want 10s", defaultReplyTimeout)
+	}
+}

@@ -13,10 +13,10 @@ import (
 	"github.com/imdea-software/swiftpaxos/state"
 )
 
-// replyTimeout is the maximum time to wait for a single reply before
+// defaultReplyTimeout is the maximum time to wait for a single reply before
 // declaring a hang. This prevents clients from blocking forever when
 // a reply is lost due to protocol bugs or network issues.
-const replyTimeout = 120 * time.Second
+const defaultReplyTimeout = 10 * time.Second
 
 // tputTracker reports per-second throughput as TPUT lines for time-series analysis.
 // Usage: create with newTputTracker(), call inc() for each completed op, stop() when done.
@@ -187,16 +187,25 @@ type HybridBufferClient struct {
 
 	// Duration of the benchmark (for aggregation)
 	duration time.Duration
+
+	// Maximum time to wait for a single reply before declaring a hang.
+	replyTimeout time.Duration
 }
 
 // NewHybridBufferClient creates a new HybridBufferClient wrapping an existing BufferClient.
-func NewHybridBufferClient(bc *BufferClient, weakRatio, weakWrites int) *HybridBufferClient {
+// replyTimeoutSec is the reply timeout in seconds; 0 means use default (10s).
+func NewHybridBufferClient(bc *BufferClient, weakRatio, weakWrites, replyTimeoutSec int) *HybridBufferClient {
+	timeout := defaultReplyTimeout
+	if replyTimeoutSec > 0 {
+		timeout = time.Duration(replyTimeoutSec) * time.Second
+	}
 	hbc := &HybridBufferClient{
 		BufferClient: bc,
 		weakRatio:    weakRatio,
 		weakWrites:   weakWrites,
 		Metrics:      NewHybridMetrics(bc.reqNum),
 		HybridReply:  make(chan *HybridReqReply, bc.reqNum+1),
+		replyTimeout: timeout,
 	}
 	return hbc
 }
@@ -288,11 +297,11 @@ func (c *HybridBufferClient) HybridLoop() {
 			var r *ReqReply
 			select {
 			case r = <-c.Reply:
-			case <-time.After(replyTimeout):
+			case <-time.After(c.replyTimeout):
 				sw, sr, ww, wr := c.Metrics.StrongWriteCount, c.Metrics.StrongReadCount,
 					c.Metrics.WeakWriteCount, c.Metrics.WeakReadCount
 				log.Printf("REPLY TIMEOUT: waited %v for reply %d/%d (received: StrongW=%d StrongR=%d WeakW=%d WeakR=%d total=%d)",
-					replyTimeout, i, c.reqNum+1, sw, sr, ww, wr, sw+sr+ww+wr)
+					c.replyTimeout, i, c.reqNum+1, sw, sr, ww, wr, sw+sr+ww+wr)
 				close(timedOut)
 				return
 			}
@@ -545,12 +554,12 @@ func (c *HybridBufferClient) HybridLoopWithOptions(printResults bool) {
 			var r *ReqReply
 			select {
 			case r = <-c.Reply:
-			case <-time.After(replyTimeout):
+			case <-time.After(c.replyTimeout):
 				// Count received replies by type for diagnostics
 				sw, sr, ww, wr := c.Metrics.StrongWriteCount, c.Metrics.StrongReadCount,
 					c.Metrics.WeakWriteCount, c.Metrics.WeakReadCount
 				log.Printf("REPLY TIMEOUT: waited %v for reply %d/%d (received: StrongW=%d StrongR=%d WeakW=%d WeakR=%d total=%d)",
-					replyTimeout, i, c.reqNum+1, sw, sr, ww, wr, sw+sr+ww+wr)
+					c.replyTimeout, i, c.reqNum+1, sw, sr, ww, wr, sw+sr+ww+wr)
 				close(timedOut)
 				return
 			}

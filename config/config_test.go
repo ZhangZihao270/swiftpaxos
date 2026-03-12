@@ -790,3 +790,37 @@ func TestMaxDescRoutinesEdgeCases(t *testing.T) {
 		})
 	}
 }
+
+func TestReplyTimeoutConfig(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		expected int
+	}{
+		{"explicit_value", "replyTimeout 30\n", 30},
+		{"default_zero", "writes 100\n", 0},
+		{"small_value", "replyTimeout 5\n", 5},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f, err := os.CreateTemp("", "test_config_*.conf")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.Remove(f.Name())
+			if _, err := f.WriteString(tc.content); err != nil {
+				t.Fatal(err)
+			}
+			f.Close()
+
+			c, err := Read(f.Name(), "test")
+			if err != nil {
+				t.Fatalf("Read failed: %v", err)
+			}
+			if c.ReplyTimeout != tc.expected {
+				t.Errorf("ReplyTimeout = %d, want %d", c.ReplyTimeout, tc.expected)
+			}
+		})
+	}
+}

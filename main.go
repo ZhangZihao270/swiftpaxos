@@ -213,7 +213,7 @@ func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads i
 		}
 		// Use HybridLoop with weakRatio=0 to collect metrics (Phase 52.4)
 		// CURP only supports strong consistency, so all commands are strong
-		hbc := client.NewHybridBufferClient(b, 0, 0) // weakRatio=0, weakWrites=0
+		hbc := client.NewHybridBufferClient(b, 0, 0, c.ReplyTimeout) // weakRatio=0, weakWrites=0
 		hbc.SetHybridClient(cl)
 		printResults := (numThreads == 1)
 		hbc.HybridLoopWithOptions(printResults)
@@ -238,7 +238,7 @@ func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads i
 			// Default weakWrites to 50 if weak commands are enabled but no ratio specified
 			weakWrites = 50
 		}
-		hbc := client.NewHybridBufferClient(b, c.WeakRatio, weakWrites)
+		hbc := client.NewHybridBufferClient(b, c.WeakRatio, weakWrites, c.ReplyTimeout)
 		hbc.SetHybridClient(cl)
 		// For single thread, run with printing. For multiple threads, collect metrics.
 		printResults := (numThreads == 1)
@@ -262,14 +262,14 @@ func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads i
 		if weakWrites == 0 && c.WeakRatio > 0 {
 			weakWrites = 50
 		}
-		hbc := client.NewHybridBufferClient(b, c.WeakRatio, weakWrites)
+		hbc := client.NewHybridBufferClient(b, c.WeakRatio, weakWrites, c.ReplyTimeout)
 		hbc.SetHybridClient(cl)
 		printResults := (numThreads == 1)
 		hbc.HybridLoopWithOptions(printResults)
 		return hbc.GetMetrics(), hbc.GetDuration()
 	} else if p == "raft" {
 		raftCl := raft.NewClient(b)
-		hbc := client.NewHybridBufferClient(b, 0, 0) // weakRatio=0: all strong
+		hbc := client.NewHybridBufferClient(b, 0, 0, c.ReplyTimeout) // weakRatio=0: all strong
 		hbc.SetHybridClient(raftCl)
 		printResults := (numThreads == 1)
 		hbc.HybridLoopWithOptions(printResults)
@@ -280,21 +280,21 @@ func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads i
 		if weakWrites == 0 && c.WeakRatio > 0 {
 			weakWrites = 50
 		}
-		hbc := client.NewHybridBufferClient(b, c.WeakRatio, weakWrites)
+		hbc := client.NewHybridBufferClient(b, c.WeakRatio, weakWrites, c.ReplyTimeout)
 		hbc.SetHybridClient(rafthtCl)
 		printResults := (numThreads == 1)
 		hbc.HybridLoopWithOptions(printResults)
 		return hbc.GetMetrics(), hbc.GetDuration()
 	} else if p == "epaxos" {
 		epaxosCl := epaxos.NewClient(b)
-		hbc := client.NewHybridBufferClient(b, 0, 0) // weakRatio=0: all strong
+		hbc := client.NewHybridBufferClient(b, 0, 0, c.ReplyTimeout) // weakRatio=0: all strong
 		hbc.SetHybridClient(epaxosCl)
 		printResults := (numThreads == 1)
 		hbc.HybridLoopWithOptions(printResults)
 		return hbc.GetMetrics(), hbc.GetDuration()
 	} else if p == "epaxosho" {
 		epaxoshoCl := epaxosho.NewClient(b)
-		hbc := client.NewHybridBufferClient(b, c.WeakRatio, c.WeakWrites)
+		hbc := client.NewHybridBufferClient(b, c.WeakRatio, c.WeakWrites, c.ReplyTimeout)
 		hbc.SetHybridClient(epaxoshoCl)
 		printResults := (numThreads == 1)
 		hbc.HybridLoopWithOptions(printResults)

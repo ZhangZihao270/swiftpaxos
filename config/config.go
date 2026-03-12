@@ -125,6 +125,11 @@ type Config struct {
 	// memory and scheduling overhead. 0 = use protocol default (10000).
 	MaxDescRoutines int
 
+	// Reply timeout in seconds for client benchmark loop.
+	// How long to wait for a single reply before declaring a hang.
+	// 0 = use default (10s).
+	ReplyTimeout int
+
 	// Batching delay in microseconds for network message batching.
 	// 0 = immediate send (zero-delay batching, optimal latency)
 	// 50 = wait 50μs for more messages (balanced)
@@ -300,6 +305,9 @@ func Read(filename, alias string) (*Config, error) {
 				ok = true
 			case "batchdelayus":
 				c.BatchDelayUs, err = expectInt(words)
+				ok = true
+			case "replytimeout":
+				c.ReplyTimeout, err = expectInt(words)
 				ok = true
 			}
 			if ok {
