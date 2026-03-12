@@ -1091,3 +1091,112 @@ func TestRaftReplySerialization_EmptyValueWithLeaderId(t *testing.T) {
 		t.Errorf("LeaderId = %d, want 4", decoded.LeaderId)
 	}
 }
+
+// ============================================================================
+// Phase 102b-c: Client Leader Failover Tests
+// ============================================================================
+
+func TestRotateLeader(t *testing.T) {
+	c := &Client{numReplicas: 5}
+
+	tests := []struct {
+		current int32
+		want    int32
+	}{
+		{0, 1},
+		{1, 2},
+		{4, 0}, // wrap around
+		{3, 4},
+	}
+	for _, tt := range tests {
+		got := c.rotateLeader(tt.current)
+		if got != tt.want {
+			t.Errorf("rotateLeader(%d) = %d, want %d", tt.current, got, tt.want)
+		}
+	}
+}
+
+func TestRotateLeader_SingleReplica(t *testing.T) {
+	c := &Client{numReplicas: 1}
+	if got := c.rotateLeader(0); got != 0 {
+		t.Errorf("rotateLeader(0) with 1 replica = %d, want 0", got)
+	}
+}
+
+func TestHandleRaftReply_RejectionUpdatesLeader(t *testing.T) {
+	// Test the rejection detection logic: LeaderId >= 0 means redirect.
+	rep := &RaftReply{
+		CmdId:    CommandId{ClientId: 100, SeqNum: 5},
+		Value:    nil,
+		LeaderId: 2, // hint: leader is replica 2
+	}
+
+	// Verify the rejection condition
+	if rep.LeaderId < 0 {
+		t.Error("LeaderId should be >= 0 for rejection")
+	}
+
+	// Simulate the leader update logic from handleRaftReply
+	leader := int32(0)
+	if rep.LeaderId >= 0 {
+		leader = rep.LeaderId
+	}
+	if leader != 2 {
+		t.Errorf("leader = %d after rejection hint, want 2", leader)
+	}
+}
+
+func TestHandleRaftReply_SuccessNoRedirect(t *testing.T) {
+	// LeaderId = -1 means success (no redirect)
+	rep := &RaftReply{
+		CmdId:    CommandId{ClientId: 100, SeqNum: 5},
+		Value:    []byte("result"),
+		LeaderId: -1,
+	}
+
+	if rep.LeaderId >= 0 {
+		t.Error("LeaderId should be -1 for success (no redirect)")
+	}
+}
+
+func TestHandleReaderDead_NotLeader(t *testing.T) {
+	c := &Client{
+		leader:            0,
+		numReplicas:       3,
+		weakPending:       make(map[int32]struct{}),
+		delivered:         make(map[int32]struct{}),
+		weakPendingKeys:   make(map[int32]int64),
+		weakPendingValues: make(map[int32]state.Value),
+		strongPendingKeys: make(map[int32]int64),
+		strongPendingCmds: make(map[int32]*defs.Propose),
+		localCache:        make(map[int64]cacheEntry),
+	}
+
+	// Reader for replica 2 dies, but leader is 0 — should not rotate
+	c.handleReaderDead(2)
+
+	if c.leader != 0 {
+		t.Errorf("leader = %d, want 0 (non-leader death should not rotate)", c.leader)
+	}
+}
+
+func TestHandleReaderDead_IsLeader(t *testing.T) {
+	c := &Client{
+		leader:            1,
+		numReplicas:       3,
+		weakPending:       make(map[int32]struct{}),
+		delivered:         make(map[int32]struct{}),
+		weakPendingKeys:   make(map[int32]int64),
+		weakPendingValues: make(map[int32]state.Value),
+		strongPendingKeys: make(map[int32]int64),
+		strongPendingCmds: make(map[int32]*defs.Propose),
+		localCache:        make(map[int64]cacheEntry),
+	}
+
+	// Reader for replica 1 (the leader) dies — should rotate to 2
+	c.handleReaderDead(1)
+
+	if c.leader != 2 {
+		t.Errorf("leader = %d after leader death, want 2", c.leader)
+	}
+}

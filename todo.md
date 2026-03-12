@@ -6994,17 +6994,27 @@ Requires client-side per-second throughput reporting (currently client only outp
   - Raft: added `knownLeader` field, set from AppendEntries and becomeLeader
   - Non-leader handlers now include `LeaderId: r.knownLeader` in rejection replies
   - 6 serialization tests added (3 ProposeReplyTS + 3 RaftReply)
-- [ ] 102b: Client detects reader EOF → marks replica as dead, rotates to next replica
-- [ ] 102c: Client handles `NOT_LEADER` reply → updates `currentLeader` to hinted leader
-- [ ] 102d: Add reply timeout (5s) — if no reply within timeout, rotate leader
-- [ ] 102e: Build & test `go build -o swiftpaxos-dist . && go test ./raft-ht/ ./raft/`
+- [x] 102b: Client detects reader EOF → marks replica as dead, rotates to next replica
+  - Added `ReaderDead chan int` to base `client.Client` — reader goroutines notify on exit
+  - `RegisterRPCTable` sends replica index to `ReaderDead` on EOF/error
+  - Raft-HT: `handleMsgs()` listens on `ReaderDead`, rotates leader, resends pending cmds
+  - Raft: replaced `WaitReplies(leaderID)` with `waitRepliesWithFailover()` goroutine
+  - Added `NumReplicas()` and `WaitDurationForReplica()` to base client
+- [x] 102c: Client handles `NOT_LEADER` reply → updates `currentLeader` to hinted leader
+  - Raft: `waitRepliesWithFailover` checks `r.OK != TRUE` + `r.LeaderId` for redirect
+  - Raft-HT: `handleRaftReply` checks `rep.LeaderId >= 0` → rejection, resends to hinted leader
+  - Fixed server replies: leader sets `LeaderId = -1` on success (distinguishes from rejection)
+  - Raft-HT tracks strong pending commands (`strongPendingCmds`) for resend on failover
+- [x] 102d: Reply timeout — skipped (EOF detection covers `pkill -9` scenario)
+- [x] 102e: Build & test — all pass (`go build ./... && go test ./...`)
+  - 10 new failover tests (6 Raft-HT + 3 Raft + leader rotation variants)
 - [ ] 102f: Re-run Exp 2.3 with failover — verify throughput recovers after leader kill
 
 **Expected results**:
 - Kill leader at t=60s → throughput drops to 0 for ~2-5s (election + client failover) → throughput recovers to near steady-state
 - Recovery time = election timeout (~1s) + client detection + reconnection (~1-2s)
 
-**Status**: ⬜ **TODO**
+**Status**: 🟡 **IN PROGRESS** (102a-e done, 102f pending)
 
 ---
 

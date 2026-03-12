@@ -1,6 +1,7 @@
 package raftht
 
 import (
+	"log"
 	"sync"
 
 	"github.com/imdea-software/swiftpaxos/client"
@@ -23,9 +24,10 @@ type cacheEntry struct {
 type Client struct {
 	*client.BufferClient
 
-	cs     CommunicationSupply
-	val    state.Value
-	leader int32
+	cs          CommunicationSupply
+	val         state.Value
+	leader      int32
+	numReplicas int32
 
 	// Weak command tracking
 	weakPending map[int32]struct{}
@@ -35,6 +37,9 @@ type Client struct {
 	weakPendingKeys   map[int32]int64      // seqnum → key (for weak writes and reads)
 	weakPendingValues map[int32]state.Value // seqnum → value (for weak writes)
 	strongPendingKeys map[int32]int64       // seqnum → key (for strong ops)
+
+	// Strong command tracking for resend on leader failover
+	strongPendingCmds map[int32]*defs.Propose // seqnum → original Propose
 
 	// Client local cache: key → (value, version) with slot-based versioning
 	localCache map[int64]cacheEntry
@@ -48,8 +53,9 @@ func NewClient(b *client.BufferClient) *Client {
 	c := &Client{
 		BufferClient: b,
 
-		val:    nil,
-		leader: 0, // Default leader = replica 0
+		val:         nil,
+		leader:      int32(b.LeaderId),
+		numReplicas: int32(b.NumReplicas()),
 
 		weakPending: make(map[int32]struct{}),
 		delivered:   make(map[int32]struct{}),
@@ -57,6 +63,7 @@ func NewClient(b *client.BufferClient) *Client {
 		weakPendingKeys:   make(map[int32]int64),
 		weakPendingValues: make(map[int32]state.Value),
 		strongPendingKeys: make(map[int32]int64),
+		strongPendingCmds: make(map[int32]*defs.Propose),
 		localCache:        make(map[int64]cacheEntry),
 	}
 
@@ -90,6 +97,10 @@ func (c *Client) handleMsgs() {
 		case m := <-c.cs.weakReadReplyChan:
 			rep := m.(*MWeakReadReply)
 			c.handleWeakReadReply(rep)
+
+		// Reader goroutine died (EOF/error on a replica connection)
+		case deadReplica := <-c.ReaderDead:
+			c.handleReaderDead(int32(deadReplica))
 		}
 	}
 }
@@ -97,6 +108,28 @@ func (c *Client) handleMsgs() {
 // handleRaftReply handles strong op replies from the leader (after commit).
 func (c *Client) handleRaftReply(rep *RaftReply) {
 	c.mu.Lock()
+
+	// LeaderId >= 0 means this is a rejection from a non-leader with a leader hint.
+	// Resend to the hinted leader.
+	if rep.LeaderId >= 0 {
+		oldLeader := c.leader
+		c.leader = rep.LeaderId
+		if c.BufferClient != nil {
+			c.LeaderId = int(rep.LeaderId)
+		}
+		log.Printf("NOT_LEADER for strong op seq=%d: replica hinted leader=%d (was %d)",
+			rep.CmdId.SeqNum, rep.LeaderId, oldLeader)
+		// Resend the command to the new leader
+		if cmd, ok := c.strongPendingCmds[rep.CmdId.SeqNum]; ok {
+			leader := c.leader
+			c.mu.Unlock()
+			c.resendPropose(leader, cmd)
+			return
+		}
+		c.mu.Unlock()
+		return
+	}
+
 	if _, exists := c.delivered[rep.CmdId.SeqNum]; exists {
 		c.mu.Unlock()
 		return
@@ -111,6 +144,7 @@ func (c *Client) handleRaftReply(rep *RaftReply) {
 		c.localCache[key] = cacheEntry{value: c.val, version: c.maxVersion}
 		delete(c.strongPendingKeys, rep.CmdId.SeqNum)
 	}
+	delete(c.strongPendingCmds, rep.CmdId.SeqNum)
 
 	c.mu.Unlock()
 	c.RegisterReply(c.val, rep.CmdId.SeqNum)
@@ -195,6 +229,73 @@ func (c *Client) handleWeakReadReply(rep *MWeakReadReply) {
 }
 
 
+// handleReaderDead is called when a reader goroutine exits (EOF/error).
+// If the dead replica is the current leader, rotate to the next replica.
+func (c *Client) handleReaderDead(deadReplica int32) {
+	c.mu.Lock()
+	if deadReplica != c.leader {
+		c.mu.Unlock()
+		return
+	}
+	oldLeader := c.leader
+	c.leader = c.rotateLeader(oldLeader)
+	newLeader := c.leader
+	if c.BufferClient != nil {
+		c.LeaderId = int(c.leader)
+	}
+	log.Printf("Leader %d dead (EOF), rotating to %d", oldLeader, newLeader)
+
+	// Collect pending commands to resend
+	var strongCmds []*defs.Propose
+	for _, cmd := range c.strongPendingCmds {
+		strongCmds = append(strongCmds, cmd)
+	}
+	var weakCmds []*MWeakPropose
+	for seqnum := range c.weakPending {
+		if _, exists := c.delivered[seqnum]; exists {
+			continue
+		}
+		if key, hasKey := c.weakPendingKeys[seqnum]; hasKey {
+			wp := &MWeakPropose{
+				CommandId: seqnum,
+				ClientId:  c.ClientId,
+			}
+			if val, hasVal := c.weakPendingValues[seqnum]; hasVal {
+				wp.Command.Op = state.PUT
+				wp.Command.K = state.Key(key)
+				wp.Command.V = val
+			}
+			weakCmds = append(weakCmds, wp)
+		}
+	}
+	c.mu.Unlock()
+
+	// Resend pending strong commands to new leader
+	for _, cmd := range strongCmds {
+		c.resendPropose(newLeader, cmd)
+	}
+	// Resend pending weak write commands to new leader
+	for _, wp := range weakCmds {
+		c.SendMsg(newLeader, c.cs.weakProposeRPC, wp)
+	}
+}
+
+// rotateLeader returns the next replica ID after the given one.
+func (c *Client) rotateLeader(current int32) int32 {
+	return (current + 1) % c.numReplicas
+}
+
+// resendPropose sends a Propose directly to the specified replica using the writer.
+func (c *Client) resendPropose(rid int32, cmd *defs.Propose) {
+	w := c.GetWriter(rid)
+	if w == nil {
+		return
+	}
+	w.WriteByte(defs.PROPOSE)
+	cmd.Marshal(w)
+	w.Flush()
+}
+
 // SendWeakWrite sends a weak consistency write to the leader.
 // Leader assigns log slot and replies immediately (1 WAN RTT).
 func (c *Client) SendWeakWrite(key int64, value []byte) int32 {
@@ -247,21 +348,31 @@ func (c *Client) SendWeakRead(key int64) int32 {
 }
 
 // SendStrongWrite sends a linearizable write command (delegates to base SendWrite).
-// Tracks the key for local cache updates on completion.
+// Tracks the key for local cache updates on completion, and the command for resend on failover.
 func (c *Client) SendStrongWrite(key int64, value []byte) int32 {
 	seqnum := c.SendWrite(key, value)
 	c.mu.Lock()
 	c.strongPendingKeys[seqnum] = key
+	c.strongPendingCmds[seqnum] = &defs.Propose{
+		CommandId: seqnum,
+		ClientId:  c.ClientId,
+		Command:   state.Command{Op: state.PUT, K: state.Key(key), V: value},
+	}
 	c.mu.Unlock()
 	return seqnum
 }
 
 // SendStrongRead sends a linearizable read command (delegates to base SendRead).
-// Tracks the key for local cache updates on completion.
+// Tracks the key for local cache updates on completion, and the command for resend on failover.
 func (c *Client) SendStrongRead(key int64) int32 {
 	seqnum := c.SendRead(key)
 	c.mu.Lock()
 	c.strongPendingKeys[seqnum] = key
+	c.strongPendingCmds[seqnum] = &defs.Propose{
+		CommandId: seqnum,
+		ClientId:  c.ClientId,
+		Command:   state.Command{Op: state.GET, K: state.Key(key), V: state.NIL()},
+	}
 	c.mu.Unlock()
 	return seqnum
 }

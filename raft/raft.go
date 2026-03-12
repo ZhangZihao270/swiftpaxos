@@ -876,6 +876,7 @@ func (r *Replica) executeCommands() {
 					CommandId: pe.propose.CommandId,
 					Value:     val,
 					Timestamp: pe.propose.Timestamp,
+					LeaderId:  -1, // success: no redirect needed
 				}
 				r.ReplyProposeTSDelayed(propreply, pe.propose.Reply, pe.propose.Mutex, pe.propose.ClientId)
 			}

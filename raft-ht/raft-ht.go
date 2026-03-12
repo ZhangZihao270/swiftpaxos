@@ -973,6 +973,7 @@ func (r *Replica) executeCommands() {
 					reply := r.raftReplyCache.Get()
 					reply.CmdId = CommandId{ClientId: pe.propose.ClientId, SeqNum: pe.propose.CommandId}
 					reply.Value = val
+					reply.LeaderId = -1 // success: no redirect needed
 					r.sender.SendToClient(pe.propose.ClientId, reply, r.cs.raftReplyRPC)
 				}
 			}

@@ -46,6 +46,10 @@ type Client struct {
 	masterPort int
 	masterAddr string
 	replicas   []string
+
+	// ReaderDead receives the replica index when a reader goroutine exits (EOF/error).
+	// Protocol clients can listen on this channel to detect dead replicas.
+	ReaderDead chan int
 }
 
 func NewClient(server, maddr string, mport int, fast, leaderless, verbose bool) *Client {
@@ -73,6 +77,8 @@ func NewClientLog(server, maddr string, mport int, fast, leaderless, verbose boo
 		masterAddr: maddr,
 
 		seqnum: -1,
+
+		ReaderDead: make(chan int, 16),
 	}
 }
 
@@ -297,8 +303,26 @@ func (c *Client) RegisterRPCTable(t *fastrpc.Table) {
 					p.Chan <- obj
 				}(obj)
 			}
+			// Notify protocol client that this reader is dead
+			select {
+			case c.ReaderDead <- i:
+			default:
+			}
 		}(i, reader)
 	}
+}
+
+// NumReplicas returns the number of replicas.
+func (c *Client) NumReplicas() int {
+	return len(c.replicas)
+}
+
+// WaitDurationForReplica returns the simulated network delay for the given replica.
+func (c *Client) WaitDurationForReplica(rid int) time.Duration {
+	if c.dt == nil || rid < 0 || rid >= len(c.replicas) {
+		return 0
+	}
+	return c.dt.WaitDuration(c.replicas[rid])
 }
 
 // For custom client messages

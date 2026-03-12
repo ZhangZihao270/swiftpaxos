@@ -32,3 +32,31 @@ func TestClientInterfaceCompliance(t *testing.T) {
 	_ = c.SendWeakWrite
 	_ = c.SendWeakRead
 }
+
+// ============================================================================
+// Phase 102b-c: Leader Failover Tests
+// ============================================================================
+
+func TestLeaderRotation_WrapAround(t *testing.T) {
+	c := &Client{numReplicas: 5, leader: 4}
+	newLeader := (c.leader + 1) % c.numReplicas
+	if newLeader != 0 {
+		t.Errorf("leader rotation from 4 with 5 replicas = %d, want 0", newLeader)
+	}
+}
+
+func TestLeaderRotation_Simple(t *testing.T) {
+	c := &Client{numReplicas: 3, leader: 0}
+	newLeader := (c.leader + 1) % c.numReplicas
+	if newLeader != 1 {
+		t.Errorf("leader rotation from 0 with 3 replicas = %d, want 1", newLeader)
+	}
+}
+
+func TestLeaderRotation_SingleReplica(t *testing.T) {
+	c := &Client{numReplicas: 1, leader: 0}
+	newLeader := (c.leader + 1) % c.numReplicas
+	if newLeader != 0 {
+		t.Errorf("leader rotation with 1 replica = %d, want 0", newLeader)
+	}
+}

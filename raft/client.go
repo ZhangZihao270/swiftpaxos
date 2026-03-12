@@ -1,7 +1,12 @@
 package raft
 
 import (
+	"log"
+	"time"
+
 	"github.com/imdea-software/swiftpaxos/client"
+	"github.com/imdea-software/swiftpaxos/replica/defs"
+	"github.com/imdea-software/swiftpaxos/state"
 )
 
 // Client implements the HybridClient interface for the Raft protocol.
@@ -9,22 +14,64 @@ import (
 // weak commands are delegated to the strong path.
 type Client struct {
 	*client.BufferClient
+	numReplicas int
+	leader      int
 }
 
 // NewClient creates a new Raft client.
-// The client uses the base BufferClient's WaitReplies mechanism
-// to receive ProposeReplyTS responses from the Raft leader.
+// Starts a reply reader with leader failover support.
 func NewClient(b *client.BufferClient) *Client {
 	c := &Client{
 		BufferClient: b,
+		numReplicas:  b.NumReplicas(),
+		leader:       b.LeaderId,
 	}
 
-	// Start reading replies from the leader.
-	// Raft sends ProposeReplyTS directly via the client writer,
-	// so we use the base WaitReplies mechanism (no fastrpc table needed).
-	c.WaitReplies(int(b.LeaderId))
+	// Start reading replies with failover support.
+	go c.waitRepliesWithFailover()
 
 	return c
+}
+
+// waitRepliesWithFailover reads ProposeReplyTS from the current leader.
+// On EOF (leader dead) or NOT_LEADER rejection, it rotates to the next replica.
+func (c *Client) waitRepliesWithFailover() {
+	leader := c.leader
+	for {
+		r, err := c.GetReplyFrom(leader)
+		if err != nil {
+			// Reader failed (EOF = leader dead). Rotate to next replica.
+			oldLeader := leader
+			leader = (leader + 1) % c.numReplicas
+			c.leader = leader
+			c.LeaderId = leader
+			log.Printf("Leader %d dead (EOF), rotating to %d", oldLeader, leader)
+			// Brief pause before reading from new leader (election may be in progress)
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+		if r.OK != defs.TRUE {
+			// NOT_LEADER rejection. Use leader hint if available.
+			if r.LeaderId >= 0 {
+				oldLeader := leader
+				leader = int(r.LeaderId)
+				c.leader = leader
+				c.LeaderId = leader
+				log.Printf("NOT_LEADER from %d: hinted leader=%d", oldLeader, leader)
+			} else {
+				oldLeader := leader
+				leader = (leader + 1) % c.numReplicas
+				c.leader = leader
+				c.LeaderId = leader
+				log.Printf("NOT_LEADER from %d: no hint, rotating to %d", oldLeader, leader)
+			}
+			continue
+		}
+		go func(val state.Value, seqnum int32) {
+			time.Sleep(c.BufferClient.WaitDurationForReplica(leader))
+			c.RegisterReply(val, seqnum)
+		}(r.Value, r.CommandId)
+	}
 }
 
 // SendStrongWrite sends a linearizable write command.
