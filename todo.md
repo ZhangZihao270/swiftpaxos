@@ -7062,7 +7062,11 @@ Requires client-side per-second throughput reporting (currently client only outp
   - `replicaListener` now closes `r.Peers[rid]` on EOF (unblocks any in-progress Flush), then nils `PeerWriters[rid]`
   - `broadcastAppendEntries` already checks `w == nil` — automatically skips dead peers
   - Added 5 tests in `replica/replica_test.go`: EOF nils writer, EOF closes conn, SendMsg nil writer, SendMsg after death, FlushPeers nil safety
-- [ ] 103b: Make master always designate replica 0 as leader (deterministic leader assignment)
+- [x] 103b: Make master always designate replica 0 as leader (deterministic leader assignment) [26:03:11]
+  - Added `ReplicaId` field to `RegisterArgs` — replicas send their config index (parsed from alias)
+  - Master places replicas at their requested index instead of registration order
+  - Replica 0 is always designated leader regardless of registration order
+  - Added 5 tests in `master/master_test.go`: deterministic placement, replica 0 leader, invalid ID, duplicate idempotent, ready check
 - [ ] 103c: Client reply timeout: reduce to 10s, resend instead of exit
 - [ ] 103d: Build & test `go build -o swiftpaxos-dist . && go test ./...`
 - [ ] 103e: Re-run Exp 2.3 with fixes — verify throughput recovery within 1-3s

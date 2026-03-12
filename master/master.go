@@ -21,37 +21,41 @@ import (
 type Master struct {
 	*dlog.Logger
 
-	N          int
-	port       int
-	nodeList   []string
-	addrList   []string
-	portList   []int
-	lock       *sync.Mutex
-	nodes      []*rpc.Client
-	leader     []bool
-	alive      []bool
-	latencies  []float64
-	finishInit bool
-	initCond   *sync.Cond
-	nextLeader int
+	N            int
+	port         int
+	nodeList     []string
+	addrList     []string
+	portList     []int
+	registered   []bool // tracks which replica IDs have registered
+	numRegistered int
+	lock         *sync.Mutex
+	nodes        []*rpc.Client
+	leader       []bool
+	alive        []bool
+	latencies    []float64
+	finishInit   bool
+	initCond     *sync.Cond
+	nextLeader   int
 }
 
 func New(N, port int, logger *dlog.Logger) *Master {
 	master := &Master{
 		Logger: logger,
 
-		N:          N,
-		port:       port,
-		nodeList:   make([]string, 0, N),
-		addrList:   make([]string, 0, N),
-		portList:   make([]int, 0, N),
-		lock:       new(sync.Mutex),
-		nodes:      make([]*rpc.Client, N),
-		leader:     make([]bool, N),
-		alive:      make([]bool, N),
-		latencies:  make([]float64, N),
-		finishInit: false,
-		nextLeader: -1,
+		N:             N,
+		port:          port,
+		nodeList:      make([]string, N),
+		addrList:      make([]string, N),
+		portList:      make([]int, N),
+		registered:    make([]bool, N),
+		numRegistered: 0,
+		lock:          new(sync.Mutex),
+		nodes:         make([]*rpc.Client, N),
+		leader:        make([]bool, N),
+		alive:         make([]bool, N),
+		latencies:     make([]float64, N),
+		finishInit:    false,
+		nextLeader:    -1,
 	}
 	master.initCond = sync.NewCond(master.lock)
 	return master
@@ -81,7 +85,7 @@ func (master *Master) Run() {
 func (master *Master) run() {
 	for {
 		master.lock.Lock()
-		if len(master.nodeList) == master.N {
+		if master.numRegistered == master.N {
 			master.lock.Unlock()
 			break
 		}
@@ -185,31 +189,20 @@ func (master *Master) Register(args *defs.RegisterArgs, reply *defs.RegisterRepl
 	master.lock.Lock()
 	defer master.lock.Unlock()
 
-	nlen := len(master.nodeList)
-	index := nlen
+	index := args.ReplicaId
+	if index < 0 || index >= master.N {
+		return fmt.Errorf("invalid ReplicaId %d (N=%d)", index, master.N)
+	}
 
 	addrPort := fmt.Sprintf("%s:%d", args.Addr, args.Port)
 
-	for i, ap := range master.nodeList {
-		if addrPort == ap {
-			index = i
-			break
-		}
-	}
-
-	if index == nlen {
-		if nlen >= cap(master.nodeList) {
-			master.Printf("Rejecting extra registration from %v (already have %d/%d nodes)", addrPort, nlen, cap(master.nodeList))
-			return fmt.Errorf("too many registrations: %d >= %d", nlen, cap(master.nodeList))
-		}
-		master.nodeList = master.nodeList[0 : nlen+1]
-		master.nodeList[nlen] = addrPort
-		master.addrList = master.addrList[0 : nlen+1]
-		master.addrList[nlen] = args.Addr
-		master.portList = master.portList[0 : nlen+1]
-		master.portList[nlen] = args.Port
+	if !master.registered[index] {
+		master.nodeList[index] = addrPort
+		master.addrList[index] = args.Addr
+		master.portList[index] = args.Port
+		master.registered[index] = true
 		master.leader[index] = false
-		nlen++
+		master.numRegistered++
 
 		addr := args.Addr
 		if addr == "" {
@@ -222,26 +215,22 @@ func (master *Master) Register(args *defs.RegisterArgs, reply *defs.RegisterRepl
 			master.Printf("node %v [%v] -> %v", index,
 				master.nodeList[index], master.latencies[index])
 		} else {
-			master.Fatal("cannot connect to" + addr)
+			master.Fatal("cannot connect to " + addr)
 		}
 	}
 
-	if nlen == master.N {
+	if master.numRegistered == master.N {
 		reply.Ready = true
 		reply.ReplicaId = index
 		reply.NodeList = master.nodeList
-		reply.IsLeader = false
 
 		// Always use replica 0 as the initial leader.
-		// Leader election is handled by the protocol (e.g., ballot-based in CURP-HT).
-		leader := 0
-
-		if leader == index {
-			master.Printf("replica %d is the new leader", index)
-			master.leader[index] = true
-			reply.IsLeader = true
+		// Set leader[0] once when all replicas are registered.
+		if !master.leader[0] {
+			master.leader[0] = true
+			master.Printf("replica 0 is the new leader")
 		}
-
+		reply.IsLeader = (index == 0)
 	} else {
 		reply.Ready = false
 	}

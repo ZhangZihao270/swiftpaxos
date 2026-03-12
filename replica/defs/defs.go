@@ -11,8 +11,9 @@ import (
 // master RPC definitions
 
 type RegisterArgs struct {
-	Addr string
-	Port int
+	Addr      string
+	Port      int
+	ReplicaId int // desired replica index (parsed from alias, e.g. "replica0" → 0)
 }
 
 type RegisterReply struct {

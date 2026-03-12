@@ -30,14 +30,16 @@ import (
 )
 
 func runReplica(c *config.Config, logger *dlog.Logger) {
-	// Derive port from alias index to allow multiple replicas on the same machine.
-	// e.g., "replica0" → 7070, "replica3" → 7073
+	// Derive port and replica index from alias.
+	// e.g., "replica0" → port 7070, index 0; "replica3" → port 7073, index 3
 	port := 7070
+	aliasIdx := 0
 	for i, ch := range c.Alias {
 		if ch >= '0' && ch <= '9' {
 			idx, err := strconv.Atoi(c.Alias[i:])
 			if err == nil {
 				port = 7070 + idx
+				aliasIdx = idx
 			}
 			break
 		}
@@ -46,7 +48,7 @@ func runReplica(c *config.Config, logger *dlog.Logger) {
 	log.Printf("Server starting on port %d", port)
 	maddr := fmt.Sprintf("%s:%d", c.MasterAddr, c.MasterPort)
 	addr := c.ReplicaAddrs[c.Alias]
-	replicaId, nodeList, isLeader := registerWithMaster(addr, maddr, port)
+	replicaId, nodeList, isLeader := registerWithMaster(addr, maddr, port, aliasIdx)
 	f := (len(c.ReplicaAddrs) - 1) / 2
 	log.Printf("Tolerating %d max. failures", f)
 
@@ -130,11 +132,12 @@ func runReplica(c *config.Config, logger *dlog.Logger) {
 	http.Serve(l, nil)
 }
 
-func registerWithMaster(addr, mAddr string, port int) (int, []string, bool) {
+func registerWithMaster(addr, mAddr string, port int, replicaId int) (int, []string, bool) {
 	var reply defs.RegisterReply
 	args := &defs.RegisterArgs{
-		Addr: addr,
-		Port: port,
+		Addr:      addr,
+		Port:      port,
+		ReplicaId: replicaId,
 	}
 	log.Printf("connecting to: %v", mAddr)
 
