@@ -6950,7 +6950,10 @@ Requires client-side per-second throughput reporting (currently client only outp
   - Format: `TPUT <prefix> <unix_timestamp> <ops_this_second>` (via log.Printf)
   - Integrated into both HybridLoop and HybridLoopWithOptions
   - 4 tests added: basic, stop-idle, concurrent safety, emit-output
-- [ ] 101b: Write `scripts/exp2.3-raftht.sh` — replica startup, client startup, kill leader at t=60s
+- [x] 101b: Write `scripts/exp2.3-raftht.sh` — replica startup, client startup, kill leader at t=60s
+  - Self-contained script: builds binary, starts 5r/5m/3c cluster, schedules leader kill at t=60s
+  - Extracts TPUT lines from client logs → tput-all.csv + tput-aggregated.csv
+  - Config: raftht, t=16, reqs=100000, writes=50%, weakWrites=50%, networkDelay=25
 - [ ] 101c: Build & test `go build -o swiftpaxos-dist . && go test ./...`
 - [ ] 101d: Run Exp 2.3 distributed, collect per-second throughput data
 - [ ] 101e: Parse TPUT data into CSV (time, throughput), verify recovery behavior
