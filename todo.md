@@ -6,7 +6,9 @@ This document tracks the implementation of multiple hybrid consistency protocols
 
 ---
 
-## ⬜ Next TODO: Phase 100 — Re-run Exp 1.1 (Raft vs Raft-HT, writes=5%/50%, all optimizations applied)
+## ⬜ Next TODOs:
+- **Phase 100**: Re-run Exp 1.1 (Raft vs Raft-HT, writes=5%/50%, all optimizations applied) — **DONE**
+- **Phase 101**: Exp 2.3 — Raft-HT Failure Recovery (leader kill + per-second throughput time series)
 
 ## Table of Contents
 
@@ -6907,6 +6909,53 @@ case slot := <-r.deliverChan:
   - At saturation (t=64-96), both protocols become CPU-bound, reducing hybrid advantage
   - Strong latency nearly identical between Raft and Raft-HT (same consensus path)
   - Weak reads in w5 are sub-millisecond; weak ops in w50 are 17-180ms (writes need consensus)
+
+---
+
+### Phase 101: Exp 2.3 — Raft-HT Failure Recovery (Leader Kill + Throughput Time Series)
+
+**Goal**: Verify Raft-HT recovers automatically after leader kill; produce per-second throughput time series for plotting.
+
+**Background**: Exp 2.3 requires killing the leader during steady-state and observing throughput drop to 0 then recover.
+Requires client-side per-second throughput reporting (currently client only outputs aggregate summary at end).
+
+**Config**:
+- Cluster: 5r/5m/3c (benchmark-5r-5m-3c.conf)
+- Protocol: raftht (weakRatio=50%)
+- Threads: t=16
+- writes: 50%, weakWrites: 50%
+- reqs: 100000 (long-running ~120s)
+- networkDelay: 25 (12.5ms one-way)
+- --startup-delay 25
+
+**Experiment flow**:
+1. Start 5 replicas + 3 clients, reach steady-state
+2. At t=60s, `kill -9` replica 0 (leader)
+3. Observe throughput drop to 0 → new leader election → throughput recovery
+
+**Infrastructure changes needed**:
+- Client must output per-second throughput (ops completed each second); currently only outputs summary at end
+- Suggested output format: `TPUT <unix_timestamp> <ops_this_second>` for easy parsing/plotting
+- Need a kill script that ssh kills the leader at t=60s
+
+**Expected results**:
+- Steady-state: ~10K ops/s (based on Phase 100 t=16 data)
+- After kill: throughput drops to 0 for ~1-3s (Raft election timeout)
+- After recovery: throughput returns to near steady-state level
+- Output: per-second throughput CSV for time series plot
+
+**Tasks**:
+- [x] 101a: Add per-second throughput output to client (TPUT lines)
+  - Added `tputTracker` type in client/hybrid.go using atomic counter + 1s ticker goroutine
+  - Format: `TPUT <prefix> <unix_timestamp> <ops_this_second>` (via log.Printf)
+  - Integrated into both HybridLoop and HybridLoopWithOptions
+  - 4 tests added: basic, stop-idle, concurrent safety, emit-output
+- [ ] 101b: Write `scripts/exp2.3-raftht.sh` — replica startup, client startup, kill leader at t=60s
+- [ ] 101c: Build & test `go build -o swiftpaxos-dist . && go test ./...`
+- [ ] 101d: Run Exp 2.3 distributed, collect per-second throughput data
+- [ ] 101e: Parse TPUT data into CSV (time, throughput), verify recovery behavior
+
+**Status**: ⬜ **TODO**
 
 ---
 

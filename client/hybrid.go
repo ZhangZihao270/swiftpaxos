@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/imdea-software/swiftpaxos/state"
@@ -16,6 +17,50 @@ import (
 // declaring a hang. This prevents clients from blocking forever when
 // a reply is lost due to protocol bugs or network issues.
 const replyTimeout = 120 * time.Second
+
+// tputTracker reports per-second throughput as TPUT lines for time-series analysis.
+// Usage: create with newTputTracker(), call inc() for each completed op, stop() when done.
+type tputTracker struct {
+	ops    atomic.Int64
+	stopCh chan struct{}
+	done   chan struct{}
+}
+
+func newTputTracker(prefix string) *tputTracker {
+	t := &tputTracker{
+		stopCh: make(chan struct{}),
+		done:   make(chan struct{}),
+	}
+	go func() {
+		defer close(t.done)
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				count := t.ops.Swap(0)
+				log.Printf("TPUT %s %d %d", prefix, time.Now().Unix(), count)
+			case <-t.stopCh:
+				// Emit final partial-second count
+				count := t.ops.Swap(0)
+				if count > 0 {
+					log.Printf("TPUT %s %d %d", prefix, time.Now().Unix(), count)
+				}
+				return
+			}
+		}
+	}()
+	return t
+}
+
+func (t *tputTracker) inc() {
+	t.ops.Add(1)
+}
+
+func (t *tputTracker) stop() {
+	close(t.stopCh)
+	<-t.done
+}
 
 // ConsistencyLevel represents the consistency guarantee for a command
 type ConsistencyLevel int
@@ -228,6 +273,10 @@ func (c *HybridBufferClient) HybridLoop() {
 	// Track command types for metrics
 	cmdTypes := make([]CommandType, c.reqNum+1)
 
+	// Per-second throughput tracker
+	tput := newTputTracker(fmt.Sprintf("client%d", c.ClientId))
+	defer tput.stop()
+
 	var cmdM sync.Mutex
 	cmdNum := int32(0)
 	wait := make(chan struct{}, 0)
@@ -249,6 +298,7 @@ func (c *HybridBufferClient) HybridLoop() {
 			}
 			// Ignore first request (warmup)
 			if i != 0 {
+				tput.inc()
 				d := r.Time.Sub(c.reqTime[r.Seqnum])
 				latencyMs := float64(d.Nanoseconds()) / float64(time.Millisecond)
 				cmdType := cmdTypes[r.Seqnum]
@@ -480,6 +530,10 @@ func (c *HybridBufferClient) HybridLoopWithOptions(printResults bool) {
 	// Track command types for metrics
 	cmdTypes := make([]CommandType, c.reqNum+1)
 
+	// Per-second throughput tracker
+	tput := newTputTracker(fmt.Sprintf("client%d", c.ClientId))
+	defer tput.stop()
+
 	var cmdM sync.Mutex
 	cmdNum := int32(0)
 	wait := make(chan struct{}, 0)
@@ -502,6 +556,7 @@ func (c *HybridBufferClient) HybridLoopWithOptions(printResults bool) {
 			}
 			// Ignore first request (warmup)
 			if i != 0 {
+				tput.inc()
 				d := r.Time.Sub(c.reqTime[r.Seqnum])
 				latencyMs := float64(d.Nanoseconds()) / float64(time.Millisecond)
 				cmdType := cmdTypes[r.Seqnum]
