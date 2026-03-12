@@ -41,6 +41,10 @@ type Client struct {
 	// Strong command tracking for resend on leader failover
 	strongPendingCmds map[int32]*defs.Propose // seqnum → original Propose
 
+	// Dead replica tracking: replicas whose reader goroutine has exited (EOF/error).
+	// Used to ignore NOT_LEADER hints pointing to dead replicas.
+	deadReplicas map[int32]bool
+
 	// Client local cache: key → (value, version) with slot-based versioning
 	localCache map[int64]cacheEntry
 	maxVersion int32 // highest version seen
@@ -64,6 +68,7 @@ func NewClient(b *client.BufferClient) *Client {
 		weakPendingValues: make(map[int32]state.Value),
 		strongPendingKeys: make(map[int32]int64),
 		strongPendingCmds: make(map[int32]*defs.Propose),
+		deadReplicas:      make(map[int32]bool),
 		localCache:        make(map[int64]cacheEntry),
 	}
 
@@ -110,15 +115,21 @@ func (c *Client) handleRaftReply(rep *RaftReply) {
 	c.mu.Lock()
 
 	// LeaderId >= 0 means this is a rejection from a non-leader with a leader hint.
-	// Resend to the hinted leader.
+	// Resend to the hinted leader (or rotate if hint points to a dead replica).
 	if rep.LeaderId >= 0 {
 		oldLeader := c.leader
-		c.leader = rep.LeaderId
-		if c.BufferClient != nil {
-			c.LeaderId = int(rep.LeaderId)
+		if c.deadReplicas[rep.LeaderId] {
+			// Hint points to a dead replica — rotate to next alive one
+			c.leader = c.rotateLeader(c.leader)
+			log.Printf("NOT_LEADER for strong op seq=%d: hint=%d is dead, rotating to %d",
+				rep.CmdId.SeqNum, rep.LeaderId, c.leader)
+		} else {
+			c.leader = rep.LeaderId
 		}
-		log.Printf("NOT_LEADER for strong op seq=%d: replica hinted leader=%d (was %d)",
-			rep.CmdId.SeqNum, rep.LeaderId, oldLeader)
+		if c.BufferClient != nil && c.leader != int32(c.LeaderId) {
+			c.LeaderId = int(c.leader)
+		}
+		_ = oldLeader
 		// Resend the command to the new leader
 		if cmd, ok := c.strongPendingCmds[rep.CmdId.SeqNum]; ok {
 			leader := c.leader
@@ -154,9 +165,14 @@ func (c *Client) handleRaftReply(rep *RaftReply) {
 func (c *Client) handleWeakReply(rep *MWeakReply) {
 	c.mu.Lock()
 
-	// Update leader hint (even on rejection, so we redirect to the right node)
+	// Update leader hint (even on rejection, so we redirect to the right node).
+	// If hint points to a dead replica, rotate instead.
 	if rep.LeaderId >= 0 {
-		c.leader = rep.LeaderId
+		if c.deadReplicas[rep.LeaderId] {
+			c.leader = c.rotateLeader(c.leader)
+		} else {
+			c.leader = rep.LeaderId
+		}
 	}
 
 	// Slot == -1 means rejection (non-leader received the proposal).
@@ -230,9 +246,10 @@ func (c *Client) handleWeakReadReply(rep *MWeakReadReply) {
 
 
 // handleReaderDead is called when a reader goroutine exits (EOF/error).
-// If the dead replica is the current leader, rotate to the next replica.
+// Marks the replica as dead and, if it was the leader, rotates to the next replica.
 func (c *Client) handleReaderDead(deadReplica int32) {
 	c.mu.Lock()
+	c.deadReplicas[deadReplica] = true
 	if deadReplica != c.leader {
 		c.mu.Unlock()
 		return
@@ -280,8 +297,16 @@ func (c *Client) handleReaderDead(deadReplica int32) {
 	}
 }
 
-// rotateLeader returns the next replica ID after the given one.
+// rotateLeader returns the next alive replica ID after the given one.
+// Skips replicas known to be dead. Falls back to (current+1)%N if all are dead.
 func (c *Client) rotateLeader(current int32) int32 {
+	for i := int32(1); i < c.numReplicas; i++ {
+		next := (current + i) % c.numReplicas
+		if !c.deadReplicas[next] {
+			return next
+		}
+	}
+	// All replicas dead (shouldn't happen with majority alive), just rotate
 	return (current + 1) % c.numReplicas
 }
 

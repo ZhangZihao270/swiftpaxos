@@ -38,25 +38,29 @@ func TestClientInterfaceCompliance(t *testing.T) {
 // ============================================================================
 
 func TestLeaderRotation_WrapAround(t *testing.T) {
-	c := &Client{numReplicas: 5, leader: 4}
-	newLeader := (c.leader + 1) % c.numReplicas
-	if newLeader != 0 {
-		t.Errorf("leader rotation from 4 with 5 replicas = %d, want 0", newLeader)
+	c := &Client{numReplicas: 5, leader: 4, deadReplicas: make(map[int]bool)}
+	if got := c.rotateLeader(4); got != 0 {
+		t.Errorf("rotateLeader(4) with 5 replicas = %d, want 0", got)
 	}
 }
 
 func TestLeaderRotation_Simple(t *testing.T) {
-	c := &Client{numReplicas: 3, leader: 0}
-	newLeader := (c.leader + 1) % c.numReplicas
-	if newLeader != 1 {
-		t.Errorf("leader rotation from 0 with 3 replicas = %d, want 1", newLeader)
+	c := &Client{numReplicas: 3, leader: 0, deadReplicas: make(map[int]bool)}
+	if got := c.rotateLeader(0); got != 1 {
+		t.Errorf("rotateLeader(0) with 3 replicas = %d, want 1", got)
 	}
 }
 
 func TestLeaderRotation_SingleReplica(t *testing.T) {
-	c := &Client{numReplicas: 1, leader: 0}
-	newLeader := (c.leader + 1) % c.numReplicas
-	if newLeader != 0 {
-		t.Errorf("leader rotation with 1 replica = %d, want 0", newLeader)
+	c := &Client{numReplicas: 1, leader: 0, deadReplicas: make(map[int]bool)}
+	if got := c.rotateLeader(0); got != 0 {
+		t.Errorf("rotateLeader(0) with 1 replica = %d, want 0", got)
+	}
+}
+
+func TestLeaderRotation_SkipsDead(t *testing.T) {
+	c := &Client{numReplicas: 5, leader: 0, deadReplicas: map[int]bool{1: true, 2: true}}
+	if got := c.rotateLeader(0); got != 3 {
+		t.Errorf("rotateLeader(0) skipping dead 1,2 = %d, want 3", got)
 	}
 }

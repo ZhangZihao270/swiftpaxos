@@ -1097,7 +1097,7 @@ func TestRaftReplySerialization_EmptyValueWithLeaderId(t *testing.T) {
 // ============================================================================
 
 func TestRotateLeader(t *testing.T) {
-	c := &Client{numReplicas: 5}
+	c := &Client{numReplicas: 5, deadReplicas: make(map[int32]bool)}
 
 	tests := []struct {
 		current int32
@@ -1117,9 +1117,25 @@ func TestRotateLeader(t *testing.T) {
 }
 
 func TestRotateLeader_SingleReplica(t *testing.T) {
-	c := &Client{numReplicas: 1}
+	c := &Client{numReplicas: 1, deadReplicas: make(map[int32]bool)}
 	if got := c.rotateLeader(0); got != 0 {
 		t.Errorf("rotateLeader(0) with 1 replica = %d, want 0", got)
+	}
+}
+
+func TestRotateLeader_SkipsDead(t *testing.T) {
+	c := &Client{numReplicas: 5, deadReplicas: map[int32]bool{1: true, 2: true}}
+	// From 0, should skip 1 and 2 (dead), land on 3
+	if got := c.rotateLeader(0); got != 3 {
+		t.Errorf("rotateLeader(0) skipping dead 1,2 = %d, want 3", got)
+	}
+}
+
+func TestRotateLeader_AllDeadFallback(t *testing.T) {
+	c := &Client{numReplicas: 3, deadReplicas: map[int32]bool{0: true, 1: true, 2: true}}
+	// All dead: fallback to (current+1)%N
+	if got := c.rotateLeader(0); got != 1 {
+		t.Errorf("rotateLeader(0) all dead = %d, want 1 (fallback)", got)
 	}
 }
 
@@ -1169,6 +1185,7 @@ func TestHandleReaderDead_NotLeader(t *testing.T) {
 		weakPendingValues: make(map[int32]state.Value),
 		strongPendingKeys: make(map[int32]int64),
 		strongPendingCmds: make(map[int32]*defs.Propose),
+		deadReplicas:      make(map[int32]bool),
 		localCache:        make(map[int64]cacheEntry),
 	}
 
@@ -1190,6 +1207,7 @@ func TestHandleReaderDead_IsLeader(t *testing.T) {
 		weakPendingValues: make(map[int32]state.Value),
 		strongPendingKeys: make(map[int32]int64),
 		strongPendingCmds: make(map[int32]*defs.Propose),
+		deadReplicas:      make(map[int32]bool),
 		localCache:        make(map[int64]cacheEntry),
 	}
 

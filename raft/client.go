@@ -14,8 +14,9 @@ import (
 // weak commands are delegated to the strong path.
 type Client struct {
 	*client.BufferClient
-	numReplicas int
-	leader      int
+	numReplicas  int
+	leader       int
+	deadReplicas map[int]bool // replicas whose reader has exited (EOF/error)
 }
 
 // NewClient creates a new Raft client.
@@ -25,12 +26,24 @@ func NewClient(b *client.BufferClient) *Client {
 		BufferClient: b,
 		numReplicas:  b.NumReplicas(),
 		leader:       b.LeaderId,
+		deadReplicas: make(map[int]bool),
 	}
 
 	// Start reading replies with failover support.
 	go c.waitRepliesWithFailover()
 
 	return c
+}
+
+// rotateLeader returns the next alive replica ID, skipping dead ones.
+func (c *Client) rotateLeader(current int) int {
+	for i := 1; i < c.numReplicas; i++ {
+		next := (current + i) % c.numReplicas
+		if !c.deadReplicas[next] {
+			return next
+		}
+	}
+	return (current + 1) % c.numReplicas
 }
 
 // waitRepliesWithFailover reads ProposeReplyTS from the current leader.
@@ -40,9 +53,10 @@ func (c *Client) waitRepliesWithFailover() {
 	for {
 		r, err := c.GetReplyFrom(leader)
 		if err != nil {
-			// Reader failed (EOF = leader dead). Rotate to next replica.
+			// Reader failed (EOF = leader dead). Mark dead and rotate.
+			c.deadReplicas[leader] = true
 			oldLeader := leader
-			leader = (leader + 1) % c.numReplicas
+			leader = c.rotateLeader(leader)
 			c.leader = leader
 			c.LeaderId = leader
 			log.Printf("Leader %d dead (EOF), rotating to %d", oldLeader, leader)
@@ -51,8 +65,8 @@ func (c *Client) waitRepliesWithFailover() {
 			continue
 		}
 		if r.OK != defs.TRUE {
-			// NOT_LEADER rejection. Use leader hint if available.
-			if r.LeaderId >= 0 {
+			// NOT_LEADER rejection. Use leader hint if available and alive.
+			if r.LeaderId >= 0 && !c.deadReplicas[int(r.LeaderId)] {
 				oldLeader := leader
 				leader = int(r.LeaderId)
 				c.leader = leader
@@ -60,10 +74,14 @@ func (c *Client) waitRepliesWithFailover() {
 				log.Printf("NOT_LEADER from %d: hinted leader=%d", oldLeader, leader)
 			} else {
 				oldLeader := leader
-				leader = (leader + 1) % c.numReplicas
+				leader = c.rotateLeader(leader)
 				c.leader = leader
 				c.LeaderId = leader
-				log.Printf("NOT_LEADER from %d: no hint, rotating to %d", oldLeader, leader)
+				if r.LeaderId >= 0 {
+					log.Printf("NOT_LEADER from %d: hint=%d is dead, rotating to %d", oldLeader, r.LeaderId, leader)
+				} else {
+					log.Printf("NOT_LEADER from %d: no hint, rotating to %d", oldLeader, leader)
+				}
 			}
 			continue
 		}
