@@ -150,7 +150,7 @@ func runClient(c *config.Config, verbose bool) {
 
 	// Aggregate and print/export metrics
 	p := strings.ToLower(c.Protocol)
-	if p == "curp" || p == "curpht" || p == "curpho" || p == "raft" || p == "raftht" || p == "epaxos" {
+	if p == "curp" || p == "curpht" || p == "curpho" || p == "raft" || p == "raftht" || p == "epaxos" || p == "epaxosho" {
 		aggregated := client.AggregateMetrics(allMetrics)
 		if numThreads > 1 {
 			l := dlog.New(*logFile, verbose)

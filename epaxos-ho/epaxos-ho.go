@@ -604,11 +604,12 @@ func (r *Replica) bcastPreAccept(replicaId int32, instance int32, ballot int32, 
 	}
 
 	sent := 0
-	for q := 0; q < r.N-1; q++ {
-		if !r.Alive[r.PreferredPeerOrder[q]] {
+	for q := 0; q < r.N; q++ {
+		peer := r.PreferredPeerOrder[q]
+		if peer == r.Id || !r.Alive[peer] {
 			continue
 		}
-		r.SendMsg(r.PreferredPeerOrder[q], r.preAcceptRPC, args)
+		r.SendMsg(peer, r.preAcceptRPC, args)
 		sent++
 		if sent >= n {
 			break
@@ -642,11 +643,12 @@ func (r *Replica) bcastAccept(replicaId int32, instance int32, ballot int32, cou
 	}
 
 	sent := 0
-	for q := 0; q < r.N-1; q++ {
-		if !r.Alive[r.PreferredPeerOrder[q]] {
+	for q := 0; q < r.N; q++ {
+		peer := r.PreferredPeerOrder[q]
+		if peer == r.Id || !r.Alive[peer] {
 			continue
 		}
-		r.SendMsg(r.PreferredPeerOrder[q], r.acceptRPC, args)
+		r.SendMsg(peer, r.acceptRPC, args)
 		sent++
 		if sent >= n {
 			break
@@ -687,14 +689,15 @@ func (r *Replica) bcastStrongCommit(replicaId int32, instance int32, cmds []stat
 	}
 
 	sent := 0
-	for q := 0; q < r.N-1; q++ {
-		if !r.Alive[r.PreferredPeerOrder[q]] {
+	for q := 0; q < r.N; q++ {
+		peer := r.PreferredPeerOrder[q]
+		if peer == r.Id || !r.Alive[peer] {
 			continue
 		}
 		if r.Thrifty && sent >= r.N/2 {
-			r.SendMsg(r.PreferredPeerOrder[q], r.commitRPC, args)
+			r.SendMsg(peer, r.commitRPC, args)
 		} else {
-			r.SendMsg(r.PreferredPeerOrder[q], r.commitShortRPC, argsShort)
+			r.SendMsg(peer, r.commitShortRPC, argsShort)
 			sent++
 		}
 	}
@@ -813,11 +816,12 @@ func (r *Replica) bcastPrepare(replicaId int32, instance int32, ballot int32) {
 		Ballot:   ballot,
 	}
 
-	for q := 0; q < r.N-1; q++ {
-		if !r.Alive[r.PreferredPeerOrder[q]] {
+	for q := 0; q < r.N; q++ {
+		peer := r.PreferredPeerOrder[q]
+		if peer == r.Id || !r.Alive[peer] {
 			continue
 		}
-		r.SendMsg(r.PreferredPeerOrder[q], r.prepareRPC, args)
+		r.SendMsg(peer, r.prepareRPC, args)
 	}
 }
 
@@ -1367,8 +1371,12 @@ func (r *Replica) bcastCausalCommit(replicaId int32, instance int32, cmds []stat
 		Deps:        deps,
 		CL:          cl,
 	}
-	for q := 0; q < r.N-1; q++ {
-		r.SendMsg(r.PreferredPeerOrder[q], r.causalCommitRPC[rand.Intn(r.N*NO_CAUSAL_CHANNEL)], args)
+	for q := 0; q < r.N; q++ {
+		peer := r.PreferredPeerOrder[q]
+		if peer == r.Id {
+			continue
+		}
+		r.SendMsg(peer, r.causalCommitRPC[rand.Intn(r.N*NO_CAUSAL_CHANNEL)], args)
 	}
 }
 

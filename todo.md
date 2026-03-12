@@ -6,6 +6,8 @@ This document tracks the implementation of multiple hybrid consistency protocols
 
 ---
 
+## ⬜ Next TODO: Phase 98.1 — Re-run Exp 1.1 (Raft vs Raft-HT, writes=5%/50%, all optimizations applied)
+
 ## Table of Contents
 
 1. [CURP-HT (Hybrid Two-Phase)](#curp-ht-hybrid-two-phase) - **COMPLETE**
@@ -6622,6 +6624,44 @@ case slot := <-r.deliverChan:
 
 ---
 
+### Phase 98.1: Re-run Exp 1.1 — Raft vs Raft-HT with All Optimizations
+
+**Goal**: 在优化后的 Raft 和 Raft-HT 上重新跑 Exp 1.1，验证公平对比下的性能差距。
+
+**背景**: Phase 98 的 Raft 数据来自 Phase 97（未优化）。现在 Raft 和 Raft-HT 都应用了相同优化：
+- broadcastAppendEntries 优化（单次 logMu + 单次 r.M + entries sharing）
+- handleAppendEntriesReplyBatch（reply 批处理）
+- ReplyProposeTSDelayed（Raft reply 注入对称 WAN delay）
+- Raft-HT: weak propose batch 控制（与 strong 共享 batchWait 开关）
+
+**Exp 1.1 配置**:
+- Cluster: 5r/5m/3c (benchmark-5r-5m-3c.conf)
+- Threads: t=1, 2, 4, 8, 16, 32, 64, 96
+- Protocols: raft, raftht (weakRatio=50%)
+- Write ratios: **5%** 和 **50%**
+- weakWrites: 50%
+- reqs: 3000
+- networkDelay: 25 (12.5ms one-way)
+- batchDelayUs: 150
+- --startup-delay 25
+
+**Plan**:
+1. `go build -o swiftpaxos-dist .`
+2. 对每个 write ratio (5%, 50%):
+   - 对每个 thread count (1, 2, 4, 8, 16, 32, 64, 96):
+     - 跑 raft (weakRatio=0)
+     - 跑 raftht (weakRatio=50)
+3. 汇总结果，对比 Phase 98 数据，制表
+
+**预期结果**:
+- writes=5: Raft-HT 应保持 1.5x+ speedup（95% weak reads 本地处理）
+- writes=50: Raft-HT 应有 20-60% speedup（修复前 Phase 98 shows 0.87-0.99x）
+  - 点测已验证 t=32: Raft 9.1K vs Raft-HT 14.6K (+60%)
+
+**Status**: ⬜ **TODO** — 在 Phase 99 之前完成
+
+---
+
 ### Phase 99: Port Orca's EPaxos-HO (Hybrid Protocol) to SwiftPaxos
 
 **Goal**: 将 Orca (`/home/users/zihao/Orca/`) 的 hybrid EPaxos 协议移植到 SwiftPaxos，
@@ -6796,10 +6836,29 @@ case slot := <-r.deliverChan:
 **Goal**: 在 5r/5m/3c 集群上跑 EPaxos-HO，验证正确性和性能。
 
 - [x] 99.7a: 创建 eval-phase99.sh 脚本（scripts/eval-phase99.sh）
-- [ ] 99.7b: 跑 Exp 3.1（throughput sweep）：t=1,2,4,8,16,32,64,96
-  - weakRatio=50, writes=5
-  - 对比 CURP-HT/HO 结果
-- [ ] 99.7d: 结果表格和分析写入 todo.md
+- [x] 99.7b: 跑 Exp 3.1（throughput sweep）：t=1,2,4,8,16,32,64,96
+  - Fixed: broadcast-to-self bug (PreferredPeerOrder had self at position 0 after ComputeClosestPeers sort)
+  - Fixed: epaxosho missing from metrics aggregation in main.go
+  - weakRatio=50, writes=5, 5r/5m/3c, networkDelay=25ms
+  - Results (EPaxos-HO):
+
+  | t  | clients | throughput | s_avg  | s_p99   | w_avg  | w_p99 |
+  |----|---------|------------|--------|---------|--------|-------|
+  | 1  | 3       | 1,740      | 51.5ms | 55.1ms  | 0.15ms | 0.6ms |
+  | 2  | 6       | 3,515      | 51.6ms | 54.9ms  | 0.20ms | 1.0ms |
+  | 4  | 12      | 6,794      | 51.7ms | 56.8ms  | 0.22ms | 1.3ms |
+  | 8  | 24      | 13,723     | 51.3ms | 56.0ms  | 0.24ms | 1.7ms |
+  | 16 | 48      | 26,450     | 53.1ms | 68.2ms  | 0.32ms | 2.6ms |
+  | 32 | 96      | 33,824     | 86.3ms | 165.0ms | 0.47ms | 3.5ms |
+  | 64 | 192     | 33,871     | 173.6ms| 342.6ms | 0.48ms | 3.7ms |
+  | 96 | 288     | 34,505     | 255.2ms| 480.5ms | 0.62ms | 6.3ms |
+
+  - Peak throughput: ~34.5K ops/sec at t=96
+  - Strong ops: 51ms avg at low load (= 1 EPaxos RTT with 25ms delay)
+  - Weak ops: sub-millisecond (0.15-0.62ms) even at high load
+  - Saturation starts at t=32 (throughput plateaus ~34K)
+
+- [x] 99.7d: 结果表格和分析写入 todo.md
 
 ---
 
