@@ -7296,10 +7296,12 @@ epaxos/                              epaxos-ho/
   - Removed old `epaxos/` directory (no longer imported)
   - Build + all tests pass
 
-- [ ] 106b: Create `epaxos/defs.go` + `epaxos/defsmarsh.go` — shared base messages (~1,300 LOC)
-  - Port from Orca's `epaxosproto/`
-  - Export base message types + status constants + marshal helpers + cache pools
-  - These will be imported by both `epaxos/epaxos.go` and `epaxos-ho/`
+- [x] 106b: Create `epaxos/defs.go` + `epaxos/defsmarsh.go` — vanilla EPaxos messages (~1,300 LOC)
+  - Port from existing `epaxos-swift/defs.go` (split into struct defs + marshal code)
+  - `defs.go`: status constants, 10 message structs, byteReader interface (~115 LOC)
+  - `defsmarsh.go`: New/BinarySize, Cache types, Marshal/Unmarshal methods (~1,100 LOC)
+  - `defs_test.go`: 15 tests — round-trip for all 10 msg types, cache, BinarySize, status constants
+  - All tests pass, full build OK
 
 - [ ] 106c: Create `epaxos/common.go` — shared algorithm code (~300 LOC)
   - Export Instance base struct, LeaderBookkeeping base struct
