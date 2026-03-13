@@ -7310,14 +7310,18 @@ epaxos/                              epaxos-ho/
   - `common_test.go`: 16 tests — ballot congruence, sort ordering, constructors, constants
   - All tests pass, full build OK
 
-- [ ] 106d: Create `epaxos/epaxos.go` — vanilla protocol logic (~1,900 LOC)
-  - Port from Orca's `epaxos/epaxos.go`
-  - Uses shared types from defs.go and common.go
-  - Single-path: all ops → PreAccept → Accept/Commit → SCC execute
+- [x] 106d: Create `epaxos/epaxos.go` — vanilla protocol logic (port from epaxos-swift, ~1,420 LOC)
+  - Ported from `epaxos-swift/epaxos.go`, adapted to use exported types from common.go
+  - Replica struct, New(), run loop, timers, durability, executeCommands
+  - Message sending (reply + broadcast) and conflict/attribute management
+  - Protocol handlers — propose, preaccept, accept, commit
+  - Recovery handlers — prepare, trypreaccept, deferred helpers, constructors
+  - `epaxos_test.go`: 7 tests — depsEqual, deferred map, batching, client interface
 
-- [ ] 106e: Create `epaxos/exec.go` + `epaxos/client.go` (~220 LOC)
-  - exec.go: SCC-only executor (single consistency path)
+- [x] 106e: Create `epaxos/exec.go` + `epaxos/client.go` (~180 LOC)
+  - exec.go: Tarjan SCC executor (single consistency path)
   - client.go: `SupportsWeak()=false`, delegates weak→strong
+  - All tests pass, full build OK
 
 - [ ] 106f: Refactor `epaxos-ho/` to import shared code from `epaxos/` (~-500 LOC)
   - Import base message types, status constants, marshal helpers from `epaxos/`
