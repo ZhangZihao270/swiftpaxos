@@ -7564,12 +7564,15 @@ allCmds + CL[] → instance N
   - Strong latency still ~2.5× vanilla (structural: hybrid command classification overhead)
   - Weak latency excellent: 0.49ms avg, 0.23ms p50
 
-- [ ] 109g: Full benchmark if 109f passes — t=1,2,4,8,16,32,64,96, w5%+w50%
-  - Compare with Phase 105 (before opt) and Phase 107 (vanilla EPaxos)
-  - Expected: EPaxos-HO peak shifts from ~37K to ~45K+
-  - Expected: EPaxos-HO saturation point moves from t=32 to t=64+
+- [x] 109g: Full benchmark — t=1,2,4,8,16,32,64,96, w5%+w50% [26:03:13]
+  - **w50% peak**: 41,969 ops/sec at t=64 (vs Phase 105: 37,138 at t=32 = +13%)
+  - **w5% peak**: 40,505 ops/sec at t=96
+  - **vs vanilla EPaxos**: w50% t=64 gap < 1% (41,969 vs 42,043)
+  - Saturation shifted from t=32 → t=64 as expected
+  - Weak latency stable: w_p50 ≈ 0.2ms across all thread counts
+  - Strong latency at low t: s_p50 ≈ 51ms (optimal, matches vanilla)
 
-**Status**: ⬜ **TODO**
+**Status**: ✅ **DONE** [26:03:13]
 
 ---
 
