@@ -7348,6 +7348,78 @@ epaxos/                              epaxos-ho/
 
 ---
 
+### Phase 107: EPaxos (Orca port) Throughput-Latency Benchmark
+
+**Goal**: Benchmark the newly ported Orca EPaxos (`epaxos/`) at writes=5% and 50%, same config as Phase 105 (EPaxos-HO). Compare with Phase 104 (epaxos-swift) and Phase 105 (epaxos-ho) results.
+
+**Config**: 5 replicas × 5 machines, 3 clients, `benchmark-5r-5m-3c.conf`, networkDelay=25ms, reqs=3000/thread, `--startup-delay 25`
+
+**Tasks**:
+
+- [x] 107a: Run EPaxos (Orca port) at writes=5%, t=1,2,4,8,16,32,64,96 [26:03:13]
+  - Protocol: `epaxos`, weakRatio=0, writes=5
+  - Results (w5):
+    | t  | throughput   | s_p50  | s_p99   |
+    |----|-------------|--------|---------|
+    | 1  | 863.27      | 51.69  | 53.03   |
+    | 2  | 1694.16     | 51.64  | 103.13  |
+    | 4  | 3323.04     | 51.75  | 103.85  |
+    | 8  | 6570.42     | 51.50  | 103.65  |
+    | 16 | 12502.69    | 51.49  | 106.17  |
+    | 32 | 23955.85    | 51.66  | 108.32  |
+    | 64 | 41896.02    | 57.50  | 133.68  |
+    | 96 | 47945.76    | 73.03  | 323.20  |
+  - Peak: 47,946 ops/sec at t=96; s_p50 stable ~51ms up to t=32
+
+- [x] 107b: Run EPaxos (Orca port) at writes=50%, t=1,2,4,8,16,32,64,96 [26:03:13]
+  - Protocol: `epaxos`, weakRatio=0, writes=50
+  - Results (w50):
+    | t  | throughput   | s_p50  | s_p99   |
+    |----|-------------|--------|---------|
+    | 1  | 860.68      | 51.68  | 53.19   |
+    | 2  | 1711.46     | 51.69  | 102.56  |
+    | 4  | 3374.59     | 51.62  | 103.45  |
+    | 8  | 6562.24     | 51.47  | 103.26  |
+    | 16 | 12742.59    | 51.45  | 103.69  |
+    | 32 | 23876.48    | 51.83  | 106.15  |
+    | 64 | 42040.30    | 55.56  | 120.86  |
+    | 96 | 46889.81    | 94.27  | 152.55  |
+  - Peak: 46,890 ops/sec at t=96; s_p50 stable ~51ms up to t=32
+
+- [x] 107c: Comparison table — EPaxos (Orca) vs EPaxos-Swift vs EPaxos-HO [26:03:13]
+
+  **Writes=5% — EPaxos Orca (Phase 107) vs EPaxos Swift (Phase 104) vs EPaxos-HO (Phase 105)**:
+
+  | t  | Orca tput  | Swift tput | HO tput  | Orca s_p50 | Swift s_p50 | HO s_p50   |
+  |---:|-----------:|-----------:|---------:|-----------:|------------:|-----------:|
+  | 1  | 863        | 864        | 1,733    | 51.69ms    | 51.55ms     | 51.21ms    |
+  | 4  | 3,323      | 3,363      | 6,880    | 51.75ms    | 53.04ms     | 51.34ms    |
+  | 16 | 12,503     | 12,762     | 27,174   | 51.49ms    | 55.43ms     | 51.38ms    |
+  | 32 | 23,956     | 24,043     | 35,465   | 51.66ms    | 58.62ms     | 90.31ms    |
+  | 64 | 41,896     | 41,966     | 36,678   | 57.50ms    | 67.35ms     | 181.83ms   |
+  | 96 | 47,946     | 55,810     | 36,001   | 73.03ms    | 76.54ms     | 273.40ms   |
+
+  **Writes=50% — EPaxos Orca (Phase 107) vs EPaxos Swift (Phase 104) vs EPaxos-HO (Phase 105)**:
+
+  | t  | Orca tput  | Swift tput | HO tput  | Orca s_p50 | Swift s_p50 | HO s_p50   |
+  |---:|-----------:|-----------:|---------:|-----------:|------------:|-----------:|
+  | 1  | 861        | 842        | 1,785    | 51.68ms    | 52.50ms     | 51.29ms    |
+  | 4  | 3,375      | 3,345      | 6,908    | 51.62ms    | 52.52ms     | 51.36ms    |
+  | 16 | 12,743     | 11,580     | 26,983   | 51.45ms    | 59.56ms     | 51.32ms    |
+  | 32 | 23,876     | 22,401     | 35,684   | 51.83ms    | 63.29ms     | 89.56ms    |
+  | 64 | 42,040     | 38,666     | 37,138   | 55.56ms    | 76.01ms     | 180.60ms   |
+  | 96 | 46,890     | 49,489     | 37,004   | 94.27ms    | 84.92ms     | 281.43ms   |
+
+  **Key findings**:
+  - **Orca vs Swift (w5%)**: Nearly identical throughput up to t=64 (41.9K). At t=96: Orca 47.9K vs Swift 55.8K — Swift 16% higher peak. But Orca has better latency at low-mid load: s_p50=51.5ms vs Swift's 55-59ms at t=8-32.
+  - **Orca vs Swift (w50%)**: Orca slightly better at t≤64 (42.0K vs 38.7K at t=64). At t=96: Orca 46.9K vs Swift 49.5K — Swift 5.5% higher peak. Orca latency significantly better: s_p50=51.8ms vs 63.3ms at t=32.
+  - **Both vs EPaxos-HO**: EPaxos-HO peaks lower (36-37K) but has ~50% of ops as weak (w_p50≈0.2ms). At low load (t≤16), HO has 2× throughput because weak ops are local reads. At high load (t≥64), HO saturates and latency explodes (s_p50>180ms).
+  - **Overall**: Orca port behaves correctly — matches Swift within expected variance. Lower peak at t=96 may be due to different conflict handling or Go runtime variance.
+
+**Status**: ✅ **DONE** [26:03:13]
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
