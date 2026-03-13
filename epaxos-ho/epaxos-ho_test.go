@@ -326,93 +326,195 @@ func TestHandleProposeDefaultToStrong(t *testing.T) {
 }
 
 func TestHandleProposeInstanceAllocation(t *testing.T) {
-	// Verify that handlePropose allocates separate instances for causal and strong batches
+	// After Phase 109a: mixed batches use 1 unified instance, not 2 separate ones
 	r := newTestReplica(5)
 
-	// Simulate: 2 causal + 1 strong → should allocate 2 instances
 	startInst := r.crtInstance[0]
 
-	// Simulate causal batch allocation
-	causalInst := r.crtInstance[0]
-	r.crtInstance[0]++
-	// Simulate strong batch allocation
-	strongInst := r.crtInstance[0]
+	// Mixed batch (causal+strong) → 1 instance via startUnifiedCommit
 	r.crtInstance[0]++
 
-	if causalInst != startInst {
-		t.Errorf("causal instance=%d, want %d", causalInst, startInst)
-	}
-	if strongInst != startInst+1 {
-		t.Errorf("strong instance=%d, want %d", strongInst, startInst+1)
-	}
-	if r.crtInstance[0] != startInst+2 {
-		t.Errorf("crtInstance=%d, want %d", r.crtInstance[0], startInst+2)
+	if r.crtInstance[0] != startInst+1 {
+		t.Errorf("crtInstance=%d, want %d (unified: 1 instance for mixed batch)", r.crtInstance[0], startInst+1)
 	}
 }
 
 func TestHandleProposeAllCausal(t *testing.T) {
-	// All-causal batch should only allocate 1 instance
+	// All-causal batch → 1 instance via startCausalCommit (unchanged)
 	cmds := []state.Command{
 		{Op: state.PUT, K: 1, V: state.NIL(), CL: state.CAUSAL, Sid: 1},
 		{Op: state.PUT, K: 2, V: state.NIL(), CL: state.CAUSAL, Sid: 2},
 		{Op: state.GET, K: 3, V: state.NIL(), CL: state.CAUSAL, Sid: 3},
 	}
 
-	var causalCmds, strongCmds []state.Command
+	causalCount := 0
+	strongCount := 0
 	for _, cmd := range cmds {
-		switch cmd.CL {
-		case state.CAUSAL:
-			causalCmds = append(causalCmds, cmd)
-		case state.STRONG:
-			strongCmds = append(strongCmds, cmd)
-		default:
-			strongCmds = append(strongCmds, cmd)
+		if cmd.CL == state.CAUSAL {
+			causalCount++
+		} else {
+			strongCount++
 		}
 	}
 
-	if len(causalCmds) != 3 {
-		t.Errorf("expected 3 causal cmds, got %d", len(causalCmds))
+	if causalCount != 3 {
+		t.Errorf("expected 3 causal cmds, got %d", causalCount)
 	}
-	if len(strongCmds) != 0 {
-		t.Errorf("expected 0 strong cmds, got %d", len(strongCmds))
+	if strongCount != 0 {
+		t.Errorf("expected 0 strong cmds, got %d", strongCount)
 	}
 
-	// Only causal → 1 instance allocated
+	// Only causal → 1 instance
 	r := newTestReplica(5)
-	if len(causalCmds) > 0 {
-		r.crtInstance[0]++
-	}
-	if len(strongCmds) > 0 {
-		r.crtInstance[0]++
-	}
+	r.crtInstance[0]++ // single instance for pure causal
 	if r.crtInstance[0] != 1 {
 		t.Errorf("crtInstance=%d, want 1 (only causal batch)", r.crtInstance[0])
 	}
 }
 
 func TestHandleProposeAllStrong(t *testing.T) {
+	// All-strong batch → 1 instance via startUnifiedCommit
 	cmds := []state.Command{
 		{Op: state.PUT, K: 1, V: state.NIL(), CL: state.STRONG, Sid: 1},
 		{Op: state.GET, K: 2, V: state.NIL(), CL: state.STRONG, Sid: 2},
 	}
 
-	var causalCmds, strongCmds []state.Command
+	causalCount := 0
+	strongCount := 0
 	for _, cmd := range cmds {
-		switch cmd.CL {
-		case state.CAUSAL:
-			causalCmds = append(causalCmds, cmd)
-		case state.STRONG:
-			strongCmds = append(strongCmds, cmd)
-		default:
-			strongCmds = append(strongCmds, cmd)
+		if cmd.CL == state.CAUSAL {
+			causalCount++
+		} else {
+			strongCount++
 		}
 	}
 
-	if len(causalCmds) != 0 {
-		t.Errorf("expected 0 causal cmds, got %d", len(causalCmds))
+	if causalCount != 0 {
+		t.Errorf("expected 0 causal cmds, got %d", causalCount)
 	}
-	if len(strongCmds) != 2 {
-		t.Errorf("expected 2 strong cmds, got %d", len(strongCmds))
+	if strongCount != 2 {
+		t.Errorf("expected 2 strong cmds, got %d", strongCount)
+	}
+}
+
+func TestHandleProposeMixedBatch(t *testing.T) {
+	// Mixed batch → 1 instance via startUnifiedCommit (not 2 separate instances)
+	cmds := []state.Command{
+		{Op: state.PUT, K: 1, V: state.NIL(), CL: state.CAUSAL, Sid: 1},
+		{Op: state.PUT, K: 2, V: state.NIL(), CL: state.STRONG, Sid: 2},
+		{Op: state.GET, K: 3, V: state.NIL(), CL: state.CAUSAL, Sid: 3},
+	}
+
+	causalCount := 0
+	strongCount := 0
+	for _, cmd := range cmds {
+		if cmd.CL == state.CAUSAL {
+			causalCount++
+		} else {
+			strongCount++
+		}
+	}
+
+	if causalCount != 2 {
+		t.Errorf("expected 2 causal cmds, got %d", causalCount)
+	}
+	if strongCount != 1 {
+		t.Errorf("expected 1 strong cmd, got %d", strongCount)
+	}
+
+	// Both should share 1 instance
+	r := newTestReplica(5)
+	startInst := r.crtInstance[0]
+	r.crtInstance[0]++ // unified: 1 instance for mixed
+	if r.crtInstance[0] != startInst+1 {
+		t.Errorf("crtInstance=%d, want %d (unified mixed batch)", r.crtInstance[0], startInst+1)
+	}
+}
+
+func TestStartUnifiedCommit_MixedBatch(t *testing.T) {
+	r := newTestReplica(5)
+
+	cmds := []state.Command{
+		{Op: state.PUT, K: 1, V: state.NIL(), CL: state.CAUSAL, Sid: 10},
+		{Op: state.PUT, K: 2, V: state.NIL(), CL: state.STRONG, Sid: 20},
+		{Op: state.GET, K: 3, V: state.NIL(), CL: state.CAUSAL, Sid: 10},
+	}
+
+	strongProposals := []*defs.GPropose{{Propose: &defs.Propose{CommandId: 2}}}
+	causalProposals := []*defs.GPropose{{Propose: &defs.Propose{CommandId: 1}}, {Propose: &defs.Propose{CommandId: 3}}}
+
+	r.Dreply = true // skip reply path in test (no real client connections)
+	r.startUnifiedCommit(0, 0, 0, strongProposals, causalProposals, cmds)
+
+	// Verify: single instance created
+	inst := r.InstanceSpace[0][0]
+	if inst == nil {
+		t.Fatal("instance not created")
+	}
+
+	// Verify: all commands in the instance
+	if len(inst.Cmds) != 3 {
+		t.Errorf("Cmds count=%d, want 3", len(inst.Cmds))
+	}
+
+	// Verify: status is PREACCEPTED (strong path dictates)
+	if inst.Status != PREACCEPTED {
+		t.Errorf("Status=%d, want PREACCEPTED(%d)", inst.Status, PREACCEPTED)
+	}
+
+	// Verify: only strong proposals in lb.clientProposals
+	if len(inst.lb.clientProposals) != 1 {
+		t.Errorf("lb.clientProposals=%d, want 1 (only strong)", len(inst.lb.clientProposals))
+	}
+	if inst.lb.clientProposals[0].CommandId != 2 {
+		t.Errorf("lb.clientProposals[0].CommandId=%d, want 2", inst.lb.clientProposals[0].CommandId)
+	}
+
+	// Verify: conflicts were updated for all commands
+	r.conflictMutex.RLock()
+	if r.conflicts[0][1] != 0 {
+		t.Errorf("conflicts[0][1]=%d, want 0 (instance 0)", r.conflicts[0][1])
+	}
+	if r.conflicts[0][2] != 0 {
+		t.Errorf("conflicts[0][2]=%d, want 0", r.conflicts[0][2])
+	}
+	if r.conflicts[0][3] != 0 {
+		t.Errorf("conflicts[0][3]=%d, want 0", r.conflicts[0][3])
+	}
+	r.conflictMutex.RUnlock()
+}
+
+func TestStartUnifiedCommit_PureStrong(t *testing.T) {
+	r := newTestReplica(5)
+
+	cmds := []state.Command{
+		{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG, Sid: 1},
+		{Op: state.GET, K: 20, V: state.NIL(), CL: state.STRONG, Sid: 2},
+	}
+
+	proposals := []*defs.GPropose{{Propose: &defs.Propose{CommandId: 1}}, {Propose: &defs.Propose{CommandId: 2}}}
+
+	r.Dreply = true // skip reply path in test
+	r.startUnifiedCommit(0, 0, 0, proposals, nil, cmds)
+
+	inst := r.InstanceSpace[0][0]
+	if inst == nil {
+		t.Fatal("instance not created")
+	}
+
+	// All commands in instance
+	if len(inst.Cmds) != 2 {
+		t.Errorf("Cmds count=%d, want 2", len(inst.Cmds))
+	}
+
+	// Status PREACCEPTED
+	if inst.Status != PREACCEPTED {
+		t.Errorf("Status=%d, want PREACCEPTED(%d)", inst.Status, PREACCEPTED)
+	}
+
+	// All proposals in lb.clientProposals (no causal proposals to skip)
+	if len(inst.lb.clientProposals) != 2 {
+		t.Errorf("lb.clientProposals=%d, want 2", len(inst.lb.clientProposals))
 	}
 }
 

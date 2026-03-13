@@ -7487,6 +7487,90 @@ epaxos/                              epaxos-ho/
 
 ---
 
+### Phase 109: Fix EPaxos-HO Mixed Batch Splitting — Unified Instance
+
+**Goal**: Eliminate the 2× instance overhead for mixed batches. EPaxos-HO should match or exceed vanilla EPaxos peak throughput (~42K at t=64).
+
+**Root cause** (discovered in Phase 108d analysis):
+- `handlePropose` splits mixed batches into 2 separate instances: one for causal cmds, one for strong cmds
+- This creates **2× instances, 2× dependency tracking, 2× conflict checking, 3 broadcasts** per batch
+- Vanilla EPaxos: 1 instance, 2 broadcasts per batch
+- Instance space inflation causes near-quadratic growth in dep checking at high load
+
+**Current code** (epaxos-ho.go handlePropose ~line 435-482):
+```go
+// Splits batch:
+causalCmds → instance N   → startCausalCommit → 1× bcastCausalCommit
+strongCmds → instance N+1 → startStrongCommit → 1× bcastPreAccept + 1× bcastCommit
+= 2 instances, 3 broadcasts
+```
+
+**Fix**: Put ALL commands (causal + strong) in a single instance with per-command CL[] array:
+```go
+// Unified batch:
+allCmds + CL[] → instance N → startCommit
+  → 1× bcastPreAccept (all cmds, CL[] tells follower which are causal)
+  → after quorum: 1× bcastCommit (strong) + 1× bcastCausalCommit (causal)
+= 1 instance, 3 broadcasts but only 1 PreAccept + 1 dep check
+```
+
+**Alternative (simpler)**: Causal commands don't need PreAccept consensus — leader can commit them locally. So:
+```go
+allCmds + CL[] → instance N
+  → causal cmds: leader assigns seq/deps locally, replies immediately, bcastCausalCommit
+  → strong cmds: bcastPreAccept → quorum → bcastCommit
+  → both share SAME instance (single dep vector, single conflict check)
+= 1 instance, 2-3 broadcasts, 1× dep check
+```
+
+**Tasks**:
+
+- [x] 109a: Merge causal+strong into single instance in handlePropose [26:03:13]
+  - Rewrote handlePropose: all commands in single batch, one instance allocation
+  - Pure causal → startCausalCommit (1-RTT, unchanged)
+  - Mixed/pure strong → new startUnifiedCommit: single instance, PREACCEPTED status
+  - Causal proposals get immediate client reply; strong proposals stored in lb
+  - Unified dep computation: updateStrongAttributes1 + updateCausalAttributes
+  - Conflict updates use updateCausalConflicts (superset of strong updates)
+  - startStrongCommit kept but no longer called from handlePropose
+  - 6 new/updated tests, all pass
+
+- [ ] 109b: Update startCausalCommit to work within unified instance
+  - Instead of creating a separate instance, operate on the shared instance
+  - Send CausalCommit with only the causal commands (or full instance with CL[] marking)
+  - Client replies happen immediately (before PreAccept quorum)
+
+- [ ] 109c: Update handlePreAcceptReply for unified instance
+  - After quorum: send Commit for the whole instance (strong + causal committed together)
+  - Causal commands already replied to client — Commit is just for durability
+  - Followers execute based on CL[]: causal → last-write-wins, strong → SCC
+
+- [ ] 109d: Update follower-side handlers
+  - handlePreAccept: process unified instance with mixed CL[]
+  - handleCommit/handleCausalCommit: may merge into single handleCommit with CL[] routing
+  - Execution engine: unchanged (already dispatches by CL per command)
+
+- [ ] 109e: Build + unit test
+  - `go build && go test ./epaxos-ho/`
+  - Verify: causal commands still get sub-1ms reply
+  - Verify: strong commands still go through PreAccept consensus
+  - Verify: serialization round-trip with mixed CL[] arrays
+
+- [ ] 109f: Spot test — EPaxos-HO vs EPaxos at t=64, w50%
+  - Config: 5r-5m-3c, writes=50%, weakRatio=50%, reqs=3000, --startup-delay 25
+  - **Target**: EPaxos-HO tput ≥ 42K (match vanilla EPaxos)
+  - Compare strong latency: should improve (fewer instances → less dep overhead)
+  - Compare weak latency: should remain ~0.2ms
+
+- [ ] 109g: Full benchmark if 109f passes — t=1,2,4,8,16,32,64,96, w5%+w50%
+  - Compare with Phase 105 (before opt) and Phase 107 (vanilla EPaxos)
+  - Expected: EPaxos-HO peak shifts from ~37K to ~45K+
+  - Expected: EPaxos-HO saturation point moves from t=32 to t=64+
+
+**Status**: ⬜ **TODO**
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
