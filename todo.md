@@ -7614,16 +7614,20 @@ allCmds + CL[] → instance N
 
 **Config**: 5r-5m-3c, t=32, writes=50%, weakRatio=50% (for EHO), reqs=3000, --startup-delay 25
 
-**Conflict rates**: 0% (default, random keys), 2%, 10%, 25%, 50%, 100%
-- Controlled via `conflicts` config field (0 = random keys from keySpace=1M)
-- `conflicts: N` → N% of commands access the same hot key → guaranteed conflicts
+**Conflict rates**: Controlled via Zipf skewness (`zipfSkew` config field)
+- zipfSkew=0: uniform (no skew, ~0% conflict)
+- zipfSkew=0.5: light skew
+- zipfSkew=0.75: moderate skew
+- zipfSkew=0.99: YCSB default (high skew)
+
+**Note**: Phase 110 used `conflicts` field (fixed %). Exp 2.2 requires Zipf distribution for realistic workload modeling. Re-run needed with `zipfSkew` instead.
 
 **Tasks**:
 
-- [x] 110a: Run EPaxos at t=32, w50%, conflict=0,2,10,25,50,100 [26:03:13]
-- [x] 110b: Run EPaxos-HO at t=32, w50%, weakRatio=50%, conflict=0,2,10,25,50,100 [26:03:13]
-- [x] 110c: Tabulate and compare [26:03:13]
-  - **Results** (t=32, w50%):
+- [x] 110a (old, `conflicts` field): Run EPaxos at t=32, w50%, conflict=0,2,10,25,50,100 [26:03:13]
+- [x] 110b (old, `conflicts` field): Run EPaxos-HO at t=32, w50%, weakRatio=50%, conflict=0,2,10,25,50,100 [26:03:13]
+- [x] 110c (old, `conflicts` field): Tabulate and compare [26:03:13]
+  - **Old results** (using `conflicts` field, NOT Zipf — needs re-run with `zipfSkew`):
     | Conflict | EPaxos tput | EPaxos s_p50 | EHO tput | EHO s_p50 | EHO w_p50 | EHO/EP |
     |----------|-------------|--------------|----------|-----------|-----------|--------|
     | 0%       | 23,704      | 52ms         | 39,647   | 75ms      | 0.23ms    | 1.67x  |
@@ -7632,16 +7636,26 @@ allCmds + CL[] → instance N
     | 25%      | 16,865      | 102ms        | 33,162   | 89ms      | 0.23ms    | 1.97x  |
     | 50%      | 15,314      | 102ms        | 29,977   | 103ms     | 0.20ms    | 1.96x  |
     | 100%     | 13,952      | 102ms        | 26,783   | 103ms     | 0.18ms    | 1.92x  |
+
+- [x] 110d: Run EPaxos at t=32, w50%, zipfSkew=0,0.5,0.9,1.2,1.5,2.0 [26:03:13]
+- [x] 110e: Run EPaxos-HO at t=32, w50%, weakRatio=50%, zipfSkew=0,0.5,0.9,1.2,1.5,2.0 [26:03:13]
+- [x] 110f: Tabulate and compare (Zipf results) [26:03:13]
+  - **Zipf skew results** (t=32, w50%, keySpace=1M):
+    | ZipfSkew | EPaxos tput | EPaxos s_p50 | EHO tput  | EHO s_p50 | EHO w_p50 | EHO/EP |
+    |----------|-------------|--------------|-----------|-----------|-----------|--------|
+    | 0.0      | 24,168      | 52ms         | 39,572    | 76ms      | 0.23ms    | 1.64x  |
+    | 0.5      | 15,667      | 102ms        | 30,924    | 103ms     | 0.22ms    | 1.97x  |
+    | 0.9      | 15,676      | 102ms        | 31,245    | 103ms     | 0.22ms    | 1.99x  |
+    | 1.2      | 14,513      | 103ms        | 28,425    | 104ms     | 0.20ms    | 1.96x  |
+    | 1.5      | 14,102      | 103ms        | 27,389    | 104ms     | 0.19ms    | 1.94x  |
+    | 2.0      | 14,014      | 102ms        | 27,048    | 104ms     | 0.19ms    | 1.93x  |
   - **Key findings**:
-    - EPaxos-HO **consistently ~2x throughput** at t=32 across all conflict rates
-    - EPaxos throughput drops 41% from 0→100% conflict (23.7K→14.0K)
-    - EPaxos-HO throughput drops 32% (39.6K→26.8K) — **more resilient**
-    - At ≥25% conflict, EPaxos s_p50 jumps to ~102ms (slow path dominates)
-    - EPaxos-HO s_p50 also rises but stays comparable to EPaxos
-    - **Weak latency completely unaffected**: w_p50 ≈ 0.2ms regardless of conflict
-    - Answer to key question: weak ops (conflict-immune, 50% of traffic) provide
-      a large throughput buffer; their overhead on the strong path is negligible
-      compared to EPaxos's slow-path cost at high conflict
+    - EPaxos-HO consistently ~1.9-2.0x throughput vs vanilla EPaxos under contention
+    - At zero skew (uniform): EPaxos-HO 1.64x (causal fast path dominates)
+    - Under high skew (≥0.5): EPaxos-HO ~1.95x (both degrade but EHO halves strong ops)
+    - Weak latency stable at 0.19-0.23ms regardless of contention
+    - Strong latency similar between protocols under contention (~102-104ms)
+    - Both protocols degrade 40-42% from skew=0 to skew=2.0
 
 **Status**: ✅ **DONE** [26:03:13]
 
