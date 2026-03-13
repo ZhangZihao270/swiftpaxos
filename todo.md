@@ -11,6 +11,7 @@ This document tracks the implementation of multiple hybrid consistency protocols
 - **Phase 101**: Exp 2.3 — Raft-HT Failure Recovery — **DONE** (no recovery: client lacks failover)
 - **Phase 102**: Client Leader Failover — **DONE** (failover works but election too slow)
 - **Phase 103**: Fix election blocking + kill logic + client timeout — **DONE** (recovery in ~2s, aggregate barely dips)
+- **Phase 104**: EPaxos Benchmark (Exp 1.1 baseline) — **DONE** (w5%: 55.8K, w50%: 49.5K peak at t=96)
 
 ## Table of Contents
 
@@ -7080,6 +7081,49 @@ Requires client-side per-second throughput reporting (currently client only outp
   - Post-kill steady state: ~9,000-9,500 ops/s (4 replicas, client0 exits since co-located with killed replica)
   - Client0 co-located with killed replica → loses all connections, exits after 10s timeout (expected)
   - Client1/client2 on surviving machines → immediate recovery, throughput spike then stabilize
+
+**Status**: ✅ **DONE**
+
+---
+
+### Phase 104: EPaxos Throughput-Latency Benchmark (Exp 1.1 Baseline)
+
+**Goal**: Measure EPaxos performance under varying thread counts and write ratios to establish a baseline for comparison with Raft, Raft-HT, CURP-HT, and CURP-HO.
+
+**Cluster**: 5 replicas on 5 machines, 3 clients (benchmark-5r-5m-3c.conf)
+
+**Parameters**:
+- Protocol: `epaxos`
+- Write ratios: 5%, 50%
+- Thread counts: 1, 2, 4, 8, 16, 32, 64, 96
+- Network delay: 25ms one-way (50ms RTT)
+- Reqs per thread: 3000
+- Startup delay: 25s
+
+**Tasks**:
+- [x] 104a: Run EPaxos at writes=5%, t=1,2,4,8,16,32,64,96 [26:03:12]
+  - t=1: 864 ops/s, s_p50=51.55ms, s_p99=103.09ms
+  - t=2: 1,701 ops/s, s_p50=51.79ms, s_p99=103.70ms
+  - t=4: 3,363 ops/s, s_p50=53.04ms, s_p99=103.31ms
+  - t=8: 6,487 ops/s, s_p50=54.47ms, s_p99=103.58ms
+  - t=16: 12,762 ops/s, s_p50=55.43ms, s_p99=103.65ms
+  - t=32: 24,043 ops/s, s_p50=58.62ms, s_p99=106.06ms
+  - t=64: 41,966 ops/s, s_p50=67.35ms, s_p99=135.71ms
+  - t=96: 55,810 ops/s, s_p50=76.54ms, s_p99=141.70ms
+- [x] 104b: Run EPaxos at writes=50%, t=1,2,4,8,16,32,64,96 [26:03:12]
+  - t=1: 842 ops/s, s_p50=52.50ms, s_p99=103.26ms
+  - t=2: 1,678 ops/s, s_p50=52.38ms, s_p99=103.52ms
+  - t=4: 3,345 ops/s, s_p50=52.52ms, s_p99=103.56ms
+  - t=8: 6,021 ops/s, s_p50=56.38ms, s_p99=103.93ms
+  - t=16: 11,580 ops/s, s_p50=59.56ms, s_p99=106.22ms
+  - t=32: 22,401 ops/s, s_p50=63.29ms, s_p99=135.42ms
+  - t=64: 38,666 ops/s, s_p50=76.01ms, s_p99=139.83ms
+  - t=96: 49,489 ops/s, s_p50=84.92ms, s_p99=142.63ms
+- [x] 104c: Tabulate and compare [26:03:12]
+  - EPaxos scales near-linearly with threads (leaderless: no bottleneck)
+  - w5%@t=96: 55.8K ops/s; w50%@t=96: 49.5K ops/s (~11% drop with more writes)
+  - Latency stays under 1.5× RTT at high thread counts (p99 ~140ms at t=96)
+  - Full results in `results/eval-5r5m3c-phase104-20260312/`
 
 **Status**: ✅ **DONE**
 
