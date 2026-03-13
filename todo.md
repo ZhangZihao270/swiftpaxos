@@ -7572,6 +7572,77 @@ allCmds + CL[] → instance N
   - Weak latency stable: w_p50 ≈ 0.2ms across all thread counts
   - Strong latency at low t: s_p50 ≈ 51ms (optimal, matches vanilla)
 
+  **Results (w5%) — EPaxos-HO (109g) vs EPaxos (107)**:
+  | threads | EHO tput | EP tput | EHO s_p50 | EP s_p50 | EHO s_p99 | EP s_p99 | EHO w_p50 | EHO w_p99 |
+  |---------|----------|---------|-----------|----------|-----------|----------|-----------|-----------|
+  | 1       | 1,772    | 863     | 51.17ms   | 51.69ms  | 56.57ms   | 53.03ms  | 0.13ms    | 0.58ms    |
+  | 2       | 3,443    | 1,694   | 51.29ms   | 51.64ms  | 55.01ms   | 103.13ms | 0.14ms    | 0.78ms    |
+  | 4       | 6,937    | 3,323   | 51.23ms   | 51.75ms  | 55.26ms   | 103.85ms | 0.15ms    | 1.29ms    |
+  | 8       | 13,758   | 6,570   | 51.04ms   | 51.50ms  | 55.34ms   | 103.65ms | 0.15ms    | 1.40ms    |
+  | 16      | 26,678   | 12,503  | 51.15ms   | 51.49ms  | 84.93ms   | 106.17ms | 0.17ms    | 2.06ms    |
+  | 32      | 38,979   | 23,956  | 69.88ms   | 51.66ms  | 138.98ms  | 108.32ms | 0.22ms    | 2.86ms    |
+  | 64      | 39,976   | 41,896  | 160.83ms  | 57.50ms  | 264.82ms  | 133.68ms | 0.24ms    | 4.57ms    |
+  | 96      | 40,505   | 47,946  | 227.68ms  | 73.03ms  | 414.73ms  | 323.20ms | 0.23ms    | 8.21ms    |
+
+  **Results (w50%) — EPaxos-HO (109g) vs EPaxos (107)**:
+  | threads | EHO tput | EP tput | EHO s_p50 | EP s_p50 | EHO s_p99 | EP s_p99 | EHO w_p50 | EHO w_p99 |
+  |---------|----------|---------|-----------|----------|-----------|----------|-----------|-----------|
+  | 1       | 1,809    | 861     | 51.13ms   | 51.68ms  | 54.48ms   | 53.19ms  | 0.13ms    | 0.60ms    |
+  | 2       | 3,498    | 1,711   | 51.31ms   | 51.69ms  | 55.20ms   | 102.56ms | 0.14ms    | 0.86ms    |
+  | 4       | 6,967    | 3,375   | 51.29ms   | 51.62ms  | 56.15ms   | 103.45ms | 0.16ms    | 1.31ms    |
+  | 8       | 13,659   | 6,562   | 51.05ms   | 51.47ms  | 57.38ms   | 103.26ms | 0.15ms    | 1.36ms    |
+  | 16      | 26,950   | 12,743  | 51.11ms   | 51.45ms  | 65.56ms   | 103.69ms | 0.17ms    | 2.03ms    |
+  | 32      | 39,940   | 23,876  | 64.37ms   | 51.83ms  | 132.99ms  | 106.15ms | 0.23ms    | 2.76ms    |
+  | 64      | 41,969   | 42,040  | 152.57ms  | 55.56ms  | 251.81ms  | 120.86ms | 0.24ms    | 3.62ms    |
+  | 96      | 40,897   | 46,890  | 223.41ms  | 94.27ms  | 410.08ms  | 152.55ms | 0.23ms    | 6.45ms    |
+
+  **Key observations**:
+  - **t≤16**: EPaxos-HO **2x throughput** (50% weak ops bypass PreAccept), s_p50 identical (~51ms)
+  - **t=32**: EPaxos-HO **1.6x throughput** (39.9K vs 23.9K), strong latency starts rising
+  - **t=64**: **Near parity** (42.0K vs 42.0K at w50%), gap <1% — **target achieved**
+  - **t=96**: EPaxos leads by ~15% (47K vs 41K) — EPaxos-HO strong path saturates
+  - **Weak latency**: Stable 0.13-0.24ms p50 across all thread counts (sub-RTT local reply)
+  - **Phase 109 improvement**: Peak shifted from 37K@t=32 → 42K@t=64 (+13.5%)
+
+**Status**: ✅ **DONE** [26:03:13]
+
+---
+
+### Phase 110: Exp 2.2 — EPaxos vs EPaxos-HO under Varying Conflict Rates
+
+**Goal**: Measure how conflict rate affects EPaxos and EPaxos-HO throughput/latency. Higher conflict → more slow-path (2-RT) in EPaxos. EPaxos-HO's weak ops should be unaffected by conflict rate (causal commits don't go through PreAccept).
+
+**Config**: 5r-5m-3c, t=32, writes=50%, weakRatio=50% (for EHO), reqs=3000, --startup-delay 25
+
+**Conflict rates**: 0% (default, random keys), 2%, 10%, 25%, 50%, 100%
+- Controlled via `conflicts` config field (0 = random keys from keySpace=1M)
+- `conflicts: N` → N% of commands access the same hot key → guaranteed conflicts
+
+**Tasks**:
+
+- [x] 110a: Run EPaxos at t=32, w50%, conflict=0,2,10,25,50,100 [26:03:13]
+- [x] 110b: Run EPaxos-HO at t=32, w50%, weakRatio=50%, conflict=0,2,10,25,50,100 [26:03:13]
+- [x] 110c: Tabulate and compare [26:03:13]
+  - **Results** (t=32, w50%):
+    | Conflict | EPaxos tput | EPaxos s_p50 | EHO tput | EHO s_p50 | EHO w_p50 | EHO/EP |
+    |----------|-------------|--------------|----------|-----------|-----------|--------|
+    | 0%       | 23,704      | 52ms         | 39,647   | 75ms      | 0.23ms    | 1.67x  |
+    | 2%       | 20,671      | 52ms         | 39,475   | 62ms      | 0.24ms    | 1.91x  |
+    | 10%      | 18,903      | 54ms         | 37,564   | 57ms      | 0.23ms    | 1.99x  |
+    | 25%      | 16,865      | 102ms        | 33,162   | 89ms      | 0.23ms    | 1.97x  |
+    | 50%      | 15,314      | 102ms        | 29,977   | 103ms     | 0.20ms    | 1.96x  |
+    | 100%     | 13,952      | 102ms        | 26,783   | 103ms     | 0.18ms    | 1.92x  |
+  - **Key findings**:
+    - EPaxos-HO **consistently ~2x throughput** at t=32 across all conflict rates
+    - EPaxos throughput drops 41% from 0→100% conflict (23.7K→14.0K)
+    - EPaxos-HO throughput drops 32% (39.6K→26.8K) — **more resilient**
+    - At ≥25% conflict, EPaxos s_p50 jumps to ~102ms (slow path dominates)
+    - EPaxos-HO s_p50 also rises but stays comparable to EPaxos
+    - **Weak latency completely unaffected**: w_p50 ≈ 0.2ms regardless of conflict
+    - Answer to key question: weak ops (conflict-immune, 50% of traffic) provide
+      a large throughput buffer; their overhead on the strong path is negligible
+      compared to EPaxos's slow-path cost at high conflict
+
 **Status**: ✅ **DONE** [26:03:13]
 
 ---
