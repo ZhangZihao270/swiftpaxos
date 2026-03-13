@@ -7202,16 +7202,138 @@ Requires client-side per-second throughput reporting (currently client only outp
   - **Trade-off**: EPaxos-HO sacrifices peak throughput for 300× lower weak-op latency
   - Lower peak likely due to: HybridLoop overhead, weak/strong classification, separate code paths
 
-**Results (w5%)**:
-| threads | EPaxos-HO tput | EPaxos tput | HO s_p50 | HO w_p50 | EPaxos s_p50 |
-|---------|----------------|-------------|----------|----------|--------------|
-| 1       | 1,733          | 864         | 51ms     | 0.14ms   | 52ms         |
-| 8       | 13,773         | 6,487       | 51ms     | 0.16ms   | 52ms         |
-| 32      | 35,465         | 24,043      | 90ms     | 0.22ms   | 52ms         |
-| 64      | 36,678         | 41,966      | 182ms    | 0.22ms   | 57ms         |
-| 96      | 36,001         | 55,810      | 273ms    | 0.22ms   | 74ms         |
+**EPaxos-HO Full Results (w5%)**:
+
+| Threads | Throughput | s_avg | s_p50 | s_p99 | w_avg | w_p50 | w_p99 |
+|--------:|-----------:|------:|------:|------:|------:|------:|------:|
+| 1 | 1,733 | 51.42ms | 51.21ms | 54.95ms | 0.17ms | 0.14ms | 0.73ms |
+| 2 | 3,496 | 51.68ms | 51.44ms | 55.13ms | 0.20ms | 0.15ms | 1.09ms |
+| 4 | 6,880 | 51.64ms | 51.34ms | 56.07ms | 0.24ms | 0.16ms | 1.42ms |
+| 8 | 13,773 | 51.47ms | 51.10ms | 56.98ms | 0.23ms | 0.16ms | 1.84ms |
+| 16 | 27,174 | 52.05ms | 51.38ms | 60.87ms | 0.28ms | 0.18ms | 2.01ms |
+| 32 | 35,465 | 81.63ms | 90.31ms | 136.90ms | 0.40ms | 0.22ms | 2.68ms |
+| 64 | 36,678 | 159.71ms | 181.83ms | 274.70ms | 0.47ms | 0.22ms | 4.67ms |
+| 96 | 36,001 | 245.65ms | 273.40ms | 437.05ms | 0.55ms | 0.22ms | 8.39ms |
+
+**EPaxos-HO Full Results (w50%)**:
+
+| Threads | Throughput | s_avg | s_p50 | s_p99 | w_avg | w_p50 | w_p99 |
+|--------:|-----------:|------:|------:|------:|------:|------:|------:|
+| 1 | 1,785 | 51.47ms | 51.29ms | 55.75ms | 0.17ms | 0.14ms | 0.87ms |
+| 2 | 3,498 | 51.62ms | 51.40ms | 55.18ms | 0.21ms | 0.15ms | 1.02ms |
+| 4 | 6,908 | 51.66ms | 51.36ms | 55.81ms | 0.23ms | 0.15ms | 1.59ms |
+| 8 | 13,739 | 51.47ms | 51.15ms | 55.99ms | 0.24ms | 0.16ms | 1.83ms |
+| 16 | 26,983 | 52.16ms | 51.32ms | 68.74ms | 0.26ms | 0.18ms | 1.88ms |
+| 32 | 35,684 | 81.02ms | 89.56ms | 137.30ms | 0.38ms | 0.22ms | 2.59ms |
+| 64 | 37,138 | 157.19ms | 180.60ms | 275.10ms | 0.46ms | 0.22ms | 5.10ms |
+| 96 | 37,004 | 236.95ms | 281.43ms | 443.21ms | 0.50ms | 0.21ms | 8.46ms |
+
+
+
+**Key findings**:
+- EPaxos-HO almost unaffected by write ratio (w5% ≈ w50% throughput)
+- Weak ops ultra-fast: w_p50 ≈ 0.15-0.22ms (local, no consensus)
+- Peak ~37K saturates at t=32; strong latency explodes beyond that
+- Vanilla EPaxos peaks higher (55.8K at t=96) but has no weak-op fast path
+- Trade-off: EPaxos-HO sacrifices 33% peak throughput for 300× lower weak-op latency
 
 **Status**: ✅ **DONE**
+
+---
+
+### Phase 106: Port Orca's EPaxos to SwiftPaxos with Shared Code Architecture
+
+**Goal**: Replace current `epaxos/` with Orca's EPaxos, sharing common code with `epaxos-ho/`. Current implementation preserved as `epaxos-swift/`.
+
+**Motivation**: Fair comparison requires both EPaxos and EPaxos-HO from the same Orca codebase. Also eliminate ~40% code duplication between the two packages.
+
+**Source**: `Orca/src/epaxos/` + `Orca/src/epaxosproto/`
+
+**Shared Code Architecture**:
+
+```
+epaxos/                              epaxos-ho/
+├── defs.go        (base messages)   ├── defs.go     (imports epaxos base + adds CL, CausalCommit, CommitShort)
+├── defsmarsh.go   (base serde)      ├── defsmarsh.go (serde for HO-only messages)
+├── common.go      (shared helpers)  ├── epaxos-ho.go (dual-path protocol logic)
+│   ├── Tarjan SCC algorithm         ├── exec.go     (dual executor: causal + strong)
+│   ├── Ballot management            └── client.go   (SupportsWeak=true)
+│   ├── Instance base struct
+│   ├── Status constants (NONE..EXECUTED)
+│   └── Marshal helpers (int32/cmd slice)
+├── epaxos.go      (vanilla logic)
+├── exec.go        (SCC-only executor)
+└── client.go      (SupportsWeak=false)
+```
+
+**What's shared** (epaxos/ exports, epaxos-ho/ imports):
+- **Message types**: Prepare, PreAccept, PreAcceptReply, PreAcceptOK, Accept, AcceptReply, TryPreAccept, TryPreAcceptReply (base fields, no CL)
+- **Status constants**: NONE, PREACCEPTED, PREACCEPTED_EQ, ACCEPTED, COMMITTED, EXECUTED
+- **Instance base struct**: Cmds, bal, vbal, Status, Seq, Deps, lb, Index, Lowlink
+- **Tarjan SCC algorithm**: findSCC, strongconnect, nodeArray sorting
+- **Ballot functions**: makeUniqueBallot, makeBallotLargerThan
+- **Marshal helpers**: marshalInt32Slice, unmarshalInt32Slice, marshalCommandSlice, putInt32, getInt32
+- **Cache pools**: PrepareCache, PreAcceptCache, AcceptCache, etc.
+
+**What's EPaxos-HO only** (stays in epaxos-ho/):
+- **Extra messages**: CausalCommit, CommitShort; all messages with CL[] field extensions
+- **Extra status**: CAUSAL_ACCEPTED, CAUSALLY_COMMITTED, STRONGLY_COMMITTED, DISCARDED, READY, WAITING, DONE
+- **Instance extensions**: CL[]int32, State int8
+- **Replica extensions**: causalCommitChan[], sessionConflicts, maxWriteInstancePerKey, associated locks
+- **Protocol functions**: startCausalCommit, handleCausalCommit, updateCausalConflicts/Attributes, updateStrongAttributes1/2
+- **Execution**: executeCausalCommand (direct execution with last-write-wins)
+
+**What's vanilla EPaxos only**:
+- **Replica fields**: transconf, IsLeader, batchWait, maxRecvBallot
+- **Simplified handlers**: single Commit type, single updateConflicts/updateAttributes
+- **Execution**: SCC-only path, transitive conflict optimization
+
+**Tasks**:
+
+- [x] 106a: Rename current `epaxos/` → `epaxos-swift/` (~50 LOC) [26:03:13]
+  - Copied `epaxos/` → `epaxos-swift/`, changed package to `epaxosswift`
+  - Updated `run.go` + `main.go`: import `epaxos-swift`, alias `epaxosswift`
+  - Removed old `epaxos/` directory (no longer imported)
+  - Build + all tests pass
+
+- [ ] 106b: Create `epaxos/defs.go` + `epaxos/defsmarsh.go` — shared base messages (~1,300 LOC)
+  - Port from Orca's `epaxosproto/`
+  - Export base message types + status constants + marshal helpers + cache pools
+  - These will be imported by both `epaxos/epaxos.go` and `epaxos-ho/`
+
+- [ ] 106c: Create `epaxos/common.go` — shared algorithm code (~300 LOC)
+  - Export Instance base struct, LeaderBookkeeping base struct
+  - Export Tarjan SCC: FindSCC, Strongconnect (or as methods on exported Exec struct)
+  - Export ballot management: MakeUniqueBallot, MakeBallotLargerThan
+  - Export instanceId struct
+
+- [ ] 106d: Create `epaxos/epaxos.go` — vanilla protocol logic (~1,900 LOC)
+  - Port from Orca's `epaxos/epaxos.go`
+  - Uses shared types from defs.go and common.go
+  - Single-path: all ops → PreAccept → Accept/Commit → SCC execute
+
+- [ ] 106e: Create `epaxos/exec.go` + `epaxos/client.go` (~220 LOC)
+  - exec.go: SCC-only executor (single consistency path)
+  - client.go: `SupportsWeak()=false`, delegates weak→strong
+
+- [ ] 106f: Refactor `epaxos-ho/` to import shared code from `epaxos/` (~-500 LOC)
+  - Import base message types, status constants, marshal helpers from `epaxos/`
+  - Import Instance base struct (embed + extend with CL, State)
+  - Import Tarjan SCC algorithm
+  - Remove duplicated code from epaxos-ho/defs.go and epaxos-ho/defsmarsh.go
+  - **Critical**: Verify all epaxos-ho tests still pass after refactor
+
+- [ ] 106g: Register in `run.go` + `main.go`, build + test (~20 LOC)
+  - `case "epaxos"` → new Orca-ported version
+  - `go build && go test ./epaxos/ ./epaxos-ho/ ./epaxos-swift/`
+  - Spot test: epaxos t=16, w5%, verify throughput ≈ Phase 104
+
+**Estimated**:
+- New code: ~2,500 LOC (epaxos/ package)
+- Removed duplication: ~500 LOC (from epaxos-ho/)
+- Net change: ~2,000 LOC
+
+**Status**: ⬜ **TODO**
 
 ---
 

@@ -16,8 +16,8 @@ import (
 	curpht "github.com/imdea-software/swiftpaxos/curp-ht"
 	curpho "github.com/imdea-software/swiftpaxos/curp-ho"
 	"github.com/imdea-software/swiftpaxos/dlog"
-	"github.com/imdea-software/swiftpaxos/epaxos"
 	epaxosho "github.com/imdea-software/swiftpaxos/epaxos-ho"
+	epaxosswift "github.com/imdea-software/swiftpaxos/epaxos-swift"
 	"github.com/imdea-software/swiftpaxos/master"
 	"github.com/imdea-software/swiftpaxos/raft"
 	raftht "github.com/imdea-software/swiftpaxos/raft-ht"
@@ -286,7 +286,7 @@ func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads i
 		hbc.HybridLoopWithOptions(printResults)
 		return hbc.GetMetrics(), hbc.GetDuration()
 	} else if p == "epaxos" {
-		epaxosCl := epaxos.NewClient(b)
+		epaxosCl := epaxosswift.NewClient(b)
 		hbc := client.NewHybridBufferClient(b, 0, 0, c.ReplyTimeout) // weakRatio=0: all strong
 		hbc.SetHybridClient(epaxosCl)
 		printResults := (numThreads == 1)

@@ -18,8 +18,8 @@ import (
 	curpht "github.com/imdea-software/swiftpaxos/curp-ht"
 	curpho "github.com/imdea-software/swiftpaxos/curp-ho"
 	"github.com/imdea-software/swiftpaxos/dlog"
-	"github.com/imdea-software/swiftpaxos/epaxos"
 	epaxosho "github.com/imdea-software/swiftpaxos/epaxos-ho"
+	epaxosswift "github.com/imdea-software/swiftpaxos/epaxos-swift"
 	"github.com/imdea-software/swiftpaxos/fastpaxos"
 	"github.com/imdea-software/swiftpaxos/n2paxos"
 	"github.com/imdea-software/swiftpaxos/paxos"
@@ -99,7 +99,7 @@ func runReplica(c *config.Config, logger *dlog.Logger) {
 		rpc.Register(rep)
 	case "epaxos":
 		log.Println("Starting EPaxos replica...")
-		rep := epaxos.New(c.Alias, replicaId, nodeList, !c.Noop, false, false, 0, false, f, c, logger)
+		rep := epaxosswift.New(c.Alias, replicaId, nodeList, !c.Noop, false, false, 0, false, f, c, logger)
 		rpc.Register(rep)
 	case "epaxosho":
 		log.Println("Starting EPaxos-HO replica...")

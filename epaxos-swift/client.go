@@ -1,4 +1,4 @@
-package epaxos
+package epaxosswift
 
 import (
 	"github.com/imdea-software/swiftpaxos/client"
