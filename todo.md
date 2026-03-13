@@ -7659,8 +7659,8 @@ allCmds + CL[] → instance N
 
 **Status**: ✅ **DONE** [26:03:13]
 
-**⚠️ NOTE**: Phase 110 results for zipfSkew=0.5, 0.9, 0.99 are INVALID — all were
-clamped to 1.01 due to the Zipf bug found in Phase 110.1a. See Phase 110.1.
+**⚠️ NOTE**: Phase 110 results for zipfSkew=0.5, 0.9 are INVALID — all were
+clamped to 1.01 due to the Zipf bug found in Phase 110.1a. Corrected results in Phase 110.1e.
 
 ---
 
@@ -7688,20 +7688,48 @@ clamped to 1.01 due to the Zipf bug found in Phase 110.1a. See Phase 110.1.
   - `go build` succeeds, `go test ./client/ -v -run Zipf` all 10 pass
   - `go test ./...` full regression — all packages pass
 
-- [ ] 110.1d: Re-run Exp 2.2 — EPaxos + EPaxos-HO under Zipf skew
+- [x] 110.1d: Re-run Exp 2.2 — EPaxos + EPaxos-HO under Zipf skew — **DONE**
   - Config: 5r-5m-3c, t=32, w50%, weakRatio=50%, keySpace=1M
   - Skew values: 0, 0.25, 0.5, 0.75, 0.99, 1.2, 1.5, 2.0
-  - Run EPaxos for all skew values
-  - Run EPaxos-HO for all skew values
-  - --startup-delay 25 between runs
+  - Results in `results/eval-5r5m3c-phase110.1d-zipf-20260313/`
 
-- [ ] 110.1e: Tabulate and compare
-  - Key question: is the transition from fast→slow path gradual (as expected) or still abrupt?
-  - Expected: s=0.5 should be MUCH closer to s=0 than Phase 110 showed
-  - Compare with Phase 110 invalid results to confirm the bug impact
-  - Plot: skew vs throughput, skew vs s_p50
+- [x] 110.1e: Tabulate and compare — **DONE**
 
-**Status**: 🔶 **IN PROGRESS** (110.1a-c done, 110.1d-e remaining)
+#### Phase 110.1e Results: Fixed Zipf vs Old (Buggy) Comparison
+
+**EPaxos (vanilla) — throughput (ops/sec)**
+
+| Zipf Skew | Phase 110 (buggy) | Phase 110.1d (fixed) | Δ |
+|-----------|-------------------|----------------------|---|
+| 0         | 24,168            | 23,607               | ~same (no Zipf) |
+| 0.25      | —                 | 23,984               | NEW |
+| 0.5       | 15,667 (=s1.01!)  | **23,461**           | **+50%** (was clamped) |
+| 0.75      | —                 | 19,366               | NEW |
+| 0.9/0.99  | 15,676 (=s1.01!)  | **15,670**           | ~same (s≈1 similar) |
+| 1.2       | 14,513            | 14,590               | ~same |
+| 1.5       | 14,102            | 14,109               | ~same |
+| 2.0       | 14,014            | 14,002               | ~same |
+
+**EPaxos-HO — throughput (ops/sec)**
+
+| Zipf Skew | Phase 110 (buggy) | Phase 110.1d (fixed) | Δ |
+|-----------|-------------------|----------------------|---|
+| 0         | 39,572            | 38,655               | ~same (no Zipf) |
+| 0.25      | —                 | 38,705               | NEW |
+| 0.5       | 30,924 (=s1.01!)  | **40,155**           | **+30%** (was clamped) |
+| 0.75      | —                 | 39,725               | NEW |
+| 0.9/0.99  | 31,245 (=s1.01!)  | **31,683**           | ~same (s≈1 similar) |
+| 1.2       | 28,425            | 28,687               | ~same |
+| 1.5       | 27,389            | 27,367               | ~same |
+| 2.0       | 27,048            | 27,283               | ~same |
+
+**Key findings**:
+1. **Bug confirmed**: s=0.5 was clamped to 1.01 in Phase 110, showing ~15.7K (EPaxos) instead of the correct ~23.5K — a **50% undercount**. EPaxos-HO similarly showed 31K instead of 40K.
+2. **Gradual transition confirmed**: With the fix, throughput degrades smoothly: 23.6K → 24.0K → 23.5K → 19.4K → 15.7K → 14.6K → 14.1K → 14.0K for EPaxos. The "cliff" between s=0 and s=0.5 in Phase 110 was an artifact.
+3. **EPaxos-HO advantage persists across all skews**: 1.6x at s=0, 1.7x at s=0.5, 2.0x at s=0.99, 1.95x at s=2.0.
+4. **s > 1 results unchanged**: Confirms the fix only affects s ≤ 1 (as expected).
+
+**Status**: ✅ **DONE**
 
 ---
 
