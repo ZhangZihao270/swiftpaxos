@@ -23,9 +23,6 @@ func TestConstants(t *testing.T) {
 	if FALSE != 0 {
 		t.Errorf("FALSE=%d, want 0", FALSE)
 	}
-	if NO_CAUSAL_CHANNEL != 10 {
-		t.Errorf("NO_CAUSAL_CHANNEL=%d, want 10", NO_CAUSAL_CHANNEL)
-	}
 }
 
 func TestInstanceZeroValue(t *testing.T) {
@@ -209,39 +206,27 @@ func TestClockChannelVarsExist(t *testing.T) {
 // All handler methods are tested separately with properly initialized replicas.
 // See individual Test* functions for each handler.
 
-// TestCausalCommitChannelPolling verifies that the non-blocking causal
-// commit channel polling in run() processes messages correctly.
-func TestCausalCommitChannelPolling(t *testing.T) {
-	// Simulate causal commit channel behavior
-	nChannels := 3
-	channels := make([]chan fastrpc.Serializable, nChannels)
-	for i := range channels {
-		channels[i] = make(chan fastrpc.Serializable, 1)
-	}
+// TestCausalCommitChannel verifies that the single causal commit
+// channel correctly receives and delivers messages.
+func TestCausalCommitChannel(t *testing.T) {
+	ch := make(chan fastrpc.Serializable, 1)
 
-	// Send a CausalCommit to channel 1
+	// Send a CausalCommit
 	msg := &CausalCommit{LeaderId: 42, Replica: 1, Instance: 7}
-	channels[1] <- msg
+	ch <- msg
 
-	// Poll all channels non-blocking (mirrors run() logic)
-	var received []*CausalCommit
-	for _, ch := range channels {
-		select {
-		case s := <-ch:
-			commit := s.(*CausalCommit)
-			received = append(received, commit)
-		default:
+	// Receive from single channel (mirrors run() select case)
+	select {
+	case s := <-ch:
+		commit := s.(*CausalCommit)
+		if commit.LeaderId != 42 {
+			t.Errorf("LeaderId=%d, want 42", commit.LeaderId)
 		}
-	}
-
-	if len(received) != 1 {
-		t.Fatalf("expected 1 message, got %d", len(received))
-	}
-	if received[0].LeaderId != 42 {
-		t.Errorf("LeaderId=%d, want 42", received[0].LeaderId)
-	}
-	if received[0].Instance != 7 {
-		t.Errorf("Instance=%d, want 7", received[0].Instance)
+		if commit.Instance != 7 {
+			t.Errorf("Instance=%d, want 7", commit.Instance)
+		}
+	default:
+		t.Fatal("expected message on channel, got nothing")
 	}
 }
 
@@ -274,7 +259,7 @@ func newTestReplica(n int) *Replica {
 		maxWriteSeqPerKey:        make(map[state.Key]int32),
 		maxWriteSeqPerKeyMu:      new(sync.RWMutex),
 		clientMutex:              new(sync.Mutex),
-		causalCommitRPC:          make([]uint8, n*NO_CAUSAL_CHANNEL),
+		causalCommitChan:         make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE),
 	}
 	for i := 0; i < n; i++ {
 		r.InstanceSpace[i] = make([]*Instance, 1024)

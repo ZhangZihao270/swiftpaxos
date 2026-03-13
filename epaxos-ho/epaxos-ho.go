@@ -2,7 +2,6 @@ package epaxosho
 
 import (
 	"encoding/binary"
-	"math/rand"
 	"sync"
 	"time"
 
@@ -28,9 +27,6 @@ const HT_INIT_SIZE = 11000
 const DO_CHECKPOINTING = true
 const CHECKPOINT_PERIOD = 10000
 
-// NO_CAUSAL_CHANNEL is the number of causal commit channels per replica.
-// Multiple channels avoid serialization bottlenecks for causal commits.
-const NO_CAUSAL_CHANNEL = 10
 
 var cpMarker []state.Command
 var cpcounter = 0
@@ -50,8 +46,8 @@ type Replica struct {
 	acceptReplyChan       chan fastrpc.Serializable
 	tryPreAcceptChan      chan fastrpc.Serializable
 	tryPreAcceptReplyChan chan fastrpc.Serializable
-	// Per-replica causal commit channels (N * NO_CAUSAL_CHANNEL channels)
-	causalCommitChan []chan fastrpc.Serializable
+	// Causal commit channel
+	causalCommitChan chan fastrpc.Serializable
 
 	// RPC type identifiers
 	prepareRPC            uint8
@@ -65,7 +61,7 @@ type Replica struct {
 	commitShortRPC        uint8
 	tryPreAcceptRPC       uint8
 	tryPreAcceptReplyRPC  uint8
-	causalCommitRPC       []uint8
+	causalCommitRPC       uint8
 
 	// Instance management
 	InstanceSpace [][]*Instance // the space of all instances (used and not yet used)
@@ -170,9 +166,7 @@ func New(alias string, id int, peerAddrList []string, exec, beacon, durable bool
 		acceptReplyChan:       make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE*2),
 		tryPreAcceptChan:      make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE),
 		tryPreAcceptReplyChan: make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE),
-		causalCommitChan:      make([]chan fastrpc.Serializable, len(peerAddrList)*NO_CAUSAL_CHANNEL),
-
-		causalCommitRPC: make([]uint8, len(peerAddrList)*NO_CAUSAL_CHANNEL),
+		causalCommitChan: make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE),
 
 		InstanceSpace: make([][]*Instance, len(peerAddrList)),
 		crtInstance:   make([]int32, len(peerAddrList)),
@@ -218,10 +212,6 @@ func New(alias string, id int, peerAddrList []string, exec, beacon, durable bool
 		r.sessionConflicts[i] = make(map[int32]int32, 10)
 	}
 
-	for i := 0; i < r.N*NO_CAUSAL_CHANNEL; i++ {
-		r.causalCommitChan[i] = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
-	}
-
 	// Register RPCs
 	r.prepareRPC = r.RPC.Register(new(Prepare), r.prepareChan)
 	r.prepareReplyRPC = r.RPC.Register(new(PrepareReply), r.prepareReplyChan)
@@ -230,9 +220,7 @@ func New(alias string, id int, peerAddrList []string, exec, beacon, durable bool
 	r.preAcceptOKRPC = r.RPC.Register(new(PreAcceptOK), r.preAcceptOKChan)
 	r.acceptRPC = r.RPC.Register(new(Accept), r.acceptChan)
 	r.acceptReplyRPC = r.RPC.Register(new(AcceptReply), r.acceptReplyChan)
-	for i := 0; i < r.N*NO_CAUSAL_CHANNEL; i++ {
-		r.causalCommitRPC[i] = r.RPC.Register(new(CausalCommit), r.causalCommitChan[i])
-	}
+	r.causalCommitRPC = r.RPC.Register(new(CausalCommit), r.causalCommitChan)
 	r.commitRPC = r.RPC.Register(new(Commit), r.commitChan)
 	r.commitShortRPC = r.RPC.Register(new(CommitShort), r.commitShortChan)
 	r.tryPreAcceptRPC = r.RPC.Register(new(TryPreAccept), r.tryPreAcceptChan)
@@ -358,18 +346,12 @@ func (r *Replica) run() {
 	go r.WaitForClientConnections()
 
 	for !r.Shutdown {
-		// Poll causal commit channels (non-blocking) before the main select.
-		// Multiple channels per replica avoid serialization bottlenecks.
-		for _, ch := range r.causalCommitChan {
-			select {
-			case causalCommitS := <-ch:
-				commit := causalCommitS.(*CausalCommit)
-				r.handleCausalCommit(commit)
-			default:
-			}
-		}
 
 		select {
+		case causalCommitS := <-r.causalCommitChan:
+			commit := causalCommitS.(*CausalCommit)
+			r.handleCausalCommit(commit)
+
 		case propose := <-onOffProposeChan:
 			r.handlePropose(propose)
 			if r.BatchingEnabled() {
@@ -1397,7 +1379,7 @@ func (r *Replica) bcastCausalCommit(replicaId int32, instance int32, cmds []stat
 		if peer == r.Id {
 			continue
 		}
-		r.SendMsg(peer, r.causalCommitRPC[rand.Intn(r.N*NO_CAUSAL_CHANNEL)], args)
+		r.SendMsg(peer, r.causalCommitRPC, args)
 	}
 }
 

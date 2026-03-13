@@ -7443,13 +7443,14 @@ epaxos/                              epaxos-ho/
   - Updated `run.go` to pass `batchWait=0` (disabled by default, same as vanilla EPaxos)
   - Build + all tests pass
 
-- [ ] 108b: Merge causal commit channels — replace N×10 channels with 1
-  - Replace `causalCommitChan []*chan fastrpc.Serializable` (50 channels) with single `causalCommitChan chan *CausalCommit`
-  - Remove busy-polling loop in `run()` (the `for _, ch := range r.causalCommitChan` block)
-  - Add single `case commit := <-r.causalCommitChan:` to main select
-  - Update `bcastCausalCommit()`: send to single channel instead of random channel selection
-  - Update RPC registration: 1 RPC instead of N×10
-  - Build + unit test
+- [x] 108b: Merge causal commit channels — replace N×10 channels with 1 [26:03:13]
+  - Replaced `causalCommitChan []chan` (50 channels) with single `chan fastrpc.Serializable`
+  - Replaced `causalCommitRPC []uint8` with single `uint8`
+  - Removed busy-polling loop in `run()`, added `case <-r.causalCommitChan:` to main select
+  - Updated `bcastCausalCommit()`: use single RPC ID instead of `rand.Intn(N*10)`
+  - Removed unused `NO_CAUSAL_CHANNEL` constant and `math/rand` import
+  - 1 RPC registration instead of N×10; updated test helper and channel polling test
+  - Build + all tests pass
 
 - [ ] 108c: Reduce lock contention — batch lock acquisitions
   - In `updateCausalConflicts`: acquire conflictMutex once for entire command batch, not per-command
