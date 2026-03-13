@@ -7303,11 +7303,12 @@ epaxos/                              epaxos-ho/
   - `defs_test.go`: 15 tests — round-trip for all 10 msg types, cache, BinarySize, status constants
   - All tests pass, full build OK
 
-- [ ] 106c: Create `epaxos/common.go` — shared algorithm code (~300 LOC)
-  - Export Instance base struct, LeaderBookkeeping base struct
-  - Export Tarjan SCC: FindSCC, Strongconnect (or as methods on exported Exec struct)
-  - Export ballot management: MakeUniqueBallot, MakeBallotLargerThan
-  - Export instanceId struct
+- [x] 106c: Create `epaxos/common.go` — shared types, constants, ballot management (~120 LOC)
+  - Exported types: Instance, InstanceId, LeaderBookkeeping, InstPair, NodeArray
+  - Exported functions: NewInstance, IsInitialBallot, MakeBallot, SortInstances
+  - Constants: MAX_INSTANCE, TRUE/FALSE, COMMIT_GRACE_PERIOD, etc.
+  - `common_test.go`: 16 tests — ballot congruence, sort ordering, constructors, constants
+  - All tests pass, full build OK
 
 - [ ] 106d: Create `epaxos/epaxos.go` — vanilla protocol logic (~1,900 LOC)
   - Port from Orca's `epaxos/epaxos.go`
