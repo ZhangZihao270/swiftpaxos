@@ -7452,12 +7452,16 @@ epaxos/                              epaxos-ho/
   - 1 RPC registration instead of N×10; updated test helper and channel polling test
   - Build + all tests pass
 
-- [ ] 108c: Reduce lock contention — batch lock acquisitions
-  - In `updateCausalConflicts`: acquire conflictMutex once for entire command batch, not per-command
-  - In `updateStrongAttributes1`: acquire conflictMutex.RLock once, iterate all replicas × commands, then release
-  - Merge maxSeqPerKeyMu into conflictMutex (same critical section)
-  - Consider: sessionConflictsMu and maxWriteInstancePerKeyMu — can they share a lock?
-  - Build + unit test
+- [x] 108c: Reduce lock contention — batch lock acquisitions [26:03:13]
+  - Batched all 6 lock-acquiring functions: acquire lock once, iterate all commands, release
+  - `updateCausalConflicts`: 3N→3 lock acquisitions per call
+  - `updateStrongConflicts`: 2N→2 lock acquisitions per call
+  - `updateStrongSessionConflict`: N→1 lock acquisition per call
+  - `updateCausalAttributes`: 3 RLock sections batched (session, writeInstance, maxSeq)
+  - `updateStrongAttributes1`: 3 RLock sections batched (conflict, session, maxSeq)
+  - `updateStrongAttributes2`: 2 RLock sections batched (conflict, maxSeq)
+  - Kept separate mutexes (merging would widen critical sections unnecessarily)
+  - Build + all tests pass
 
 - [ ] 108d: Spot test — EPaxos-HO vs EPaxos at t=64, w50%
   - Config: 5r-5m-3c, writes=50%, weakRatio=50%, reqs=3000, --startup-delay 25

@@ -1275,29 +1275,31 @@ func (r *Replica) clearHashtables() {
 // For each command, it updates the per-key conflict map and maxSeqPerKey.
 // If includeSession is true (leader path), it also updates session conflict maps.
 func (r *Replica) updateCausalConflicts(cmds []state.Command, replicaId int32, instance int32, seq int32, includeSession bool) {
+	r.conflictMutex.Lock()
 	for i := 0; i < len(cmds); i++ {
-		r.conflictMutex.Lock()
 		if d, present := r.conflicts[replicaId][cmds[i].K]; !present || d < instance {
 			r.conflicts[replicaId][cmds[i].K] = instance
 		}
-		r.conflictMutex.Unlock()
+	}
+	r.conflictMutex.Unlock()
 
-		r.maxSeqPerKeyMu.Lock()
+	r.maxSeqPerKeyMu.Lock()
+	for i := 0; i < len(cmds); i++ {
 		if s, present := r.maxSeqPerKey[cmds[i].K]; !present || s < seq {
 			r.maxSeqPerKey[cmds[i].K] = seq
 		}
-		r.maxSeqPerKeyMu.Unlock()
 	}
+	r.maxSeqPerKeyMu.Unlock()
 
 	if includeSession {
+		r.sessionConflictsMu.Lock()
 		for i := 0; i < len(cmds); i++ {
 			sid := cmds[i].Sid
-			r.sessionConflictsMu.Lock()
 			if d, present := r.sessionConflicts[replicaId][sid]; !present || d < instance {
 				r.sessionConflicts[replicaId][sid] = instance
 			}
-			r.sessionConflictsMu.Unlock()
 		}
+		r.sessionConflictsMu.Unlock()
 	}
 }
 
@@ -1306,11 +1308,9 @@ func (r *Replica) updateCausalConflicts(cmds []state.Command, replicaId int32, i
 // (3) max sequence per key for causal ordering.
 func (r *Replica) updateCausalAttributes(cmds []state.Command, seq int32, deps []int32, cl []int32, replicaId int32, instance int32) (int32, []int32, []int32) {
 	// Track session dependency: find the latest committed command from the same session
+	r.sessionConflictsMu.RLock()
 	for i := 0; i < len(cmds); i++ {
-		r.sessionConflictsMu.RLock()
 		d, present := r.sessionConflicts[replicaId][cmds[i].Sid]
-		r.sessionConflictsMu.RUnlock()
-
 		if present && d > deps[replicaId] {
 			deps[replicaId] = d
 			if r.InstanceSpace[replicaId][d] != nil && len(r.InstanceSpace[replicaId][d].Cmds) > 0 {
@@ -1322,13 +1322,13 @@ func (r *Replica) updateCausalAttributes(cmds []state.Command, seq int32, deps [
 			break
 		}
 	}
+	r.sessionConflictsMu.RUnlock()
 
 	// Track read-from dependency: GET commands depend on the latest write to that key
+	r.maxWriteInstancePerKeyMu.RLock()
 	for i := 0; i < len(cmds); i++ {
 		if cmds[i].Op == state.GET {
-			r.maxWriteInstancePerKeyMu.RLock()
 			d, present := r.maxWriteInstancePerKey[cmds[i].K]
-			r.maxWriteInstancePerKeyMu.RUnlock()
 			if present && d.instance > deps[d.replica] {
 				deps[d.replica] = d.instance
 				if r.InstanceSpace[d.replica][d.instance] != nil && len(r.InstanceSpace[d.replica][d.instance].Cmds) > 0 {
@@ -1341,16 +1341,17 @@ func (r *Replica) updateCausalAttributes(cmds []state.Command, seq int32, deps [
 			}
 		}
 	}
+	r.maxWriteInstancePerKeyMu.RUnlock()
 
 	// Update seq from maxSeqPerKey for all affected keys
+	r.maxSeqPerKeyMu.RLock()
 	for i := 0; i < len(cmds); i++ {
-		r.maxSeqPerKeyMu.RLock()
 		s, present := r.maxSeqPerKey[cmds[i].K]
-		r.maxSeqPerKeyMu.RUnlock()
 		if present && seq <= s {
 			seq = s + 1
 		}
 	}
+	r.maxSeqPerKeyMu.RUnlock()
 
 	return seq, deps, cl
 }
@@ -1406,31 +1407,33 @@ func (r *Replica) replyTryPreAccept(replicaId int32, reply *TryPreAcceptReply) {
 // Unlike causal conflicts, this does NOT update session conflicts — strong ops
 // use key-based conflict tracking only.
 func (r *Replica) updateStrongConflicts(cmds []state.Command, replicaId int32, instance int32, seq int32) {
+	r.conflictMutex.Lock()
 	for i := 0; i < len(cmds); i++ {
-		r.conflictMutex.Lock()
 		if d, present := r.conflicts[replicaId][cmds[i].K]; !present || d < instance {
 			r.conflicts[replicaId][cmds[i].K] = instance
 		}
-		r.conflictMutex.Unlock()
+	}
+	r.conflictMutex.Unlock()
 
-		r.maxSeqPerKeyMu.Lock()
+	r.maxSeqPerKeyMu.Lock()
+	for i := 0; i < len(cmds); i++ {
 		if s, present := r.maxSeqPerKey[cmds[i].K]; !present || s < seq {
 			r.maxSeqPerKey[cmds[i].K] = seq
 		}
-		r.maxSeqPerKeyMu.Unlock()
 	}
+	r.maxSeqPerKeyMu.Unlock()
 }
 
 // updateStrongSessionConflict updates session conflict tracking for strong commands.
 func (r *Replica) updateStrongSessionConflict(cmds []state.Command, replicaId int32, instance int32) {
+	r.sessionConflictsMu.Lock()
 	for i := 0; i < len(cmds); i++ {
 		sid := cmds[i].Sid
-		r.sessionConflictsMu.Lock()
 		if d, present := r.sessionConflicts[replicaId][sid]; !present || d < instance {
 			r.sessionConflicts[replicaId][sid] = instance
 		}
-		r.sessionConflictsMu.Unlock()
 	}
+	r.sessionConflictsMu.Unlock()
 }
 
 // updateStrongAttributes1 computes initial dependencies for strong commands.
@@ -1440,15 +1443,13 @@ func (r *Replica) updateStrongAttributes1(cmds []state.Command, seq int32, deps 
 	changed := false
 
 	// Check per-key conflicts across all replicas
+	r.conflictMutex.RLock()
 	for q := 0; q < r.N; q++ {
 		if r.Id != replicaId && int32(q) == replicaId {
 			continue
 		}
 		for i := 0; i < len(cmds); i++ {
-			r.conflictMutex.RLock()
 			d, present := r.conflicts[q][cmds[i].K]
-			r.conflictMutex.RUnlock()
-
 			if present && d > deps[q] {
 				deps[q] = d
 				if r.InstanceSpace[q][d] != nil && len(r.InstanceSpace[q][d].Cmds) > i {
@@ -1462,13 +1463,12 @@ func (r *Replica) updateStrongAttributes1(cmds []state.Command, seq int32, deps 
 			}
 		}
 	}
+	r.conflictMutex.RUnlock()
 
 	// Track session dependency
+	r.sessionConflictsMu.RLock()
 	for i := 0; i < len(cmds); i++ {
-		r.sessionConflictsMu.RLock()
 		d, present := r.sessionConflicts[replicaId][cmds[i].Sid]
-		r.sessionConflictsMu.RUnlock()
-
 		if present && d > deps[replicaId] {
 			deps[replicaId] = d
 			if r.InstanceSpace[replicaId][d] != nil && len(r.InstanceSpace[replicaId][d].Cmds) > 0 {
@@ -1481,17 +1481,18 @@ func (r *Replica) updateStrongAttributes1(cmds []state.Command, seq int32, deps 
 			break
 		}
 	}
+	r.sessionConflictsMu.RUnlock()
 
 	// Update seq from maxSeqPerKey for all affected keys
+	r.maxSeqPerKeyMu.RLock()
 	for i := 0; i < len(cmds); i++ {
-		r.maxSeqPerKeyMu.RLock()
 		s, present := r.maxSeqPerKey[cmds[i].K]
-		r.maxSeqPerKeyMu.RUnlock()
 		if present && seq <= s {
 			changed = true
 			seq = s + 1
 		}
 	}
+	r.maxSeqPerKeyMu.RUnlock()
 
 	return seq, deps, cl, changed
 }
@@ -1501,15 +1502,13 @@ func (r *Replica) updateStrongAttributes1(cmds []state.Command, seq int32, deps 
 func (r *Replica) updateStrongAttributes2(cmds []state.Command, seq int32, deps []int32, cl []int32, replicaId int32, instance int32) (int32, []int32, []int32, bool) {
 	changed := false
 
+	r.conflictMutex.RLock()
 	for q := 0; q < r.N; q++ {
 		if r.Id != replicaId && int32(q) == replicaId {
 			continue
 		}
 		for i := 0; i < len(cmds); i++ {
-			r.conflictMutex.RLock()
 			d, present := r.conflicts[q][cmds[i].K]
-			r.conflictMutex.RUnlock()
-
 			if present && d > deps[q] {
 				deps[q] = d
 				if r.InstanceSpace[q][d] != nil && len(r.InstanceSpace[q][d].Cmds) > i {
@@ -1523,16 +1522,17 @@ func (r *Replica) updateStrongAttributes2(cmds []state.Command, seq int32, deps 
 			}
 		}
 	}
+	r.conflictMutex.RUnlock()
 
+	r.maxSeqPerKeyMu.RLock()
 	for i := 0; i < len(cmds); i++ {
-		r.maxSeqPerKeyMu.RLock()
 		s, present := r.maxSeqPerKey[cmds[i].K]
-		r.maxSeqPerKeyMu.RUnlock()
 		if present && seq <= s {
 			changed = true
 			seq = s + 1
 		}
 	}
+	r.maxSeqPerKeyMu.RUnlock()
 
 	return seq, deps, cl, changed
 }

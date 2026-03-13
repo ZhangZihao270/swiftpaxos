@@ -3487,3 +3487,86 @@ func TestNewWithBatchWait(t *testing.T) {
 		t.Error("batchWait=10 should enable batching")
 	}
 }
+
+func TestUpdateCausalConflicts_BatchedLocking(t *testing.T) {
+	r := newTestReplica(3)
+	cmds := []state.Command{
+		{Op: state.PUT, K: 1, V: state.NIL(), CL: state.CAUSAL, Sid: 10},
+		{Op: state.PUT, K: 2, V: state.NIL(), CL: state.CAUSAL, Sid: 10},
+		{Op: state.PUT, K: 3, V: state.NIL(), CL: state.CAUSAL, Sid: 20},
+	}
+
+	r.updateCausalConflicts(cmds, 0, 5, 10, true)
+
+	// Verify all keys updated in conflicts map
+	r.conflictMutex.RLock()
+	for _, cmd := range cmds {
+		if r.conflicts[0][cmd.K] != 5 {
+			t.Errorf("conflicts[0][%d]=%d, want 5", cmd.K, r.conflicts[0][cmd.K])
+		}
+	}
+	r.conflictMutex.RUnlock()
+
+	// Verify maxSeqPerKey updated
+	r.maxSeqPerKeyMu.RLock()
+	for _, cmd := range cmds {
+		if r.maxSeqPerKey[cmd.K] != 10 {
+			t.Errorf("maxSeqPerKey[%d]=%d, want 10", cmd.K, r.maxSeqPerKey[cmd.K])
+		}
+	}
+	r.maxSeqPerKeyMu.RUnlock()
+
+	// Verify session conflicts updated (includeSession=true)
+	r.sessionConflictsMu.RLock()
+	if r.sessionConflicts[0][10] != 5 {
+		t.Errorf("sessionConflicts[0][10]=%d, want 5", r.sessionConflicts[0][10])
+	}
+	if r.sessionConflicts[0][20] != 5 {
+		t.Errorf("sessionConflicts[0][20]=%d, want 5", r.sessionConflicts[0][20])
+	}
+	r.sessionConflictsMu.RUnlock()
+}
+
+func TestUpdateStrongConflicts_BatchedLocking(t *testing.T) {
+	r := newTestReplica(3)
+	cmds := []state.Command{
+		{Op: state.PUT, K: 10, V: state.NIL()},
+		{Op: state.PUT, K: 20, V: state.NIL()},
+	}
+
+	r.updateStrongConflicts(cmds, 1, 7, 15)
+
+	r.conflictMutex.RLock()
+	if r.conflicts[1][10] != 7 {
+		t.Errorf("conflicts[1][10]=%d, want 7", r.conflicts[1][10])
+	}
+	if r.conflicts[1][20] != 7 {
+		t.Errorf("conflicts[1][20]=%d, want 7", r.conflicts[1][20])
+	}
+	r.conflictMutex.RUnlock()
+
+	r.maxSeqPerKeyMu.RLock()
+	if r.maxSeqPerKey[10] != 15 {
+		t.Errorf("maxSeqPerKey[10]=%d, want 15", r.maxSeqPerKey[10])
+	}
+	r.maxSeqPerKeyMu.RUnlock()
+}
+
+func TestUpdateStrongSessionConflict_BatchedLocking(t *testing.T) {
+	r := newTestReplica(3)
+	cmds := []state.Command{
+		{Op: state.PUT, K: 1, V: state.NIL(), Sid: 100},
+		{Op: state.PUT, K: 2, V: state.NIL(), Sid: 200},
+	}
+
+	r.updateStrongSessionConflict(cmds, 2, 9)
+
+	r.sessionConflictsMu.RLock()
+	if r.sessionConflicts[2][100] != 9 {
+		t.Errorf("sessionConflicts[2][100]=%d, want 9", r.sessionConflicts[2][100])
+	}
+	if r.sessionConflicts[2][200] != 9 {
+		t.Errorf("sessionConflicts[2][200]=%d, want 9", r.sessionConflicts[2][200])
+	}
+	r.sessionConflictsMu.RUnlock()
+}
