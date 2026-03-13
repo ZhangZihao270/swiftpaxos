@@ -7323,12 +7323,15 @@ epaxos/                              epaxos-ho/
   - client.go: `SupportsWeak()=false`, delegates weak→strong
   - All tests pass, full build OK
 
-- [ ] 106f: Refactor `epaxos-ho/` to import shared code from `epaxos/` (~-500 LOC)
-  - Import base message types, status constants, marshal helpers from `epaxos/`
-  - Import Instance base struct (embed + extend with CL, State)
-  - Import Tarjan SCC algorithm
-  - Remove duplicated code from epaxos-ho/defs.go and epaxos-ho/defsmarsh.go
-  - **Critical**: Verify all epaxos-ho tests still pass after refactor
+- [~] 106f: SKIPPED — Refactor `epaxos-ho/` to import shared code from `epaxos/`
+  - **Decision**: Skip after architectural analysis. The two packages have incompatible designs:
+    - Wire formats differ: epaxos-ho messages add CL[], Consistency, Count fields
+    - Instance structs differ: epaxos-ho adds CL []int32, State int8 fields
+    - LeaderBookkeeping differs: epaxos-ho uses RecoveryInstance, different field set
+    - Status constants differ: epaxos-ho has 12 values (CAUSAL_ACCEPTED, etc.) vs vanilla's 6
+    - Execution engine differs: epaxos-ho has causal/strong paths, last-write-wins semantics
+  - Only ~30 LOC (ballot helpers) could be shared — not worth the coupling risk
+  - Both packages compile and test independently; keeping them separate is cleaner
 
 - [ ] 106g: Register in `run.go` + `main.go`, build + test (~20 LOC)
   - `case "epaxos"` → new Orca-ported version

@@ -16,6 +16,7 @@ import (
 	curpht "github.com/imdea-software/swiftpaxos/curp-ht"
 	curpho "github.com/imdea-software/swiftpaxos/curp-ho"
 	"github.com/imdea-software/swiftpaxos/dlog"
+	"github.com/imdea-software/swiftpaxos/epaxos"
 	epaxosho "github.com/imdea-software/swiftpaxos/epaxos-ho"
 	epaxosswift "github.com/imdea-software/swiftpaxos/epaxos-swift"
 	"github.com/imdea-software/swiftpaxos/master"
@@ -105,6 +106,9 @@ func runClient(c *config.Config, verbose bool) {
 	case "epaxos":
 		c.Leaderless = true
 		c.Fast = false
+	case "epaxosswift":
+		c.Leaderless = true
+		c.Fast = false
 	case "epaxosho":
 		c.Leaderless = true
 		c.Fast = false
@@ -150,7 +154,7 @@ func runClient(c *config.Config, verbose bool) {
 
 	// Aggregate and print/export metrics
 	p := strings.ToLower(c.Protocol)
-	if p == "curp" || p == "curpht" || p == "curpho" || p == "raft" || p == "raftht" || p == "epaxos" || p == "epaxosho" {
+	if p == "curp" || p == "curpht" || p == "curpho" || p == "raft" || p == "raftht" || p == "epaxos" || p == "epaxosswift" || p == "epaxosho" {
 		aggregated := client.AggregateMetrics(allMetrics)
 		if numThreads > 1 {
 			l := dlog.New(*logFile, verbose)
@@ -286,9 +290,16 @@ func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads i
 		hbc.HybridLoopWithOptions(printResults)
 		return hbc.GetMetrics(), hbc.GetDuration()
 	} else if p == "epaxos" {
-		epaxosCl := epaxosswift.NewClient(b)
+		epaxosCl := epaxos.NewClient(b)
 		hbc := client.NewHybridBufferClient(b, 0, 0, c.ReplyTimeout) // weakRatio=0: all strong
 		hbc.SetHybridClient(epaxosCl)
+		printResults := (numThreads == 1)
+		hbc.HybridLoopWithOptions(printResults)
+		return hbc.GetMetrics(), hbc.GetDuration()
+	} else if p == "epaxosswift" {
+		epaxosswiftCl := epaxosswift.NewClient(b)
+		hbc := client.NewHybridBufferClient(b, 0, 0, c.ReplyTimeout) // weakRatio=0: all strong
+		hbc.SetHybridClient(epaxosswiftCl)
 		printResults := (numThreads == 1)
 		hbc.HybridLoopWithOptions(printResults)
 		return hbc.GetMetrics(), hbc.GetDuration()
