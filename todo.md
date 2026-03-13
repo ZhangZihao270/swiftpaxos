@@ -7659,6 +7659,50 @@ allCmds + CL[] → instance N
 
 **Status**: ✅ **DONE** [26:03:13]
 
+**⚠️ NOTE**: Phase 110 results for zipfSkew=0.5, 0.9, 0.99 are INVALID — all were
+clamped to 1.01 due to the Zipf bug found in Phase 110.1a. See Phase 110.1.
+
+---
+
+### Phase 110.1: Fix Zipf s≤1 Bug + Re-run Exp 2.2
+
+**Goal**: Fix the Zipf key generator to support 0 < s < 1 (and s=1), then re-run Exp 2.2 with correct skew values.
+
+**Bug**: `client/zipf.go:59-61` clamps all skew ≤ 1.0 to 1.01. Go's `rand.NewZipf` requires s > 1, so zipfSkew=0.5/0.75/0.9/0.99 all silently became 1.01. Phase 110 results for these values are invalid.
+
+**Fix**: Implement inverse CDF Zipf sampler for s ≤ 1 (Go stdlib only supports s > 1).
+
+**Tasks**:
+
+- [x] 110.1a: Implement custom Zipf generator for s ≤ 1 in `client/zipf.go` (~80 LOC) — **DONE**
+  - Added `cdfZipfSampler` struct with precomputed CDF table + binary search
+  - `ZipfKeyGenerator` routes s>1 to Go stdlib, 0<s≤1 to CDF sampler
+  - Removed the s ≤ 1.0 → 1.01 clamp
+
+- [x] 110.1b: Unit tests for custom Zipf generator — **DONE**
+  - 10 tests: distribution verification (s=0.5/0.75/0.99), s=0.99 vs s=1.01 difference,
+    stdlib still used for s>1, CDF monotonicity, large keySpace, edge cases
+  - All tests pass
+
+- [x] 110.1c: Verify fix — build + run unit tests — **DONE**
+  - `go build` succeeds, `go test ./client/ -v -run Zipf` all 10 pass
+  - `go test ./...` full regression — all packages pass
+
+- [ ] 110.1d: Re-run Exp 2.2 — EPaxos + EPaxos-HO under Zipf skew
+  - Config: 5r-5m-3c, t=32, w50%, weakRatio=50%, keySpace=1M
+  - Skew values: 0, 0.25, 0.5, 0.75, 0.99, 1.2, 1.5, 2.0
+  - Run EPaxos for all skew values
+  - Run EPaxos-HO for all skew values
+  - --startup-delay 25 between runs
+
+- [ ] 110.1e: Tabulate and compare
+  - Key question: is the transition from fast→slow path gradual (as expected) or still abrupt?
+  - Expected: s=0.5 should be MUCH closer to s=0 than Phase 110 showed
+  - Compare with Phase 110 invalid results to confirm the bug impact
+  - Plot: skew vs throughput, skew vs s_p50
+
+**Status**: 🔶 **IN PROGRESS** (110.1a-c done, 110.1d-e remaining)
+
 ---
 
 ## Legend
