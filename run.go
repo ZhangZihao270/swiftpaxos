@@ -108,7 +108,7 @@ func runReplica(c *config.Config, logger *dlog.Logger) {
 		rpc.Register(rep)
 	case "epaxosho":
 		log.Println("Starting EPaxos-HO replica...")
-		rep := epaxosho.New(c.Alias, replicaId, nodeList, !c.Noop, false, false, f, c, logger)
+		rep := epaxosho.New(c.Alias, replicaId, nodeList, !c.Noop, false, false, 0, f, c, logger)
 		rpc.Register(rep)
 	case "raft":
 		log.Println("Starting Raft replica...")

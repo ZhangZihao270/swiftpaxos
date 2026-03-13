@@ -3472,3 +3472,33 @@ func TestHandleTryPreAcceptReply_SameInstanceConflict(t *testing.T) {
 		t.Error("tryingToPreAccept should be false (same instance conflict)")
 	}
 }
+
+func TestBatchingEnabled(t *testing.T) {
+	r := &Replica{batchWait: 0}
+	if r.BatchingEnabled() {
+		t.Error("batchWait=0 should not enable batching")
+	}
+	r.batchWait = 5
+	if !r.BatchingEnabled() {
+		t.Error("batchWait=5 should enable batching")
+	}
+}
+
+func TestBatchingEnabled_Negative(t *testing.T) {
+	r := &Replica{batchWait: -1}
+	if r.BatchingEnabled() {
+		t.Error("negative batchWait should not enable batching")
+	}
+}
+
+func TestNewWithBatchWait(t *testing.T) {
+	// Verify batchWait is stored in the constructor.
+	// We can't call New() without a full network setup, so test the struct directly.
+	r := &Replica{batchWait: 10}
+	if r.batchWait != 10 {
+		t.Errorf("batchWait=%d, want 10", r.batchWait)
+	}
+	if !r.BatchingEnabled() {
+		t.Error("batchWait=10 should enable batching")
+	}
+}

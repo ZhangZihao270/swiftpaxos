@@ -100,6 +100,9 @@ type Replica struct {
 
 	// Recovery
 	instancesToRecover chan *instanceId
+
+	// Batching
+	batchWait int
 }
 
 type instanceId struct {
@@ -148,7 +151,11 @@ type LeaderBookkeeping struct {
 	tpaOKs            int
 }
 
-func New(alias string, id int, peerAddrList []string, exec, beacon, durable bool, failures int, conf *config.Config, logger *dlog.Logger) *Replica {
+func (r *Replica) BatchingEnabled() bool {
+	return r.batchWait > 0
+}
+
+func New(alias string, id int, peerAddrList []string, exec, beacon, durable bool, batchWait int, failures int, conf *config.Config, logger *dlog.Logger) *Replica {
 	r := &Replica{
 		Replica: replica.New(alias, id, failures, peerAddrList, true, exec, false, conf, logger),
 
@@ -192,6 +199,8 @@ func New(alias string, id int, peerAddrList []string, exec, beacon, durable bool
 		clientMutex: new(sync.Mutex),
 
 		instancesToRecover: make(chan *instanceId, defs.CHAN_BUFFER_SIZE),
+
+		batchWait: batchWait,
 	}
 
 	r.Beacon = beacon
@@ -298,7 +307,7 @@ func (r *Replica) slowClock() {
 
 func (r *Replica) fastClock() {
 	for !r.Shutdown {
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(time.Duration(r.batchWait) * time.Millisecond)
 		fastClockChan <- true
 	}
 }
@@ -336,9 +345,15 @@ func (r *Replica) run() {
 	fastClockChan = make(chan bool, 1)
 	go r.slowClock()
 
+	if r.BatchingEnabled() {
+		go r.fastClock()
+	}
+
 	if r.Beacon {
 		go r.stopAdapting()
 	}
+
+	onOffProposeChan := r.ProposeChan
 
 	go r.WaitForClientConnections()
 
@@ -355,8 +370,11 @@ func (r *Replica) run() {
 		}
 
 		select {
-		case propose := <-r.ProposeChan:
+		case propose := <-onOffProposeChan:
 			r.handlePropose(propose)
+			if r.BatchingEnabled() {
+				onOffProposeChan = nil
+			}
 
 		case prepareS := <-r.prepareChan:
 			prepare := prepareS.(*Prepare)
@@ -401,6 +419,9 @@ func (r *Replica) run() {
 		case tryPreAcceptReplyS := <-r.tryPreAcceptReplyChan:
 			tryPreAcceptReply := tryPreAcceptReplyS.(*TryPreAcceptReply)
 			r.handleTryPreAcceptReply(tryPreAcceptReply)
+
+		case <-fastClockChan:
+			onOffProposeChan = r.ProposeChan
 
 		case beacon := <-r.BeaconChan:
 			r.ReplyBeacon(beacon)

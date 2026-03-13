@@ -7420,6 +7420,61 @@ epaxos/                              epaxos-ho/
 
 ---
 
+### Phase 108: Optimize EPaxos-HO — Close Throughput Gap with Vanilla EPaxos
+
+**Goal**: EPaxos-HO peak throughput should match or slightly exceed vanilla EPaxos at t=64 (~42K). Currently EPaxos-HO saturates at ~37K (t=32) due to event loop overhead, lock contention, and missing batching.
+
+**Current numbers (t=64, w50%)**:
+- EPaxos: 42,040 ops/s, s_p50=55.56ms
+- EPaxos-HO: 37,138 ops/s, s_p50=180.60ms (target: ≥42K)
+
+**Root cause analysis** (Phase 107c):
+1. **Busy-polling N×10 causal commit channels** — event loop polls 50 channels per iteration (N=5 × NO_CAUSAL_CHANNEL=10)
+2. **4 extra RWMutexes** — ~300 lock acquisitions per PreAccept at high concurrency (conflictMutex, maxSeqPerKeyMu, sessionConflictsMu, maxWriteInstancePerKeyMu)
+3. **fastClock not enabled** — no batching, each propose triggers immediate commit
+
+**Tasks**:
+
+- [x] 108a: Enable fastClock batching in EPaxos-HO [26:03:13]
+  - Added `batchWait` field to Replica struct, `BatchingEnabled()` method
+  - Updated `New()` signature to accept `batchWait int` parameter
+  - Updated `fastClock()` to use `batchWait` instead of hardcoded 5ms
+  - Wired `onOffProposeChan` gating pattern + `case <-fastClockChan:` in event loop
+  - Updated `run.go` to pass `batchWait=0` (disabled by default, same as vanilla EPaxos)
+  - Build + all tests pass
+
+- [ ] 108b: Merge causal commit channels — replace N×10 channels with 1
+  - Replace `causalCommitChan []*chan fastrpc.Serializable` (50 channels) with single `causalCommitChan chan *CausalCommit`
+  - Remove busy-polling loop in `run()` (the `for _, ch := range r.causalCommitChan` block)
+  - Add single `case commit := <-r.causalCommitChan:` to main select
+  - Update `bcastCausalCommit()`: send to single channel instead of random channel selection
+  - Update RPC registration: 1 RPC instead of N×10
+  - Build + unit test
+
+- [ ] 108c: Reduce lock contention — batch lock acquisitions
+  - In `updateCausalConflicts`: acquire conflictMutex once for entire command batch, not per-command
+  - In `updateStrongAttributes1`: acquire conflictMutex.RLock once, iterate all replicas × commands, then release
+  - Merge maxSeqPerKeyMu into conflictMutex (same critical section)
+  - Consider: sessionConflictsMu and maxWriteInstancePerKeyMu — can they share a lock?
+  - Build + unit test
+
+- [ ] 108d: Spot test — EPaxos-HO vs EPaxos at t=64, w50%
+  - Config: 5r-5m-3c, writes=50%, weakRatio=50%, reqs=3000, --startup-delay 25
+  - Run EPaxos-HO t=64 (1 run)
+  - Run EPaxos t=64 (1 run, as control)
+  - **Target**: EPaxos-HO tput ≥ EPaxos tput (~42K)
+  - If not met: profile with `go tool pprof` to find remaining bottleneck
+
+- [ ] 108e: Full benchmark if 108d passes — EPaxos-HO t=1,2,4,8,16,32,64,96, w5%+w50%
+  - Compare with Phase 105 results (before optimization)
+  - Expected: peak shifts from t=32 (~37K) to t=64+ (~45K+)
+  - Verify weak latency unchanged (w_p50 ≈ 0.2ms)
+  - Verify strong latency improves at high t (s_p50 < 100ms at t=64)
+
+**Status**: ⬜ **TODO**
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
