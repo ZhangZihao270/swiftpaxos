@@ -180,6 +180,12 @@ func (c *BufferClient) Loop() {
 }
 
 func (c *BufferClient) WaitReplies(waitFrom int) {
+	// Guard: don't start a reader goroutine if the reader is nil (replica not connected).
+	// Without this, GetReplyFrom panics on nil reader, immediately sends ReaderDead,
+	// and the failover loop cycles infinitely through all replicas.
+	if waitFrom < 0 || waitFrom >= len(c.readers) || c.readers[waitFrom] == nil {
+		return
+	}
 	go func() {
 		for {
 			r, err := c.GetReplyFrom(waitFrom)

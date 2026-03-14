@@ -7798,6 +7798,70 @@ clamped to 1.01 due to the Zipf bug found in Phase 110.1a. Corrected results in 
 
 ---
 
+### Phase 112: EPaxos-HO Failure Recovery — Kill Non-Client Replica
+
+**Goal**: Verify that killing a replica with NO co-located client causes minimal throughput impact (<10% drop). Contrasts with Phase 111 where killing replica0 (co-located with client0) caused 34% drop.
+
+**Hypothesis**: Phase 111's 34% drop was mainly due to client0 losing its local replica, not from losing 1/5 cluster capacity. Killing replica3 (125) or replica4 (126) — neither has a client — should show near-zero throughput impact since all 3 clients keep their local replicas alive.
+
+**Parameters** (same as Phase 111):
+- Protocol: `epaxosho`
+- Config: 5r-5m-3c, t=16, w50%, weakRatio=50%, networkDelay=25ms
+- Reqs per thread: 10000
+- Kill target: **replica3** (130.245.173.125, no client co-located)
+- Kill time: t≈60s
+
+**Cluster layout**:
+```
+101: replica0 + client0    (alive)
+103: replica1 + client1    (alive)
+104: replica2 + client2    (alive)
+125: replica3              ← KILL
+126: replica4              (alive)
+```
+
+**Tasks**:
+
+- [x] 112a: Run failure experiment — kill replica3 at t≈60s — **DONE** [26:03:13]
+  - Script: `scripts/exp2.3-epaxosho-kill-r3.sh`
+  - Results in `results/exp2.3-epaxosho-killr3-20260313/`
+  - Fixed `WaitReplies` nil-reader guard in `client/buffer.go` (prevents infinite failover loop)
+
+- [x] 112b: Analyze results — **DONE** [26:03:13]
+  - **Actual timeline** (NOT as expected):
+    - t=0-55: ~26K ops/s (3 clients × 16 threads)
+    - t≈58: kill replica3 → replica1/2 `SendMsg` to dead peer blocks
+    - t≈68: client1/client2 REPLY TIMEOUT after 10s → exit (all 32 threads lost)
+    - t≈68+: only client0 survives → ~9.5K ops/s (16 threads)
+  - **Root cause**: replica1 and replica2 never detected replica3's death.
+    `replicaListener` for peer3 was blocked in `ReadByte()` — the TCP RST from
+    killing replica3 either didn't arrive or arrived too late. Meanwhile, `SendMsg`
+    was trying to `Flush()` to dead peer3, blocking the replica's event loop.
+    This prevented replies from reaching client1/client2, causing reply timeouts.
+  - **Contrast with replica0**: replica0 detected "Connection to 3 lost!" immediately
+    (different connection topology — replica0 had IN connection from replica3).
+  - This is the SAME class of bug as Phase 103a (SendMsg blocking on dead peer)
+    but for EPaxos-HO's peer connections where the read side doesn't get EOF promptly.
+
+- [x] 112c: Tabulate Phase 111 vs 112 comparison — **DONE** [26:03:13]
+
+  | Metric | Phase 111 (kill replica0) | Phase 112 (kill replica3) |
+  |--------|--------------------------|--------------------------|
+  | Pre-kill tput | ~28K | ~26K |
+  | Post-kill tput | ~18.5K (-34%) | ~9.5K (-64%) |
+  | Clients lost | 1 (client0) | 2 (client1+client2) |
+  | Recovery time | ~3s | no recovery |
+  | Root cause | client0 lost local replica | replica1/2 blocked on dead peer |
+
+  **Key finding**: killing a non-co-located replica is WORSE than killing a co-located one,
+  because replica1/2 can't detect peer3's death → `SendMsg` blocks → replies stuck →
+  client reply timeout → client exit. Fix requires TCP write deadlines or keepalive on
+  peer connections (follow-up task).
+
+**Status**: ✅ **DONE** (experiment + analysis complete, deeper fix needed as follow-up)
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
