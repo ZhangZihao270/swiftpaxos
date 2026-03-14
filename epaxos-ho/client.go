@@ -3,6 +3,7 @@ package epaxosho
 import (
 	"log"
 	"sync"
+	"time"
 
 	"github.com/imdea-software/swiftpaxos/client"
 	"github.com/imdea-software/swiftpaxos/replica/defs"
@@ -58,6 +59,8 @@ func (c *Client) watchReaderDead() {
 		c.mu.Unlock()
 
 		log.Printf("EPaxos-HO: closest replica %d dead, failing over to %d", oldClosest, newClosest)
+		// Brief backoff to prevent rapid cascading failover if multiple replicas fail
+		time.Sleep(100 * time.Millisecond)
 		c.WaitReplies(newClosest)
 	}
 }
