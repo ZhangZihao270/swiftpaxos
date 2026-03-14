@@ -791,6 +791,67 @@ func TestMaxDescRoutinesEdgeCases(t *testing.T) {
 	}
 }
 
+// TestExp31ConfigFile tests that configs/exp3.1-base.conf parses correctly
+func TestExp31ConfigFile(t *testing.T) {
+	c, err := Read("../configs/exp3.1-base.conf", "test")
+	if err != nil {
+		t.Fatalf("Failed to parse exp3.1-base.conf: %v", err)
+	}
+	if c.Protocol != "curpho" {
+		t.Errorf("Protocol = %s, want curpho", c.Protocol)
+	}
+	if c.Reqs != 3000 {
+		t.Errorf("Reqs = %d, want 3000", c.Reqs)
+	}
+	if c.Pendings != 15 {
+		t.Errorf("Pendings = %d, want 15", c.Pendings)
+	}
+	if c.KeySpace != 1000000 {
+		t.Errorf("KeySpace = %d, want 1000000", c.KeySpace)
+	}
+	if c.ZipfSkew != 0 {
+		t.Errorf("ZipfSkew = %f, want 0", c.ZipfSkew)
+	}
+	if c.WeakRatio != 50 {
+		t.Errorf("WeakRatio = %d, want 50", c.WeakRatio)
+	}
+	if c.Writes != 5 {
+		t.Errorf("Writes = %d, want 5", c.Writes)
+	}
+	if c.WeakWrites != 5 {
+		t.Errorf("WeakWrites = %d, want 5", c.WeakWrites)
+	}
+}
+
+// TestExp32ConfigFile tests that configs/exp3.2-base.conf parses correctly
+func TestExp32ConfigFile(t *testing.T) {
+	c, err := Read("../configs/exp3.2-base.conf", "test")
+	if err != nil {
+		t.Fatalf("Failed to parse exp3.2-base.conf: %v", err)
+	}
+	if c.Protocol != "curpht" {
+		t.Errorf("Protocol = %s, want curpht", c.Protocol)
+	}
+	if c.Reqs != 3000 {
+		t.Errorf("Reqs = %d, want 3000", c.Reqs)
+	}
+	if c.Writes != 50 {
+		t.Errorf("Writes = %d, want 50", c.Writes)
+	}
+	if c.WeakWrites != 50 {
+		t.Errorf("WeakWrites = %d, want 50", c.WeakWrites)
+	}
+	if c.WeakRatio != 50 {
+		t.Errorf("WeakRatio = %d, want 50", c.WeakRatio)
+	}
+	if c.Pendings != 15 {
+		t.Errorf("Pendings = %d, want 15", c.Pendings)
+	}
+	if c.KeySpace != 1000000 {
+		t.Errorf("KeySpace = %d, want 1000000", c.KeySpace)
+	}
+}
+
 func TestReplyTimeoutConfig(t *testing.T) {
 	tests := []struct {
 		name     string

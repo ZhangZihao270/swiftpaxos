@@ -34,13 +34,18 @@ All experiments share these base settings unless overridden:
 
 ```
 keySpace: 1000000
-reqs: 10000
+reqs: 3000
 pendings: 15
 pipeline: true
 syncs: 1
+zipfSkew: 0
 ```
 
 Thread counts for throughput-vs-latency sweep: `THREADS=(1 2 4 8 16 32 64 96 128)`
+
+Each configuration is run **3 times** and results are averaged.
+
+Results are stored in a dedicated folder per experiment: `results/eval-<exp>-<date>/`
 
 ---
 
@@ -50,34 +55,45 @@ Thread counts for throughput-vs-latency sweep: `THREADS=(1 2 4 8 16 32 64 96 128
 
 ### Exp 1.1: Throughput vs Latency
 - **Setup**: Geo-distributed
-- **Workload**: YCSB, 95/5 read/write, 50/50 strong/weak, zipfian keys
+- **Workload**: YCSB, 50/50 strong/weak, uniform keys
+- **Write ratios**: Two groups — **5% writes** and **50% writes**
 - **Metric**: Throughput vs median/p99 latency (separate curves for strong and weak ops)
 - **Baselines**: Vanilla Raft, MongoDB tunable, Pileus
 - **Expected result**: Weak ops achieve ~1 WAN RTT; strong ops same as vanilla Raft; overall latency improves with more weak ops
 
 #### Execution Plan
 
-4 runs per thread count, sweep `THREADS=(1 2 4 8 16 32 64 96 128)`:
+**Group 1: 5% writes** — 4 protocols × 8 thread counts × 3 repetitions = 96 runs
 
 | Run | Protocol | Config Overrides | Script |
 |-----|----------|-----------------|--------|
-| A | Raft-HT | `protocol: raftht`, `writes: 5`, `weakRatio: 50`, `weakWrites: 5`, `zipfSkew: 0.99` | `exp1.1-raftht.sh` |
-| B | Vanilla Raft | `protocol: raft`, `writes: 5`, `weakRatio: 0`, `zipfSkew: 0.99` | `exp1.1-raft.sh` |
+| A | Raft-HT | `protocol: raftht`, `writes: 5`, `weakRatio: 50`, `weakWrites: 5` | `exp1.1-raftht.sh` |
+| B | Vanilla Raft | `protocol: raft`, `writes: 5`, `weakRatio: 0` | `exp1.1-raft.sh` |
+| C | MongoDB tunable | TBD (external system) | `exp1.1-mongo.sh` |
+| D | Pileus | TBD (external system) | `exp1.1-pileus.sh` |
+
+**Group 2: 50% writes** — 4 protocols × 8 thread counts × 3 repetitions = 96 runs
+
+| Run | Protocol | Config Overrides | Script |
+|-----|----------|-----------------|--------|
+| A | Raft-HT | `protocol: raftht`, `writes: 50`, `weakRatio: 50`, `weakWrites: 50` | `exp1.1-raftht.sh` |
+| B | Vanilla Raft | `protocol: raft`, `writes: 50`, `weakRatio: 0` | `exp1.1-raft.sh` |
 | C | MongoDB tunable | TBD (external system) | `exp1.1-mongo.sh` |
 | D | Pileus | TBD (external system) | `exp1.1-pileus.sh` |
 
 **Config notes**:
-- `writes` 控制 strong ops 的写比例，`weakWrites` 控制 weak ops 的写比例（两者独立）
-- `writes: 5`, `weakWrites: 5` → strong 和 weak 各自 5% write / 95% read，整体 95/5 read/write
-- `weakRatio: 50` → 50% ops 是 weak，50% 是 strong
+- `writes` 控制 strong ops 的写比例，`weakWrites` 控制 weak ops 的写比例
+- `weakWrites` always equals `writes` (same read/write ratio for strong and weak)
+- `weakRatio: 50` → 50% ops are weak, 50% are strong
 
-**Output per run** (per thread count):
+**Output per run** (per thread count, averaged over 3 repetitions):
 - Aggregate throughput (ops/sec)
 - Strong ops: P50, P99, avg latency (ms)
 - Weak ops: P50, P99, avg latency (ms)
 - Strong write / strong read / weak write / weak read breakdown
 
-**Plot**: X=throughput, Y=latency. 4 systems × 2 curves (strong, weak) = 8 lines. Each point is one thread count.
+**Results folder**: `results/eval-exp1.1/<date>/`
+
 
 <!-- ### Exp 1.2: Weak Ratio Sweep (T Property)
 - **Setup**: Geo-distributed
@@ -95,57 +111,60 @@ Thread counts for throughput-vs-latency sweep: `THREADS=(1 2 4 8 16 32 64 96 128
 
 ### Exp 2.1: Throughput vs Latency
 - **Setup**: Geo-distributed
-- **Workload**: YCSB, 95/5 read/write, 50/50 strong/weak, zipfian keys
+- **Workload**: YCSB, 50/50 strong/weak, uniform keys
+- **Write ratios**: Two groups — **5% writes** and **50% writes**
 - **Metric**: Throughput vs median/p99 latency
 - **Baselines**: Vanilla EPaxos
 - **Expected result**: Under low conflict, both strong and weak achieve ~1 WAN RTT; leaderless gives better throughput distribution than leader-based protocols
 
 #### Execution Plan
 
-2 runs per thread count, sweep `THREADS=(1 2 4 8 16 32 64 96 128)`:
+**Group 1: 5% writes** — 2 protocols × 9 thread counts × 3 repetitions = 54 runs
 
 | Run | Protocol | Config Overrides | Script |
 |-----|----------|-----------------|--------|
-| A | EPaxos-HO | `protocol: epaxosho`, `writes: 5`, `weakRatio: 50`, `weakWrites: 5`, `zipfSkew: 0.99`, `leaderless: true` | `exp2.1-epaxosho.sh` |
-| B | Vanilla EPaxos | `protocol: epaxos`, `writes: 5`, `weakRatio: 0`, `zipfSkew: 0.99`, `leaderless: true` | `exp2.1-epaxos.sh` |
+| A | EPaxos-HO | `protocol: epaxosho`, `writes: 5`, `weakRatio: 50`, `weakWrites: 5`, `leaderless: true` | `exp2.1-epaxosho.sh` |
+| B | Vanilla EPaxos | `protocol: epaxos`, `writes: 5`, `weakRatio: 0`, `leaderless: true` | `exp2.1-epaxos.sh` |
+
+**Group 2: 50% writes** — 2 protocols × 9 thread counts × 3 repetitions = 54 runs
+
+| Run | Protocol | Config Overrides | Script |
+|-----|----------|-----------------|--------|
+| A | EPaxos-HO | `protocol: epaxosho`, `writes: 50`, `weakRatio: 50`, `weakWrites: 50`, `leaderless: true` | `exp2.1-epaxosho.sh` |
+| B | Vanilla EPaxos | `protocol: epaxos`, `writes: 50`, `weakRatio: 0`, `leaderless: true` | `exp2.1-epaxos.sh` |
 
 **Output per run**: Same as Exp 1.1.
 
 **Plot**: X=throughput, Y=latency. 2 systems × 2 curves (strong, weak).
 
+**Results folder**: `results/eval-exp2.1/<date>/`
+
 ### Exp 2.2: Conflict Rate Sweep
 - **Setup**: Geo-distributed
-- **Workload**: YCSB, 50/50 read/write, 50/50 strong/weak, sweep key distribution: uniform (low conflict), zipfian θ=0.99 (medium), hotspot 1% keys/90% access (high)
-- **Metric**: Fast path success rate, throughput, P50/P99 latency (strong and weak)
+- **Workload**: YCSB, 50/50 read/write, 50/50 strong/weak, sweep Zipf skewness
+- **Metric**: Throughput, P50/P99 latency (strong and weak)
 - **Baselines**: Vanilla EPaxos
 - **Expected result**: Low conflict: both strong and weak achieve ~1 WAN RTT via fast path. High conflict: fast path degrades, latency increases due to slow path fallback. Shows leaderless protocol's sensitivity to contention.
 
 #### Execution Plan
 
-Fixed thread count (pick saturation point from Exp 2.1, e.g., 32 threads), sweep conflict levels:
+Fixed thread count (t=32), sweep `ZIPF_SKEW=(0 0.25 0.5 0.75 0.99 1.2 1.5 2.0)`, 3 repetitions each:
 
-| Run | Protocol | zipfSkew | keySpace | Script |
-|-----|----------|----------|----------|--------|
-| A1 | EPaxos-HO | `0` (uniform) | `1000000` | `exp2.2-epaxosho-uniform.sh` |
-| A2 | EPaxos-HO | `0.99` (zipfian) | `1000000` | `exp2.2-epaxosho-zipf.sh` |
-| A3 | EPaxos-HO | `2.0` (hotspot) | `1000` | `exp2.2-epaxosho-hotspot.sh` |
-| B1 | Vanilla EPaxos | `0` | `1000000` | `exp2.2-epaxos-uniform.sh` |
-| B2 | Vanilla EPaxos | `0.99` | `1000000` | `exp2.2-epaxos-zipf.sh` |
-| B3 | Vanilla EPaxos | `2.0` | `1000` | `exp2.2-epaxos-hotspot.sh` |
+| Run | Protocol | Config Overrides | Script |
+|-----|----------|-----------------|--------|
+| A | EPaxos-HO | `protocol: epaxosho`, `writes: 50`, `weakRatio: 50`, `weakWrites: 50`, `leaderless: true` | `exp2.2-epaxosho.sh` |
+| B | Vanilla EPaxos | `protocol: epaxos`, `writes: 50`, `weakRatio: 0`, `leaderless: true` | `exp2.2-epaxos.sh` |
 
-**Common config**: `writes: 50`, `weakRatio: 50`, `weakWrites: 50`
-
-**Config notes**:
-- Hotspot: `zipfSkew: 2.0` + `keySpace: 1000` → extreme skew on small key space ≈ hotspot 1%/90%
-- Uniform: `zipfSkew: 0` → no skew
+Total: 2 protocols × 8 skew values × 3 repetitions = 48 runs.
 
 **Output per run**:
 - Throughput (ops/sec)
 - Strong ops: P50, P99 latency
 - Weak ops: P50, P99 latency
-- Fast path success rate (if instrumented in EPaxos)
 
-**Plot**: X=conflict level (3 points: uniform/zipfian/hotspot), Y=latency (bar chart or grouped). 2 systems × 2 op types.
+**Plot**: X=Zipf skew, Y=throughput (line chart). 2 systems. Secondary plot: X=Zipf skew, Y=P50 latency.
+
+**Results folder**: `results/eval-exp2.2/<date>/`
 
 ### Exp 2.3: Failure Recovery (EPaxos-HO vs Raft-HT)
 - **Setup**: Geo-distributed
@@ -180,7 +199,8 @@ Fixed thread count (pick saturation point from Exp 2.1, e.g., 32 threads), sweep
 
 ### Exp 3.1: Throughput vs Latency
 - **Setup**: Geo-distributed
-- **Workload**: YCSB, 95/5 read/write, 50/50 strong/weak, zipfian keys
+- **Workload**: YCSB, 50/50 strong/weak, uniform keys
+- **Write ratios**: Two groups — **5% writes** and **50% writes**
 - **Metric**: Throughput vs median/p99 latency
 - **Baselines**: Vanilla CURP
 - **Expected result**:
@@ -190,47 +210,58 @@ Fixed thread count (pick saturation point from Exp 2.1, e.g., 32 threads), sweep
 
 #### Execution Plan
 
-3 runs per thread count, sweep `THREADS=(1 2 4 8 16 32 64 96 128)`:
+**Group 1: 5% writes** — 3 protocols × 9 thread counts × 3 repetitions = 81 runs
 
 | Run | Protocol | Config Overrides | Script |
 |-----|----------|-----------------|--------|
-| A | CURP-HO | `protocol: curpho`, `writes: 5`, `weakRatio: 50`, `weakWrites: 5`, `zipfSkew: 0.99` | `exp3.1-curpho.sh` |
-| B | CURP-HT | `protocol: curpht`, `writes: 5`, `weakRatio: 50`, `weakWrites: 5`, `zipfSkew: 0.99` | `exp3.1-curpht.sh` |
-| C | Vanilla CURP | `protocol: curp`, `writes: 5`, `weakRatio: 0`, `zipfSkew: 0.99` | `exp3.1-curp.sh` |
+| A | CURP-HO | `protocol: curpho`, `writes: 5`, `weakRatio: 50`, `weakWrites: 5` | `exp3.1-curpho.sh` |
+| B | CURP-HT | `protocol: curpht`, `writes: 5`, `weakRatio: 50`, `weakWrites: 5` | `exp3.1-curpht.sh` |
+| C | Vanilla CURP | `protocol: curp`, `writes: 5`, `weakRatio: 0` | `exp3.1-curp.sh` |
+
+**Group 2: 50% writes** — 3 protocols × 9 thread counts × 3 repetitions = 81 runs
+
+| Run | Protocol | Config Overrides | Script |
+|-----|----------|-----------------|--------|
+| A | CURP-HO | `protocol: curpho`, `writes: 50`, `weakRatio: 50`, `weakWrites: 50` | `exp3.1-curpho.sh` |
+| B | CURP-HT | `protocol: curpht`, `writes: 50`, `weakRatio: 50`, `weakWrites: 50` | `exp3.1-curpht.sh` |
+| C | Vanilla CURP | `protocol: curp`, `writes: 50`, `weakRatio: 0` | `exp3.1-curp.sh` |
 
 **Output per run**: Same as Exp 1.1.
 
 **Plot**: X=throughput, Y=latency. 3 systems × 2 curves (strong, weak).
 
+**Results folder**: `results/eval-exp3.1/<date>/`
+
 ### Exp 3.2: T Property Verification
 - **Setup**: Geo-distributed
-- **Workload**: YCSB, 50/50 read/write, sweep weak proportion (0%, 25%, 50%, 75%, 100%), zipfian keys
-- **Systems**: Raft-HT, CURP-HT, CURP-HO
+- **Workload**: YCSB, 50/50 read/write, sweep weak proportion (0%, 25%, 50%, 75%, 100%), uniform keys
+- **Systems**: CURP-HT, CURP-HO
 - **Metric**: Strong op throughput and latency (P50/P99) as weak proportion increases
 - **Expected result**:
-  - Raft-HT, CURP-HT: strong throughput stays constant regardless of weak ratio (T satisfied)
+  - CURP-HT: strong throughput stays constant regardless of weak ratio (T satisfied)
   - CURP-HO: strong throughput decreases as weak ratio increases (tracking overhead, T violated)
 - **This is the key experiment** that empirically validates the T property distinction
 
 #### Execution Plan
 
-Fixed thread count (pick saturation point, e.g., 32 threads), sweep `WEAK_RATIOS=(0 25 50 75 100)`:
+Fixed thread count (t=32), sweep `WEAK_RATIOS=(0 25 50 75 100)`, 3 repetitions each:
 
 | Run | Protocol | weakRatio | Config Overrides | Script |
 |-----|----------|-----------|-----------------|--------|
-| A1-A5 | Raft-HT | 0/25/50/75/100 | `protocol: raftht`, `writes: 50`, `weakWrites: 50`, `zipfSkew: 0.99` | `exp3.2-raftht.sh` |
-| B1-B5 | CURP-HT | 0/25/50/75/100 | `protocol: curpht`, `writes: 50`, `weakWrites: 50`, `zipfSkew: 0.99` | `exp3.2-curpht.sh` |
-| C1-C5 | CURP-HO | 0/25/50/75/100 | `protocol: curpho`, `writes: 50`, `weakWrites: 50`, `zipfSkew: 0.99` | `exp3.2-curpho.sh` |
+| A1-A5 | CURP-HT | 0/25/50/75/100 | `protocol: curpht`, `writes: 50`, `weakWrites: 50` | `exp3.2-curpht.sh` |
+| B1-B5 | CURP-HO | 0/25/50/75/100 | `protocol: curpho`, `writes: 50`, `weakWrites: 50` | `exp3.2-curpho.sh` |
 
-Total: 15 runs (3 protocols × 5 weak ratios).
+Total: 2 protocols × 5 weak ratios × 3 repetitions = 30 runs.
+
+**Results folder**: `results/eval-exp3.2/<date>/`
 
 **Output per run**:
 - Strong ops throughput (ops/sec)
 - Strong ops P50, P99 latency (ms)
 - Weak ops throughput, P50, P99 (for reference)
 
-**Plot 1**: X=weak ratio (%), Y=strong throughput. 3 lines (Raft-HT, CURP-HT flat; CURP-HO declining).
-**Plot 2**: X=weak ratio (%), Y=strong P50/P99 latency. 3 lines. Raft-HT/CURP-HT stable; CURP-HO increasing.
+**Plot 1**: X=weak ratio (%), Y=strong throughput. 2 lines (CURP-HT flat; CURP-HO declining).
+**Plot 2**: X=weak ratio (%), Y=strong P50/P99 latency. 2 lines. CURP-HT stable; CURP-HO increasing.
 
 <!-- ---
 
@@ -255,15 +286,15 @@ A single figure comparing all 4 protocols + baselines under one representative w
 
 ## Total Run Count Summary
 
-| Experiment | Runs per thread/param | Thread/param points | Total runs |
-|------------|----------------------|---------------------|------------|
-| Exp 1.1 | 4 (protocols) | 9 (threads) | 36 |
-| Exp 2.1 | 2 (protocols) | 9 (threads) | 18 |
-| Exp 2.2 | 6 (2 protocols × 3 conflicts) | 1 (fixed threads) | 6 |
-| Exp 2.3 | 2 (protocols) | 1 | 2 |
-| Exp 3.1 | 3 (protocols) | 9 (threads) | 27 |
-| Exp 3.2 | 3 (protocols) | 5 (weak ratios) | 15 |
-| **Total** | | | **104** |
+| Experiment | Formula | Total runs |
+|------------|---------|------------|
+| Exp 1.1 | 4 protocols × 8 threads × 2 write groups × 3 reps | 192 |
+| Exp 2.1 | 2 protocols × 9 threads × 2 write groups × 3 reps | 108 |
+| Exp 2.2 | 2 protocols × 8 skew values × 3 reps | 48 |
+| Exp 2.3 | 2 protocols × 1 | 2 |
+| Exp 3.1 | 3 protocols × 9 threads × 2 write groups × 3 reps | 162 |
+| Exp 3.2 | 2 protocols × 5 weak ratios × 3 reps | 30 |
+| **Total** | | **542** |
 
 <!-- ---
 

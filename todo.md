@@ -7965,6 +7965,77 @@ clamped to 1.01 due to the Zipf bug found in Phase 110.1a. Corrected results in 
 
 ---
 
+### Phase 114: Run Exp 3.1 + Exp 3.2 (CURP-HO vs CURP-HT vs CURP)
+
+**Goal**: Execute Exp 3.1 (throughput-vs-latency) and Exp 3.2 (T property verification) per `docs/evaluation.md`. Create permanent scripts and configs that can be reused across runs.
+
+**Scripts** (in `scripts/`):
+- `eval-exp3.1-final.sh` — Exp 3.1: sweep threads, 2 write groups, 3 protocols, 3 reps
+- `eval-exp3.2-final.sh` — Exp 3.2: sweep weakRatio, 3 protocols, 3 reps
+- `configs/exp3.1-base.conf` — base config for Exp 3.1 (copied from benchmark-5r-5m-3c.conf)
+- `configs/exp3.2-base.conf` — base config for Exp 3.2
+
+These scripts are permanent — rerun with `bash scripts/eval-exp3.1-final.sh [output-dir]`.
+
+**Tasks**:
+
+- [x] 114a: Create `configs/exp3.1-base.conf` and `configs/exp3.2-base.conf` [26:03:14]
+  - Based on `benchmark-5r-5m-3c.conf` with common config applied:
+    `reqs: 3000`, `zipfSkew: 0`, `keySpace: 1000000`, `pendings: 15`, `pipeline: true`
+  - Protocol/writes/weakRatio fields left as placeholders (overridden by script)
+
+- [x] 114b: Create `scripts/eval-exp3.1-final.sh` (~150 LOC) [26:03:14]
+  - Parameters: `THREADS=(1 2 4 8 16 32 64 96)`, `WRITE_GROUPS=(5 50)`, `REPS=3`
+  - Protocols: curpho (weakRatio=50), curpht (weakRatio=50), curp (weakRatio=0)
+  - For each write group: `writes=$W`, `weakWrites=$W`
+  - Output structure:
+    ```
+    results/eval-exp3.1/<date>/
+      w5/curpho/t1/run1/  run2/  run3/
+      w5/curpht/t1/run1/  run2/  run3/
+      w5/curp/t1/run1/    run2/  run3/
+      ...
+      w50/curpho/t1/run1/ ...
+    ```
+  - After all runs: generate `summary.csv` with averaged results per (protocol, threads, write_group)
+  - Use `--startup-delay 25`, `ensure_clean` between runs
+  - Reference: existing `eval-exp3.1-5r-dist.sh` pattern (apply_config, run_benchmark, etc.)
+
+- [x] 114c: Create `scripts/eval-exp3.2-final.sh` (~120 LOC) [26:03:14]
+  - Parameters: `WEAK_RATIOS=(0 25 50 75 100)`, fixed `THREADS=32`, `REPS=3`
+  - Protocols: curpht, curpho
+  - All use `writes: 50`, `weakWrites: 50`
+  - Output structure:
+    ```
+    results/eval-exp3.2/<date>/
+      curpht/wr0/run1/  run2/  run3/
+      curpht/wr25/run1/ run2/  run3/
+      ...
+      curpho/wr100/run1/ ...
+    ```
+  - After all runs: generate `summary.csv` with averaged results per (protocol, weakRatio)
+  - Key output columns: strong_tput, strong_p50, strong_p99, weak_tput, weak_p50, weak_p99
+
+- [ ] 114d: Run Exp 3.1
+  - `bash scripts/eval-exp3.1-final.sh`
+  - Total: 3 protocols × 8 threads × 2 write groups × 3 reps = 144 runs
+  - Estimated time: ~144 × 1.5min = ~3.5 hours
+
+- [ ] 114e: Run Exp 3.2
+  - `bash scripts/eval-exp3.2-final.sh`
+  - Total: 2 protocols × 5 weak ratios × 3 reps = 30 runs
+  - Estimated time: ~30 × 1.5min = ~45 min
+
+- [ ] 114f: Tabulate results
+  - Exp 3.1: throughput-vs-latency table per write group, all 3 protocols
+  - Exp 3.2: strong throughput/latency vs weakRatio table
+  - Key question (Exp 3.2): does CURP-HT strong throughput stay flat as weakRatio increases?
+    Does CURP-HO strong throughput degrade? (T property verification)
+
+**Status**: ⬜ **TODO**
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task

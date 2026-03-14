@@ -187,16 +187,18 @@ func (c *BufferClient) WaitReplies(waitFrom int) {
 		return
 	}
 	go func() {
+		replyCount := 0
 		for {
 			r, err := c.GetReplyFrom(waitFrom)
 			if err != nil {
-				c.Println(err)
+				c.Printf("WaitReplies reader for replica %d exiting after %d replies: %v", waitFrom, replyCount, err)
 				break
 			}
 			if r.OK != defs.TRUE {
-				c.Println("Faulty reply")
+				c.Printf("WaitReplies reader for replica %d got faulty reply after %d replies", waitFrom, replyCount)
 				break
 			}
+			replyCount++
 			go func(val state.Value, seqnum int32) {
 				time.Sleep(c.dt.WaitDuration(c.replicas[waitFrom]))
 				c.RegisterReply(val, seqnum)
