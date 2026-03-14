@@ -382,11 +382,13 @@ func (r *Replica) FlushPeers() {
 }
 
 func (r *Replica) ReplyProposeTS(reply *defs.ProposeReplyTS, w *bufio.Writer, lock *sync.Mutex) {
-	r.M.Lock()
-	defer r.M.Unlock()
+	lock.Lock()
+	defer lock.Unlock()
 
 	reply.Marshal(w)
-	w.Flush()
+	if err := w.Flush(); err != nil {
+		r.Printf("ReplyProposeTS flush error for cmd %d: %v", reply.CommandId, err)
+	}
 }
 
 // ReplyProposeTSDelayed is like ReplyProposeTS but injects replica→client
@@ -423,12 +425,29 @@ func (r *Replica) SendBeacon(peerId int32) {
 		r.Printf("Connection to %d lost!", peerId)
 		return
 	}
+
+	if conn := r.Peers[peerId]; conn != nil {
+		conn.SetWriteDeadline(time.Now().Add(peerWriteDeadline))
+	}
+
 	w.WriteByte(defs.GENERIC_SMR_BEACON)
 	beacon := &defs.Beacon{
 		Timestamp: time.Now().UnixNano(),
 	}
 	beacon.Marshal(w)
-	w.Flush()
+	if err := w.Flush(); err != nil {
+		r.Printf("Peer %d beacon write error: %v — marking dead", peerId, err)
+		r.PeerWriters[peerId] = nil
+		r.Alive[peerId] = false
+		if conn := r.Peers[peerId]; conn != nil {
+			conn.Close()
+		}
+		return
+	}
+
+	if conn := r.Peers[peerId]; conn != nil {
+		conn.SetWriteDeadline(time.Time{})
+	}
 }
 
 func (r *Replica) ReplyBeacon(beacon *defs.GBeacon) {
@@ -440,12 +459,29 @@ func (r *Replica) ReplyBeacon(beacon *defs.GBeacon) {
 		r.Printf("Connection to %d lost!", beacon.Rid)
 		return
 	}
+
+	if conn := r.Peers[beacon.Rid]; conn != nil {
+		conn.SetWriteDeadline(time.Now().Add(peerWriteDeadline))
+	}
+
 	w.WriteByte(defs.GENERIC_SMR_BEACON_REPLY)
 	rb := &defs.BeaconReply{
 		Timestamp: beacon.Timestamp,
 	}
 	rb.Marshal(w)
-	w.Flush()
+	if err := w.Flush(); err != nil {
+		r.Printf("Peer %d beacon reply write error: %v — marking dead", beacon.Rid, err)
+		r.PeerWriters[beacon.Rid] = nil
+		r.Alive[beacon.Rid] = false
+		if conn := r.Peers[beacon.Rid]; conn != nil {
+			conn.Close()
+		}
+		return
+	}
+
+	if conn := r.Peers[beacon.Rid]; conn != nil {
+		conn.SetWriteDeadline(time.Time{})
+	}
 }
 
 func (r *Replica) UpdatePreferredPeerOrder(quorum []int32) {
@@ -645,6 +681,8 @@ func (r *Replica) replicaListener(rid int, reader *bufio.Reader) {
 		}
 	}
 
+	r.Printf("Peer %d reader exited (err=%v), closing connection", rid, err)
+
 	// Close the underlying TCP connection first (outside the lock).
 	// This forces any in-progress w.Flush() holding r.M to return
 	// immediately with an error, instead of blocking for ~2 min
@@ -659,6 +697,7 @@ func (r *Replica) replicaListener(rid int, reader *bufio.Reader) {
 	r.Alive[rid] = false
 	r.PeerWriters[rid] = nil
 	r.M.Unlock()
+	r.Printf("Peer %d marked dead", rid)
 }
 
 func (r *Replica) clientListener(conn net.Conn) {

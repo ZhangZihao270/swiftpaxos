@@ -7915,12 +7915,26 @@ clamped to 1.01 due to the Zipf bug found in Phase 110.1a. Corrected results in 
   - Tests added in 113a: SendMsg_WriteDeadline, SendMsg_WriteDeadlineSuccess, FlushPeers_WriteDeadline, PeerWriteDeadlineConstant
   - Test added in 113b: SetTCPKeepAlive (TCP + non-TCP connections)
 
-- [ ] 113f: Re-run kill-replica3 experiment (Phase 112 retry)
-  - Config: 5r-5m-3c, t=16, w50%, weakRatio=50%, networkDelay=25ms, reqs=10000
-  - Kill replica3 (125, no client) at t≈60s
-  - **Expected**: pre-kill ~28K → dip for 1-2s → post-kill ~25-27K (<10% drop)
-  - All 3 clients should survive and continue producing throughput
-  - No cascading failover on client0
+- [x] 113f: Fix stuck strong commands + re-run kill-replica3 experiment
+  - **Root cause**: After replica death, PreAcceptOK responses for strong commands
+    stop arriving, causing 240 commands to get stuck in PREACCEPTED state forever.
+    The pipeline fills up (16 threads × 15 pendings = 240), blocking all new proposals.
+  - **Three fixes applied**:
+    1. `handlePreAccept`: Send PreAcceptOK even when instance is already EXECUTED/COMMITTED
+       (handles message reordering where Commit arrives before PreAccept)
+    2. `handleAccept`: Send AcceptReply even when instance is already committed
+       (same message reordering issue for the Accept phase)
+    3. `retryStuckInstances()`: Periodic timer (every 1s via slowClock) scans for
+       instances in PREACCEPTED/ACCEPTED state and re-broadcasts. Provides liveness
+       when initial PreAccept responses are lost or delayed.
+    4. `bcastCausalCommit`: Added `r.Alive[peer]` check to skip dead peers
+       (eliminates massive "Connection to N lost!" log spam)
+  - **Results (v6)**: 27,513 ops/sec aggregate, ALL 3 clients complete 1.6M ops each
+    - client0: 9,200 ops/sec, client1: 9,080 ops/sec, client2: 9,234 ops/sec
+    - Zero throughput dip at kill time (~28K sustained throughout)
+    - Retry mechanism fires continuously (~150 instances/s), compensating for
+      a latent issue where initial PreAccept responses don't reach the leader
+  - **Comparison with broken run (v5)**: 27.5K vs 9.4K (2.9× improvement)
 
 - [ ] 113g: Re-run kill-replica0 experiment (Phase 111 retry)
   - Kill replica0 (101, client0 co-located) at t≈60s
@@ -7933,10 +7947,10 @@ clamped to 1.01 due to the Zipf bug found in Phase 110.1a. Corrected results in 
   |----------|----------|-----------|------|----------|
   | Kill co-located replica (Phase 111) | 28K | 18.5K | 34% | 3s |
   | Kill non-co-located (Phase 112, buggy) | 26K | 9.5K | 64% | never |
-  | Kill non-co-located (Phase 113f, fixed) | 28K | ~26K? | <10%? | <2s? |
+  | Kill non-co-located (Phase 113f, fixed) | 28K | 28K | 0% | 0s |
   | Kill co-located (Phase 113g, fixed) | 28K | ~19K? | ~32%? | <2s? |
 
-**Status**: ⬜ **TODO**
+**Status**: 🔶 **IN PROGRESS** — Phase 113f complete, 113g+113h remaining
 
 ---
 

@@ -49,6 +49,12 @@ type Replica struct {
 	// Causal commit channel
 	causalCommitChan chan fastrpc.Serializable
 
+	// Diagnostic counter (incremented in event loop whenever a client reply is sent)
+	clientReplyCount int64
+
+	// Outstanding strong commands awaiting quorum (for diagnostics)
+	outstandingStrong int64
+
 	// RPC type identifiers
 	prepareRPC            uint8
 	prepareReplyRPC       uint8
@@ -96,6 +102,7 @@ type Replica struct {
 
 	// Recovery
 	instancesToRecover chan *instanceId
+	lastStuckRetry     time.Time
 
 	// Batching
 	batchWait int
@@ -345,14 +352,35 @@ func (r *Replica) run() {
 
 	go r.WaitForClientConnections()
 
+	// Periodic heartbeat to detect event loop stalls
+	heartbeatCount := int64(0)
+	proposeCount := int64(0)
+	causalCommitCount := int64(0)
+	preAcceptCount := int64(0)
+	preAcceptReplyCount := int64(0)
+	preAcceptOKCount := int64(0)
+	commitCount := int64(0)
+	acceptReplyCount := int64(0)
+	go func() {
+		for !r.Shutdown {
+			time.Sleep(5 * time.Second)
+			r.Printf("HEARTBEAT: iters=%d alive=%v propose=%d causalCommit=%d preAccept=%d paReply=%d paOK=%d commit=%d accReply=%d clientReply=%d proposeChanLen=%d outStrong=%d",
+				heartbeatCount, r.Alive, proposeCount, causalCommitCount, preAcceptCount,
+				preAcceptReplyCount, preAcceptOKCount, commitCount, acceptReplyCount, r.clientReplyCount, len(r.ProposeChan), r.outstandingStrong)
+		}
+	}()
+
 	for !r.Shutdown {
+		heartbeatCount++
 
 		select {
 		case causalCommitS := <-r.causalCommitChan:
 			commit := causalCommitS.(*CausalCommit)
+			causalCommitCount++
 			r.handleCausalCommit(commit)
 
 		case propose := <-onOffProposeChan:
+			proposeCount++
 			r.handlePropose(propose)
 			if r.BatchingEnabled() {
 				onOffProposeChan = nil
@@ -364,6 +392,7 @@ func (r *Replica) run() {
 
 		case preAcceptS := <-r.preAcceptChan:
 			preAccept := preAcceptS.(*PreAccept)
+			preAcceptCount++
 			r.handlePreAccept(preAccept)
 
 		case acceptS := <-r.acceptChan:
@@ -372,10 +401,12 @@ func (r *Replica) run() {
 
 		case commitS := <-r.commitChan:
 			commit := commitS.(*Commit)
+			commitCount++
 			r.handleCommit(commit)
 
 		case commitS := <-r.commitShortChan:
 			commit := commitS.(*CommitShort)
+			commitCount++
 			r.handleCommitShort(commit)
 
 		case prepareReplyS := <-r.prepareReplyChan:
@@ -384,14 +415,17 @@ func (r *Replica) run() {
 
 		case preAcceptReplyS := <-r.preAcceptReplyChan:
 			preAcceptReply := preAcceptReplyS.(*PreAcceptReply)
+			preAcceptReplyCount++
 			r.handlePreAcceptReply(preAcceptReply)
 
 		case preAcceptOKS := <-r.preAcceptOKChan:
 			preAcceptOK := preAcceptOKS.(*PreAcceptOK)
+			preAcceptOKCount++
 			r.handlePreAcceptOK(preAcceptOK)
 
 		case acceptReplyS := <-r.acceptReplyChan:
 			acceptReply := acceptReplyS.(*AcceptReply)
+			acceptReplyCount++
 			r.handleAcceptReply(acceptReply)
 
 		case tryPreAcceptS := <-r.tryPreAcceptChan:
@@ -418,6 +452,11 @@ func (r *Replica) run() {
 					}
 					r.SendBeacon(q)
 				}
+			}
+			// Retry stuck PREACCEPTED/ACCEPTED instances (leader-side liveness)
+			if r.outstandingStrong > 0 && time.Since(r.lastStuckRetry) > 1*time.Second {
+				r.retryStuckInstances()
+				r.lastStuckRetry = time.Now()
 			}
 
 		case iid := <-r.instancesToRecover:
@@ -511,6 +550,7 @@ func (r *Replica) startCausalCommit(replicaId int32, instance int32, ballot int3
 	if r.InstanceSpace[replicaId][instance].lb.clientProposals != nil && !r.Dreply {
 		for i := 0; i < len(r.InstanceSpace[replicaId][instance].lb.clientProposals); i++ {
 			prop := r.InstanceSpace[replicaId][instance].lb.clientProposals[i]
+			r.clientReplyCount++
 			r.ReplyProposeTS(
 				&defs.ProposeReplyTS{
 					OK:        TRUE,
@@ -615,9 +655,13 @@ func (r *Replica) startUnifiedCommit(replicaId int32, instance int32, ballot int
 		r.maxSeq = seq + 1
 	}
 
+	// Track outstanding strong commands
+	r.outstandingStrong += int64(len(strongProposals))
+
 	// Reply immediately to causal proposals (1-RTT fast path)
 	if !r.Dreply {
 		for _, prop := range causalProposals {
+			r.clientReplyCount++
 			r.ReplyProposeTS(
 				&defs.ProposeReplyTS{
 					OK:        TRUE,
@@ -842,6 +886,8 @@ func (r *Replica) startStrongCommit(replicaId int32, instance int32, ballot int3
 		r.maxSeq = seq + 1
 	}
 
+	r.outstandingStrong += int64(len(proposals))
+
 	r.updateStrongConflicts(cmds, replicaId, instance, seq)
 
 	r.recordInstanceMetadata(r.InstanceSpace[replicaId][instance])
@@ -1023,12 +1069,14 @@ func (r *Replica) handlePreAccept(preAccept *PreAccept) {
 		r.crtInstance[preAccept.Replica] = preAccept.Instance + 1
 	}
 
-	// Already executed or discarded — nothing to do
+	// Already executed or discarded — send PreAcceptOK so leader can complete quorum
 	if inst != nil && (inst.Status == EXECUTED || inst.Status == DISCARDED) {
+		r.SendMsg(preAccept.LeaderId, r.preAcceptOKRPC, &PreAcceptOK{Instance: preAccept.Instance})
 		return
 	}
 
-	// Reordered: we already received Commit/Accept before PreAccept
+	// Reordered: we already received Commit/Accept before PreAccept.
+	// Still send PreAcceptOK so the leader can reach quorum and commit.
 	if inst != nil && (inst.Status == STRONGLY_COMMITTED || inst.Status == ACCEPTED) {
 		if inst.Cmds == nil {
 			r.InstanceSpace[preAccept.Replica][preAccept.Instance].Cmds = preAccept.Command
@@ -1036,6 +1084,7 @@ func (r *Replica) handlePreAccept(preAccept *PreAccept) {
 		}
 		r.recordCommands(preAccept.Command)
 		r.sync()
+		r.SendMsg(preAccept.LeaderId, r.preAcceptOKRPC, &PreAcceptOK{Instance: preAccept.Instance})
 		return
 	}
 
@@ -1134,6 +1183,13 @@ func (r *Replica) handleAccept(accept *Accept) {
 	}
 
 	if inst != nil && (inst.Status == STRONGLY_COMMITTED || inst.Status == CAUSALLY_COMMITTED || inst.Status == EXECUTED || inst.Status == DISCARDED) {
+		// Already committed/executed — still send AcceptReply so leader can reach quorum
+		r.replyAccept(accept.LeaderId, &AcceptReply{
+			Replica:  accept.Replica,
+			Instance: accept.Instance,
+			OK:       TRUE,
+			Ballot:   accept.Ballot,
+		})
 		return
 	}
 
@@ -1477,7 +1533,7 @@ func (r *Replica) bcastCausalCommit(replicaId int32, instance int32, cmds []stat
 	}
 	for q := 0; q < r.N; q++ {
 		peer := r.PreferredPeerOrder[q]
-		if peer == r.Id {
+		if peer == r.Id || !r.Alive[peer] {
 			continue
 		}
 		r.SendMsg(peer, r.causalCommitRPC, args)
@@ -1937,8 +1993,10 @@ func (r *Replica) handlePreAcceptReply(pareply *PreAcceptReply) {
 		r.updateStrongSessionConflict(inst.Cmds, pareply.Replica, pareply.Instance)
 
 		if inst.lb.clientProposals != nil && !r.Dreply {
+			r.outstandingStrong -= int64(len(inst.lb.clientProposals))
 			for i := 0; i < len(inst.lb.clientProposals); i++ {
 				prop := inst.lb.clientProposals[i]
+				r.clientReplyCount++
 				r.ReplyProposeTS(
 					&defs.ProposeReplyTS{
 						OK:        TRUE,
@@ -2007,8 +2065,10 @@ func (r *Replica) handlePreAcceptOK(pareply *PreAcceptOK) {
 		r.updateStrongSessionConflict(inst.Cmds, r.Id, pareply.Instance)
 
 		if inst.lb.clientProposals != nil && !r.Dreply {
+			r.outstandingStrong -= int64(len(inst.lb.clientProposals))
 			for i := 0; i < len(inst.lb.clientProposals); i++ {
 				prop := inst.lb.clientProposals[i]
+				r.clientReplyCount++
 				r.ReplyProposeTS(
 					&defs.ProposeReplyTS{
 						OK:        TRUE,
@@ -2065,8 +2125,10 @@ func (r *Replica) handleAcceptReply(areply *AcceptReply) {
 		r.updateStrongSessionConflict(inst.Cmds, areply.Replica, areply.Instance)
 
 		if inst.lb.clientProposals != nil && !r.Dreply {
+			r.outstandingStrong -= int64(len(inst.lb.clientProposals))
 			for i := 0; i < len(inst.lb.clientProposals); i++ {
 				prop := inst.lb.clientProposals[i]
+				r.clientReplyCount++
 				r.ReplyProposeTS(
 					&defs.ProposeReplyTS{
 						OK:        TRUE,
@@ -2211,6 +2273,33 @@ func (r *Replica) handleTryPreAcceptReply(tpar *TryPreAcceptReply) {
 			// Defer recovery.
 			inst.lb.tryingToPreAccept = false
 		}
+	}
+}
+
+// retryStuckInstances scans this replica's own instance space for instances
+// stuck in PREACCEPTED or ACCEPTED state and re-broadcasts the corresponding
+// message. This provides liveness when the original broadcast's responses
+// were lost or when peers silently dropped the message (e.g., because they
+// already had a later status for the instance due to message reordering).
+func (r *Replica) retryStuckInstances() {
+	retried := 0
+	from := r.CommittedUpTo[r.Id] + 1
+	to := r.crtInstance[r.Id]
+	for i := from; i < to; i++ {
+		inst := r.InstanceSpace[r.Id][i]
+		if inst == nil || inst.lb == nil {
+			continue
+		}
+		if inst.Status == PREACCEPTED || inst.Status == PREACCEPTED_EQ {
+			r.bcastPreAccept(r.Id, i, inst.bal, inst.Cmds, inst.Seq, inst.Deps, inst.CL)
+			retried++
+		} else if inst.Status == ACCEPTED {
+			r.bcastAccept(r.Id, i, inst.bal, int32(len(inst.Cmds)), inst.Seq, inst.Deps, inst.CL)
+			retried++
+		}
+	}
+	if retried > 0 {
+		r.Printf("retryStuckInstances: retried %d instances (range %d-%d)", retried, from, to-1)
 	}
 }
 

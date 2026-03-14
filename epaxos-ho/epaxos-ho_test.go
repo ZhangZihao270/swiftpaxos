@@ -1,9 +1,12 @@
 package epaxosho
 
 import (
+	"bufio"
+	"net"
 	"sync"
 	"testing"
 
+	"github.com/imdea-software/swiftpaxos/dlog"
 	"github.com/imdea-software/swiftpaxos/replica"
 	"github.com/imdea-software/swiftpaxos/replica/defs"
 	fastrpc "github.com/imdea-software/swiftpaxos/rpc"
@@ -237,12 +240,16 @@ func TestCausalCommitChannel(t *testing.T) {
 func newTestReplica(n int) *Replica {
 	r := &Replica{
 		Replica: &replica.Replica{
+			Logger:             dlog.New("", false),
 			N:                  n,
 			Id:                 0,
 			PreferredPeerOrder: make([]int32, n),
 			Stats:              &defs.Stats{M: make(map[string]int)},
 			ProposeChan:        make(chan *defs.GPropose, defs.CHAN_BUFFER_SIZE),
 			State:              state.InitState(),
+			PeerWriters:        make([]*bufio.Writer, n),
+			Peers:              make([]net.Conn, n),
+			Alive:              make([]bool, n),
 		},
 		InstanceSpace:            make([][]*Instance, n),
 		crtInstance:              make([]int32, n),
