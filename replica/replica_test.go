@@ -311,3 +311,36 @@ func TestPeerWriteDeadlineConstant(t *testing.T) {
 		t.Errorf("peerWriteDeadline too large: %v", peerWriteDeadline)
 	}
 }
+
+// TestSetTCPKeepAlive verifies that setTCPKeepAlive does not panic on TCP
+// connections or non-TCP connections (net.Pipe).
+func TestSetTCPKeepAlive(t *testing.T) {
+	// Test with net.Pipe (non-TCP) — should be a no-op, not panic.
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+	setTCPKeepAlive(c1) // should not panic
+
+	// Test with a real TCP connection.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		setTCPKeepAlive(conn) // should succeed on accepted TCP conn
+		conn.Close()
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	setTCPKeepAlive(conn) // should succeed on dialed TCP conn
+}

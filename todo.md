@@ -7890,11 +7890,12 @@ clamped to 1.01 due to the Zipf bug found in Phase 110.1a. Corrected results in 
   - 8 tests pass: WriteDeadline, WriteDeadlineSuccess, FlushPeers_WriteDeadline, PeerWriteDeadlineConstant
   - Full test suite: all packages pass, no regressions
 
-- [ ] 113b: Add TCP keepalive on peer connections (~10 LOC)
-  - In `ConnectToPeersNoListeners` / `ConnectToPeers`: after dial, set keepalive
-  - `tcpConn.SetKeepAlive(true)`
-  - `tcpConn.SetKeepAlivePeriod(2 * time.Second)`
-  - This ensures `replicaListener` reader gets EOF within ~6-10s even if no write happens
+- [x] 113b: Add TCP keepalive on peer connections (~10 LOC)
+  - Added `setTCPKeepAlive()` helper: `SetKeepAlive(true)` + `SetKeepAlivePeriod(2s)`
+  - Applied to outgoing connections in `ConnectToPeers` and `ConnectToPeersNoListeners`
+  - Applied to incoming connections in `waitForPeerConnections`
+  - Safely handles non-TCP connections (net.Pipe) via type assertion
+  - OS detects dead peers in ~6-10s (3 probes × 2s), delivers EOF to replicaListener
 
 - [ ] 113c: Fix EPaxos-HO `bcastPreAccept` / `bcastCausalCommit` / all broadcast functions
   - EPaxos-HO has its own broadcast logic (not using `SendMsg`)

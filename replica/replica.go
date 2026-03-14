@@ -154,6 +154,15 @@ func (r *Replica) ReadQuorumSize() int {
 	return r.N - r.F
 }
 
+// setTCPKeepAlive enables TCP keepalive on a connection so the OS detects
+// dead peers within ~6-10s (3 probes × 2s interval) and delivers EOF to the reader.
+func setTCPKeepAlive(conn net.Conn) {
+	if tc, ok := conn.(*net.TCPConn); ok {
+		tc.SetKeepAlive(true)
+		tc.SetKeepAlivePeriod(2 * time.Second)
+	}
+}
+
 func (r *Replica) ConnectToPeers() {
 	var b [4]byte
 	bs := b[:4]
@@ -165,6 +174,7 @@ func (r *Replica) ConnectToPeers() {
 		for {
 			if conn, err := net.Dial("tcp", r.PeerAddrList[i]); err == nil {
 				r.Peers[i] = conn
+				setTCPKeepAlive(conn)
 				break
 			}
 			time.Sleep(1e9)
@@ -202,6 +212,7 @@ func (r *Replica) ConnectToPeersNoListeners() {
 		for {
 			if conn, err := net.Dial("tcp", r.PeerAddrList[i]); err == nil {
 				r.Peers[i] = conn
+				setTCPKeepAlive(conn)
 				break
 			}
 			time.Sleep(1e9)
@@ -568,6 +579,7 @@ func (r *Replica) waitForPeerConnections(done chan bool) {
 		} else {
 			connected++
 		}
+		setTCPKeepAlive(conn)
 		r.Peers[id] = conn
 		r.PeerReaders[id] = bufio.NewReader(conn)
 		r.PeerWriters[id] = bufio.NewWriter(conn)
