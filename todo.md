@@ -7862,6 +7862,83 @@ clamped to 1.01 due to the Zipf bug found in Phase 110.1a. Corrected results in 
 
 ---
 
+### Phase 113: Fix Peer Death Detection — TCP Write Deadline + Re-run Kill Experiments
+
+**Goal**: Fix the `SendMsg` blocking on dead peers in ALL protocols (EPaxos, EPaxos-HO, EPaxos-Swift, Raft, Raft-HT). Re-run kill-replica3 experiment, expect <10% throughput drop.
+
+**Root cause** (from Phase 112):
+- `SendMsg()` calls `w.Flush()` on a dead peer's TCP writer
+- The kernel TCP stack retransmits for ~2 minutes before giving up
+- `r.M` lock is held during `Flush()` → ALL peer sends blocked
+- Replica event loop can't send replies → clients timeout → clients exit
+- Phase 103a fixed this for Raft/Raft-HT by setting `PeerWriters[rid] = nil` on `replicaListener` EOF
+- But EOF only arrives if the READER side detects connection loss — when the dead replica's role was "writing to us", the reader gets EOF promptly. When dead replica was "reading from us", the writer side blocks indefinitely.
+
+**Fix strategy**: Two complementary fixes:
+
+1. **TCP write deadline on peer connections** — `conn.SetWriteDeadline()` before each `Flush()`. If write takes >1s, returns error → mark peer dead. This catches the case where the reader side never gets EOF.
+
+2. **TCP keepalive on peer connections** — `conn.(*net.TCPConn).SetKeepAlive(true)` + `SetKeepAlivePeriod(1s)`. OS detects dead peer in ~3-9s (3 probes × 1-3s interval), sends EOF to reader.
+
+**Tasks**:
+
+- [x] 113a: Add write deadline to `SendMsg` in `replica/replica.go` (~30 LOC)
+  - Added `peerWriteDeadline = 1s` constant
+  - `SendMsg`: set write deadline before Flush, clear after; on error mark peer dead + close conn
+  - `FlushPeers`: same pattern — per-peer deadline, mark dead on error, continue to next peer
+  - Uses existing `r.Peers[]` (net.Conn) — no new field needed
+  - 8 tests pass: WriteDeadline, WriteDeadlineSuccess, FlushPeers_WriteDeadline, PeerWriteDeadlineConstant
+  - Full test suite: all packages pass, no regressions
+
+- [ ] 113b: Add TCP keepalive on peer connections (~10 LOC)
+  - In `ConnectToPeersNoListeners` / `ConnectToPeers`: after dial, set keepalive
+  - `tcpConn.SetKeepAlive(true)`
+  - `tcpConn.SetKeepAlivePeriod(2 * time.Second)`
+  - This ensures `replicaListener` reader gets EOF within ~6-10s even if no write happens
+
+- [ ] 113c: Fix EPaxos-HO `bcastPreAccept` / `bcastCausalCommit` / all broadcast functions
+  - EPaxos-HO has its own broadcast logic (not using `SendMsg`)
+  - Apply same write deadline pattern: `SetWriteDeadline` before `Flush`, nil writer on error
+  - Check: `bcastPreAccept`, `bcastAccept`, `bcastCommit`, `bcastCausalCommit`, `bcastPrepare`, `bcastTryPreAccept`
+  - Same for vanilla EPaxos and EPaxos-Swift
+
+- [ ] 113d: Fix client0 cascading failover bug
+  - Phase 112 showed client0 marking ALL replicas dead in a loop
+  - Root cause: `findNextAlive()` cycles through all replicas, but if `WaitReplies` returns error for alive replicas too (e.g., due to in-flight request on wrong replica), it marks them all dead
+  - Fix: only mark a replica dead on confirmed EOF/connection error, not on reply timeout
+  - Add backoff: after failover, wait 100ms before marking next replica dead
+
+- [ ] 113e: Build + unit tests
+  - `go build -o swiftpaxos-dist .`
+  - `go test ./...`
+  - Add test: simulate peer death by closing conn, verify `PeerWriters` becomes nil within 2s
+  - Add test: verify `SendMsg` returns quickly (not 2-min hang) after peer death
+
+- [ ] 113f: Re-run kill-replica3 experiment (Phase 112 retry)
+  - Config: 5r-5m-3c, t=16, w50%, weakRatio=50%, networkDelay=25ms, reqs=10000
+  - Kill replica3 (125, no client) at t≈60s
+  - **Expected**: pre-kill ~28K → dip for 1-2s → post-kill ~25-27K (<10% drop)
+  - All 3 clients should survive and continue producing throughput
+  - No cascading failover on client0
+
+- [ ] 113g: Re-run kill-replica0 experiment (Phase 111 retry)
+  - Kill replica0 (101, client0 co-located) at t≈60s
+  - **Expected**: similar to Phase 111 but with faster recovery
+  - Client0 should failover cleanly (no cascading dead loop)
+  - Post-kill: ~18-19K (client0 remote ops + client1/client2 normal)
+
+- [ ] 113h: Tabulate all failure experiments
+  | Scenario | Pre-kill | Post-kill | Drop | Recovery |
+  |----------|----------|-----------|------|----------|
+  | Kill co-located replica (Phase 111) | 28K | 18.5K | 34% | 3s |
+  | Kill non-co-located (Phase 112, buggy) | 26K | 9.5K | 64% | never |
+  | Kill non-co-located (Phase 113f, fixed) | 28K | ~26K? | <10%? | <2s? |
+  | Kill co-located (Phase 113g, fixed) | 28K | ~19K? | ~32%? | <2s? |
+
+**Status**: ⬜ **TODO**
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task

@@ -232,6 +232,11 @@ func (r *Replica) WaitForClientConnections() {
 	}
 }
 
+// peerWriteDeadline is the maximum time to wait for a peer write/flush to complete.
+// If a peer is dead, the kernel TCP stack would block for ~2 minutes; this deadline
+// ensures we detect the failure within 1 second and mark the peer as dead.
+const peerWriteDeadline = 1 * time.Second
+
 func (r *Replica) SendMsg(peerId int32, code uint8, msg fastrpc.Serializable) {
 	r.M.Lock()
 	defer r.M.Unlock()
@@ -241,9 +246,28 @@ func (r *Replica) SendMsg(peerId int32, code uint8, msg fastrpc.Serializable) {
 		r.Printf("Connection to %d lost!", peerId)
 		return
 	}
+
+	// Set write deadline to avoid blocking for ~2 min on dead peer's TCP connection
+	if conn := r.Peers[peerId]; conn != nil {
+		conn.SetWriteDeadline(time.Now().Add(peerWriteDeadline))
+	}
+
 	w.WriteByte(code)
 	msg.Marshal(w)
-	w.Flush()
+	if err := w.Flush(); err != nil {
+		r.Printf("Peer %d write error: %v — marking dead", peerId, err)
+		r.PeerWriters[peerId] = nil
+		r.Alive[peerId] = false
+		if conn := r.Peers[peerId]; conn != nil {
+			conn.Close()
+		}
+		return
+	}
+
+	// Clear write deadline on success
+	if conn := r.Peers[peerId]; conn != nil {
+		conn.SetWriteDeadline(time.Time{})
+	}
 }
 
 func (r *Replica) SendClientMsg(id int32, code uint8, msg fastrpc.Serializable) {
@@ -319,13 +343,29 @@ func (r *Replica) SendMsgNoFlush(peerId int32, code uint8, msg fastrpc.Serializa
 }
 
 // FlushPeers flushes buffered writes to all connected peer writers.
+// Uses write deadlines to avoid blocking on dead peers.
 func (r *Replica) FlushPeers() {
 	r.M.Lock()
 	defer r.M.Unlock()
 
-	for _, w := range r.PeerWriters {
-		if w != nil {
-			w.Flush()
+	for i, w := range r.PeerWriters {
+		if w == nil {
+			continue
+		}
+		if conn := r.Peers[i]; conn != nil {
+			conn.SetWriteDeadline(time.Now().Add(peerWriteDeadline))
+		}
+		if err := w.Flush(); err != nil {
+			r.Printf("Peer %d flush error: %v — marking dead", i, err)
+			r.PeerWriters[i] = nil
+			r.Alive[i] = false
+			if conn := r.Peers[i]; conn != nil {
+				conn.Close()
+			}
+			continue
+		}
+		if conn := r.Peers[i]; conn != nil {
+			conn.SetWriteDeadline(time.Time{})
 		}
 	}
 }
