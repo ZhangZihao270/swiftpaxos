@@ -7936,21 +7936,32 @@ clamped to 1.01 due to the Zipf bug found in Phase 110.1a. Corrected results in 
       a latent issue where initial PreAccept responses don't reach the leader
   - **Comparison with broken run (v5)**: 27.5K vs 9.4K (2.9× improvement)
 
-- [ ] 113g: Re-run kill-replica0 experiment (Phase 111 retry)
+- [x] 113g: Re-run kill-replica0 experiment (Phase 111 retry)
   - Kill replica0 (101, client0 co-located) at t≈60s
-  - **Expected**: similar to Phase 111 but with faster recovery
-  - Client0 should failover cleanly (no cascading dead loop)
-  - Post-kill: ~18-19K (client0 remote ops + client1/client2 normal)
+  - **Results**: 18,302 ops/sec aggregate (28K pre-kill → 18.7K post-kill, −33%)
+    - client0: 0.00 ops/sec (424,095 ops) — stalled (client failover still not working)
+    - client1: 9,129 ops/sec (1,600,000 ops) — completed normally
+    - client2: 9,173 ops/sec (1,600,000 ops) — completed normally
+  - Throughput stabilized at ~18.7K immediately after kill (no recovery dip)
+  - The retryStuckInstances fix ensures client1/client2 remain healthy
+  - Client0 failover is a separate known issue (not addressed by Phase 113f fixes)
 
-- [ ] 113h: Tabulate all failure experiments
+- [x] 113h: Tabulate all failure experiments
   | Scenario | Pre-kill | Post-kill | Drop | Recovery |
   |----------|----------|-----------|------|----------|
-  | Kill co-located replica (Phase 111) | 28K | 18.5K | 34% | 3s |
+  | Kill co-located (Phase 111, original) | 28K | 18.5K | 34% | 3s |
   | Kill non-co-located (Phase 112, buggy) | 26K | 9.5K | 64% | never |
-  | Kill non-co-located (Phase 113f, fixed) | 28K | 28K | 0% | 0s |
-  | Kill co-located (Phase 113g, fixed) | 28K | ~19K? | ~32%? | <2s? |
+  | Kill non-co-located (Phase 113f, fixed) | 28K | 28K | **0%** | **0s** |
+  | Kill co-located (Phase 113g, fixed) | 28K | 18.7K | 33% | 0s |
 
-**Status**: 🔶 **IN PROGRESS** — Phase 113f complete, 113g+113h remaining
+  **Key findings**:
+  - Phase 113f fixes (handlePreAccept reply + retryStuckInstances) completely
+    eliminate the 64% throughput drop when killing a non-client replica
+  - Kill co-located replica: throughput drops by ~33% (expected, 1/3 of clients lost)
+    with zero recovery delay
+  - Client failover for the co-located replica remains a separate unsolved issue
+
+**Status**: ✅ **DONE**
 
 ---
 
