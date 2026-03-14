@@ -7752,12 +7752,12 @@ clamped to 1.01 due to the Zipf bug found in Phase 110.1a. Corrected results in 
 
 **Tasks**:
 
-- [ ] 111a: Create failure experiment script
-  - Start 5 replicas + 3 clients with t=16, reqs=10000
-  - Client logs per-second throughput (tput-all.csv)
-  - At t=60s: `ssh 130.245.173.101 "pkill -9 -x swiftpaxos-dist"`
-  - Wait for remaining clients to finish
-  - Collect all logs + tput CSVs
+- [x] 111a: Create failure experiment script — **DONE** [26:03:13]
+  - Script: `scripts/exp2.3-epaxosho.sh` (mirrors `exp2.3-raftht.sh`)
+  - Config: epaxosho, t=16, reqs=100000, w50%, weakRatio=50%, fast=true
+  - Kills replica0 server on .101 at t≈60s via `pkill -9 -f 'swiftpaxos-dist -run server'`
+  - Extracts TPUT lines from client logs → tput-all.csv + tput-aggregated.csv
+  - Usage: `bash scripts/exp2.3-epaxosho.sh [output-dir] [kill-delay-s]`
 
 - [ ] 111b: Run experiment and collect results
   - Aggregate per-second throughput from tput-all.csv
