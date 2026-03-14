@@ -7733,6 +7733,62 @@ clamped to 1.01 due to the Zipf bug found in Phase 110.1a. Corrected results in 
 
 ---
 
+### Phase 111: EPaxos-HO Failure Recovery Experiment (Exp 2.3)
+
+**Goal**: Kill one replica during an EPaxos-HO run and measure throughput recovery. EPaxos is leaderless, so killing any replica should NOT cause total outage — throughput should degrade gracefully (lose ~20% capacity from 5→4 replicas) and recover quickly.
+
+**Key difference from Raft-HT failure (Phase 103)**:
+- Raft-HT: kill leader → tput drops to 0 → wait for election (~2s) → recover
+- EPaxos-HO: kill any replica → tput dips briefly (in-flight RPCs timeout) → no election needed → recovers in <1s
+- EPaxos-HO weak ops on surviving replicas should have 0 downtime (local reads)
+
+**Parameters**:
+- Protocol: `epaxosho`
+- Config: 5r-5m-3c, t=16, w50%, weakRatio=50%, networkDelay=25ms
+- Reqs per thread: 10000 (long run to capture pre/during/post-kill)
+- Kill: replica0 (on 130.245.173.101) at t≈60s
+- Client0 co-located with killed replica → expected to lose connection and exit
+- Client1/client2 on surviving machines → expected to continue
+
+**Tasks**:
+
+- [ ] 111a: Create failure experiment script
+  - Start 5 replicas + 3 clients with t=16, reqs=10000
+  - Client logs per-second throughput (tput-all.csv)
+  - At t=60s: `ssh 130.245.173.101 "pkill -9 -x swiftpaxos-dist"`
+  - Wait for remaining clients to finish
+  - Collect all logs + tput CSVs
+
+- [ ] 111b: Run experiment and collect results
+  - Aggregate per-second throughput from tput-all.csv
+  - Expected timeline:
+    - t=0-59: steady state ~26K ops/s (t=16, w50%, from Phase 109g)
+    - t=60: kill replica0 → brief dip (in-flight RPCs to dead replica fail)
+    - t=61-62: recovery — clients detect dead peer, stop sending to it
+    - t=63+: steady state ~21K ops/s (4/5 capacity, client0 lost)
+  - Measure: recovery time, throughput drop, post-kill steady state
+
+- [ ] 111c: Analyze and compare with Raft-HT (Phase 103e)
+  - Key comparison:
+    | Metric | Raft-HT | EPaxos-HO (expected) |
+    |--------|---------|---------------------|
+    | Pre-kill tput | ~11K | ~26K |
+    | Min tput during kill | ~4.7K | ~18K (no full outage) |
+    | Recovery time | ~2s (election) | <1s (no election) |
+    | Post-kill tput | ~9.5K (4 replicas) | ~21K (4 replicas) |
+    | Weak op downtime | 0 (local reads) | 0 (local reads) |
+  - EPaxos-HO advantage: no leader, no election, graceful degradation
+
+- [x] 111d: Verify client handles dead replica correctly — **DONE** [26:03:13]
+  - EPaxos-HO, EPaxos, EPaxos-Swift clients had NO dead-replica handling (unlike Raft-HT)
+  - Added: `deadReplicas` map, `watchReaderDead()` goroutine, `findNextAlive()` with ping-based selection
+  - Fixed `WaitReplies()` in `client/buffer.go` to send on `ReaderDead` channel on exit
+  - All three leaderless clients now: detect dead replica → pick closest alive → restart WaitReplies
+
+**Status**: ⬜ **TODO**
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task

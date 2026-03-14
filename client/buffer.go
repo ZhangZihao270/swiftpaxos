@@ -196,6 +196,11 @@ func (c *BufferClient) WaitReplies(waitFrom int) {
 				c.RegisterReply(val, seqnum)
 			}(r.Value, r.CommandId)
 		}
+		// Notify protocol client that this reader is dead (same as RegisterRPCTable)
+		select {
+		case c.ReaderDead <- waitFrom:
+		default:
+		}
 	}()
 }
 
