@@ -176,13 +176,43 @@ func TestMWeakReadBinarySize(t *testing.T) {
 	wr := &MWeakRead{CommandId: 1, ClientId: 2, Key: state.Key(3)}
 	nbytes, known := wr.BinarySize()
 	if !known {
-		t.Error("BinarySize should be known for MWeakRead (fixed 16 bytes)")
+		t.Error("BinarySize should be known for MWeakRead (fixed 20 bytes)")
+	}
+	if nbytes != 20 {
+		t.Errorf("BinarySize = %d, want 20", nbytes)
 	}
 
 	var buf bytes.Buffer
 	wr.Marshal(&buf)
 	if buf.Len() != nbytes {
 		t.Errorf("BinarySize %d != marshalled size %d", nbytes, buf.Len())
+	}
+}
+
+func TestMWeakReadMinIndex(t *testing.T) {
+	original := &MWeakRead{
+		CommandId: 42,
+		ClientId:  100,
+		Key:       state.Key(7777),
+		MinIndex:  5678,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	restored := &MWeakRead{}
+	if err := restored.Unmarshal(&buf); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if restored.MinIndex != 5678 {
+		t.Errorf("MinIndex = %d, want 5678", restored.MinIndex)
+	}
+	if restored.CommandId != 42 {
+		t.Errorf("CommandId = %d, want 42", restored.CommandId)
+	}
+	if restored.Key != state.Key(7777) {
+		t.Errorf("Key = %d, want 7777", restored.Key)
 	}
 }
 

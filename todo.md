@@ -8500,11 +8500,105 @@ messages first, THEN enqueue them via sender.
     vs log-based), not broadcast I/O — this is a real protocol difference
   - Raft/Raft-HT stable (reverted successfully)
 
-- [ ] 119g-4: Re-run full Exp 1.1 with all 4 protocols
-  - 4 protocols × 8 threads × 2 write groups × 1 rep = 64 runs
-  - All protocols now use same sync broadcast → fair comparison
+- [~] 119g-4: SKIPPED — Mongo/Pileus still 49% faster due to protocol architecture difference
+  - instance-based (no log) vs Raft log replication → unfair comparison
+  - Replaced by Phase 120: rewrite Mongo/Pileus on top of Raft
 
-**Status**: 🔄 **IN PROGRESS** (119g-1,2,3 done, 119g-4 pending)
+**Status**: ❌ **DISCARDED** — sync broadcast alone insufficient for fairness [26:03:15]
+
+---
+
+### Phase 120: Rewrite Mongo/Pileus as Raft-HT Variants with Causal Weak Reads
+
+**Goal**: Replace Orca's instance-based Mongo/Pileus with Raft log-based implementations
+for fair comparison. Since real MongoDB uses Raft-like oplog replication, our baseline
+should too.
+
+**Architecture**: `mongotunable/` and `pileus/` each wrap `raft-ht/` independently.
+
+**Key differences from Raft-HT**:
+- **Raft-HT weak read**: follower reads local state immediately (no ordering guarantee)
+- **Mongo weak write**: leader executes locally, assigns log index, replies immediately
+  with the log index (client tracks this as causal dependency)
+- **Mongo weak read**: client sends read with `minIndex` (from last weak write reply).
+  Follower waits until `lastApplied >= minIndex` before serving the read.
+  This guarantees **read-your-writes** causal consistency for weak ops.
+- **Pileus**: same as Mongo but ALL writes forced to strong path (no weak writes).
+  Weak reads still use the causal `minIndex` mechanism.
+
+**Protocol flow**:
+```
+Mongo weak write:
+  client → leader → append to log → execute locally → reply(value, logIndex)
+  (leader broadcasts AppendEntries async, doesn't wait for majority)
+
+Mongo weak read:
+  client → closest replica (with minIndex from last weak write)
+  replica: if lastApplied >= minIndex → read state, reply
+           else → wait until lastApplied >= minIndex, then reply
+```
+
+**Implementation plan**:
+
+- [x] 120a: Extend wire format for causal tracking (~30 LOC)
+  - `ProposeReplyTS`: added `LogIndex int32` field (leader returns assigned index on weak write reply)
+  - `MWeakRead`: added `MinIndex int32` field (client sends minimum applied index for causal read)
+  - Updated Marshal/Unmarshal/BinarySize for both types, added tests
+
+- [ ] 120b: Create `mongotunable/mongotunable.go` — Mongo wrapper (~200 LOC)
+  - Embed `raftht.Replica` (delegate Raft log replication, broadcast, commit, election)
+  - Override weak write reply: include `logIndex` in ProposeReplyTS
+  - Override weak read handler: check `lastApplied >= minIndex`, wait if needed
+    - Use a condition variable or polling loop on `r.lastApplied`
+    - Timeout after 2s to avoid hanging
+  - Everything else (event loop, broadcastAppendEntries, election): delegate to raft-ht
+
+- [ ] 120c: Create `mongotunable/client.go` (~80 LOC)
+  - Track `lastWeakWriteIndex int32` — updated from weak write reply's LogIndex
+  - `SendWeakWrite`: send to leader, get fast reply + logIndex
+  - `SendWeakRead`: include `lastWeakWriteIndex` as MinIndex in request
+  - `SendStrongWrite/Read`: delegate to raft-ht strong path
+
+- [ ] 120d: Create `pileus/pileus.go` — Pileus wrapper (~150 LOC)
+  - Embed `raftht.Replica` (same as Mongo)
+  - Force ALL writes to strong path in handlePropose (no weak writes)
+  - Weak reads: same causal mechanism as Mongo (wait for lastApplied >= minIndex)
+
+- [ ] 120e: Create `pileus/client.go` (~60 LOC)
+  - `SupportsWeak()=true` (weak reads supported)
+  - `SendWeakWrite`: delegates to `SendStrongWrite` (all writes strong)
+  - `SendWeakRead`: same as Mongo client (send minIndex)
+  - `SendStrongWrite/Read`: delegate to raft-ht strong path
+
+- [ ] 120f: Register protocols in `run.go` + `main.go` (~40 LOC)
+  - `case "mongotunable"`: create mongotunable.New(...)
+  - `case "pileus"`: create pileus.New(...)
+  - Both leader-based
+
+- [ ] 120g: Remove old Orca-based implementations
+  - Delete old `mongotunable/` files (mongotunable.go, defs.go, defsmarsh.go, defs_test.go)
+  - Delete old `pileus/` if exists, or create new directory
+  - Replace with new files from 120b-120e
+
+- [ ] 120h: Build + test
+  - `go build -o swiftpaxos-dist .`
+  - `go test ./mongotunable/ ./pileus/`
+  - Test: Mongo weak write returns logIndex, weak read with minIndex waits correctly
+  - Test: Pileus forces writes to strong, weak reads use causal tracking
+
+- [ ] 120i: Spot test — Mongo + Pileus + Raft-HT at w5%, t=1,8,32,96
+  - **Expected**: Mongo tput ≈ Raft-HT (within 10%, same Raft replication)
+  - **Expected**: Mongo weak read latency slightly higher than Raft-HT
+    (wait for lastApplied >= minIndex adds small delay on followers)
+  - **Expected**: Pileus tput < Raft-HT (no weak write benefit)
+  - **Expected**: s_p50 ~85ms at t=1 for all
+
+- [ ] 120j: Run full Exp 1.1 with all 4 protocols
+  - 4 protocols × 8 threads × 2 write groups × 1 rep = 64 runs
+
+**Estimated LOC**: ~600 (mongotunable ~280 + pileus ~210 + wire format ~30 + wiring ~40)
+
+**Status**: 🔄 **IN PROGRESS** (120a done)
 
 ---
 

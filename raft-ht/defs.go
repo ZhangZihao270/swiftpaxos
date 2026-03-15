@@ -742,6 +742,7 @@ type MWeakRead struct {
 	CommandId int32
 	ClientId  int32
 	Key       state.Key
+	MinIndex  int32 // Minimum log index that must be applied before serving this read (causal tracking)
 }
 
 func (t *MWeakRead) New() fastrpc.Serializable {
@@ -749,12 +750,12 @@ func (t *MWeakRead) New() fastrpc.Serializable {
 }
 
 func (t *MWeakRead) BinarySize() (nbytes int, sizeKnown bool) {
-	return 16, true // 2 x int32 + Key (int64 = 8 bytes)
+	return 20, true // 3 x int32 + Key (int64 = 8 bytes)
 }
 
 func (t *MWeakRead) Marshal(wire io.Writer) {
-	var b [16]byte
-	bs := b[:16]
+	var b [20]byte
+	bs := b[:20]
 	tmp32 := t.CommandId
 	bs[0] = byte(tmp32)
 	bs[1] = byte(tmp32 >> 8)
@@ -774,19 +775,25 @@ func (t *MWeakRead) Marshal(wire io.Writer) {
 	bs[13] = byte(tmp64 >> 40)
 	bs[14] = byte(tmp64 >> 48)
 	bs[15] = byte(tmp64 >> 56)
+	tmp32 = t.MinIndex
+	bs[16] = byte(tmp32)
+	bs[17] = byte(tmp32 >> 8)
+	bs[18] = byte(tmp32 >> 16)
+	bs[19] = byte(tmp32 >> 24)
 	wire.Write(bs)
 }
 
 func (t *MWeakRead) Unmarshal(wire io.Reader) error {
-	var b [16]byte
-	bs := b[:16]
-	if _, err := io.ReadAtLeast(wire, bs, 16); err != nil {
+	var b [20]byte
+	bs := b[:20]
+	if _, err := io.ReadAtLeast(wire, bs, 20); err != nil {
 		return err
 	}
 	t.CommandId = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
 	t.ClientId = int32((uint32(bs[4]) | (uint32(bs[5]) << 8) | (uint32(bs[6]) << 16) | (uint32(bs[7]) << 24)))
 	t.Key = state.Key(int64(uint64(bs[8]) | (uint64(bs[9]) << 8) | (uint64(bs[10]) << 16) | (uint64(bs[11]) << 24) |
 		(uint64(bs[12]) << 32) | (uint64(bs[13]) << 40) | (uint64(bs[14]) << 48) | (uint64(bs[15]) << 56)))
+	t.MinIndex = int32((uint32(bs[16]) | (uint32(bs[17]) << 8) | (uint32(bs[18]) << 16) | (uint32(bs[19]) << 24)))
 	return nil
 }
 
