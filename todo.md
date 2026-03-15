@@ -8343,10 +8343,9 @@ These scripts are permanent — rerun with `bash scripts/eval-exp3.1-final.sh [o
 - [x] 117e: Build + unit test — `go build` + `go test ./...` all pass
 
 - [ ] 117f: Spot test — mongotunable t=8, w50%, weakRatio=50%
-  - Config: 5r-5m-3c, writes=50%, weakRatio=50%, --startup-delay 25
-  - Verify: strong ops complete, weak ops get fast reply
-  - Verify: both "mongotunable" and "pileus" protocol names work
-  - Compare with Raft-HT baseline (should be similar throughput)
+  - Script: `scripts/eval-phase117f-spot.sh`
+  - Tests mongotunable, pileus, raftht (control) at t=8, w50%, weakRatio=50%
+  - Run: `bash scripts/eval-phase117f-spot.sh`
 
 - [ ] 117g: Run Exp 1.1 with all 4 protocols
   - Update `scripts/eval-exp1.1-final.sh`: add mongotunable + pileus
@@ -8354,9 +8353,9 @@ These scripts are permanent — rerun with `bash scripts/eval-exp3.1-final.sh [o
   - 4 protocols × 8 threads × 2 write groups × 1 rep = 64 runs
   - Tabulate: compare Raft, Raft-HT, MongoDB-Tunable, Pileus
 
-**Estimated LOC**: ~2,700 (mongotunable package) + ~30 (wiring)
+**Estimated LOC**: ~1,200 (mongotunable package) + ~30 (wiring)
 
-**Status**: ⬜ **TODO**
+**Status**: 🔄 **IN PROGRESS** (117a-e done, 117f-g pending execution)
 
 ---
 
