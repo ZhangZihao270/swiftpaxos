@@ -8288,6 +8288,90 @@ These scripts are permanent — rerun with `bash scripts/eval-exp3.1-final.sh [o
 
 ## Legend
 
+### Phase 117: Port Orca MongoDB-Tunable & Pileus to SwiftPaxos
+
+**Goal**: Port both baseline protocols from Orca for fair comparison in Exp 1.1. Since the two protocols are 99% identical (~130 LOC diff), implement as a single unified package with a flag to switch behavior.
+
+**Source**:
+- `Orca/optimizedmongodbtunable/` (1,895 LOC) + `Orca/optimizedmongodbtunableproto/` (664 LOC)
+- `Orca/pileus/` (1,890 LOC) + `Orca/pileusproto/` (664 LOC)
+
+**Key difference between the two**:
+- MongoDB Tunable: weak writes allowed (CL=CAUSAL for both reads and writes)
+- Pileus: ALL writes forced to STRONG, only reads can be CAUSAL
+
+**Architecture**: Single package `mongotunable/` that covers both:
+- `protocol: mongotunable` → MongoDB Tunable behavior
+- `protocol: pileus` → Pileus behavior (force PUT → STRONG)
+
+**Protocol summary** (both use same message flow):
+- Leader-based, single leader processes all proposals
+- Strong ops: Accept → majority AcceptReply → Commit → execute
+- Weak ops: Accept → immediate reply → Commit (async) → CommitAck from replicas
+- Separate instance spaces for reads vs writes
+- `majorityCommittedUpTo` tracks durable commit point
+
+**Shared code with existing protocols**: None directly (different protocol family from EPaxos/CURP). Uses its own message types (Prepare, Accept, Commit, CommitShort, CommitAck).
+
+**Tasks**:
+
+- [x] 117a: Create `mongotunable/defs.go` — message types + serialization [26:03:15, 23:00]
+  - Ported all 7 message types from Orca: Prepare, PrepareReply, Accept, AcceptReply, Commit, CommitShort, CommitAck
+  - Added status constants (PREPARING..DISCARDED) and CL constants (CL_STRONG, CL_CAUSAL)
+  - Cache pools for all types; serialization follows existing SwiftPaxos pattern (single defs.go)
+  - 15 tests: round-trip for all types, cache get/put, BinarySize, negative values, multi-command, constants
+
+- [ ] 117b: Create `mongotunable/mongotunable.go` — main protocol logic (~1,900 LOC)
+  - Port from `Orca/optimizedmongodbtunable/optimizedmongodbtunable.go`
+  - Adapt: `genericsmr` → `replica`, `genericsmrproto` → `defs`, `fastrpc` → `rpc`
+  - `New(...)` takes `isPileus bool` parameter
+  - When `isPileus=true`: force all PUT commands to CL=STRONG in handlePropose
+  - Event loop: handle prepareChan, acceptChan, commitChan[], commitShortChan[],
+    prepareReplyChan, acceptReplyChan, commitAckChan, majorityCommitChan
+  - Execution: executeWriteCommands (strong path + weak path), executeWeakReadCommands
+
+- [ ] 117c: Create `mongotunable/client.go` (~80 LOC)
+  - `SupportsWeak() = true`
+  - SendStrongWrite/SendStrongRead: set CL=STRONG
+  - SendWeakWrite/SendWeakRead: set CL=CAUSAL
+  - For Pileus mode: client-side flag `isPileus` → SendWeakWrite delegates to SendStrongWrite
+  - Alternatively: Pileus behavior enforced server-side in handlePropose (simpler)
+
+- [ ] 117d: Register protocols in `run.go` + `main.go` (~30 LOC)
+  - `run.go`:
+    - `case "mongotunable"` → `mongotunable.New(..., isPileus=false)`
+    - `case "pileus"` → `mongotunable.New(..., isPileus=true)`
+  - `main.go`:
+    - `case "mongotunable"` → create hybrid client, `c.Leaderless=false`
+    - `case "pileus"` → create hybrid client, `c.Leaderless=false`
+  - Both are leader-based protocols
+
+- [ ] 117e: Build + unit test
+  - `go build -o swiftpaxos-dist .`
+  - `go test ./mongotunable/`
+  - Verify: message serialization round-trips
+  - Verify: isPileus=true forces PUT→STRONG
+
+- [ ] 117f: Spot test — mongotunable t=8, w50%, weakRatio=50%
+  - Config: 5r-5m-3c, writes=50%, weakRatio=50%, --startup-delay 25
+  - Verify: strong ops complete, weak ops get fast reply
+  - Verify: both "mongotunable" and "pileus" protocol names work
+  - Compare with Raft-HT baseline (should be similar throughput)
+
+- [ ] 117g: Run Exp 1.1 with all 4 protocols
+  - Update `scripts/eval-exp1.1-final.sh`: add mongotunable + pileus
+  - Config: same as Phase 116 (w5%, w50%, t=1..96)
+  - 4 protocols × 8 threads × 2 write groups × 1 rep = 64 runs
+  - Tabulate: compare Raft, Raft-HT, MongoDB-Tunable, Pileus
+
+**Estimated LOC**: ~2,700 (mongotunable package) + ~30 (wiring)
+
+**Status**: ⬜ **TODO**
+
+---
+
+## Legend
+
 - `[ ]` - Undone task
 - `[x]` - Done task with timestamp [yy:mm:dd, hh:mm]
 - Priority: HIGH > MEDIUM > LOW
