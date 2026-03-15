@@ -8368,6 +8368,58 @@ These scripts are permanent — rerun with `bash scripts/eval-exp3.1-final.sh [o
 
 ## Legend
 
+### Phase 118: Fix Mongo/Pileus — Fair Strong Path Parity with Raft-HT
+
+**Goal**: Mongo/Pileus strong path must match Raft-HT's strong path for fair comparison.
+Currently Mongo/Pileus has unfair advantages:
+1. No reply delay injection (uses `ReplyProposeTS` instead of `ReplyProposeTSDelayed`)
+2. Strong ops reply at AcceptReply majority, not at execute time (Raft waits for commit+execute)
+3. Leader event loop is too lightweight compared to Raft (no log ordering, no slot tracking)
+
+**Current unfair results (t=96, w5%)**:
+- Mongo: 59,709 ops/s, s_p50=73ms (no reply delay, reply at accept)
+- Raft-HT: 33,959 ops/s, s_p50=220ms (reply delay + commit+execute)
+- Raft: 21,779 ops/s, s_p50=174ms (reply delay + commit+execute)
+
+**Expected after fix**: Mongo/Pileus s_p50 ≈ Raft s_p50 ≈ 85ms at low concurrency.
+
+**Tasks**:
+
+- [x] 118a: Fix reply delay — use `ReplyProposeTSDelayed` everywhere (~20 LOC)
+  - Replaced all 8 `ReplyProposeTS` calls with `ReplyProposeTSDelayed` + clientId
+  - Early reject: `propose.ClientId`; execution paths: `clientProposals[j].ClientId`
+
+- [x] 118b: Fix strong reply timing — reply after execute, not at AcceptReply
+  - Removed reply block from `handleAcceptReply` (was replying before execute)
+  - Strong ops now reply only in `executeStrongCommands` after execution
+  - Matches Raft's commit+execute-then-reply behavior
+
+- [x] 118c: Verify causal fast reply still works
+  - Used alternative approach: hardcode causal fast reply (removed `!r.Dreply` check)
+  - Causal reads/writes reply immediately at commit time (no Dreply dependency)
+  - Removed double-reply from execution goroutines for causal ops
+  - Strong ops still reply at execute time (Dreply=true, default)
+
+- [x] 118d: Build + unit test
+  - `go build` passes, all `go test ./...` pass
+
+- [ ] 118e: Spot test — verify s_p50 parity
+  - mongotunable t=8, w50%, weakRatio=50%
+  - **Expected**: s_p50 ≈ 85ms (same as Raft), w_p50 < 1ms (causal fast reply)
+  - Compare with Raft-HT t=8 results
+
+- [ ] 118f: Spot test — mongotunable + pileus at w5%, t=1,8,32,64,96
+  - 2 protocols × 5 thread counts × 1 rep = 10 runs
+  - **Expected**: s_p50 ≈ 85ms at low threads (same as Raft)
+  - **Expected**: throughput ≈ Raft-HT (within 20%)
+  - Compare with Phase 116 Raft/Raft-HT results
+
+**Status**: 🔄 **IN PROGRESS** (118a-d done, 118e-f pending execution)
+
+---
+
+## Legend
+
 - `[ ]` - Undone task
 - `[x]` - Done task with timestamp [yy:mm:dd, hh:mm]
 - Priority: HIGH > MEDIUM > LOW

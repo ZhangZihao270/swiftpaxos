@@ -477,7 +477,7 @@ func (r *Replica) handlePropose(propose *defs.GPropose) {
 				Timestamp: propose.Timestamp,
 				LeaderId:  -1,
 			}
-			r.ReplyProposeTS(preply, propose.Reply, propose.Mutex)
+			r.ReplyProposeTSDelayed(preply, propose.Reply, propose.Mutex, propose.ClientId)
 			return
 		}
 		for r.instanceSpace[r.crtInstance] != nil {
@@ -494,7 +494,7 @@ func (r *Replica) handlePropose(propose *defs.GPropose) {
 					Timestamp: propose.Timestamp,
 					LeaderId:  -1,
 				}
-				r.ReplyProposeTS(preply, propose.Reply, propose.Mutex)
+				r.ReplyProposeTSDelayed(preply, propose.Reply, propose.Mutex, propose.ClientId)
 				return
 			}
 			for r.instanceSpace[r.crtInstance] != nil {
@@ -607,7 +607,8 @@ func (r *Replica) startCausalCommit(inst int32, proposals []*defs.GPropose, cmds
 			status: COMMITTED,
 			lb:     &LeaderBookkeeping{proposals, 0, 0, 0, 0, 0},
 		}
-		if r.instanceReadSpace[inst].lb.clientProposals != nil && !r.Dreply {
+		// Causal reads: always reply immediately at commit time (fast path)
+		if r.instanceReadSpace[inst].lb.clientProposals != nil {
 			for i := 0; i < len(r.instanceReadSpace[inst].cmds); i++ {
 				propreply := &defs.ProposeReplyTS{
 					OK:        defs.TRUE,
@@ -615,7 +616,7 @@ func (r *Replica) startCausalCommit(inst int32, proposals []*defs.GPropose, cmds
 					Value:     state.NIL(),
 					Timestamp: r.instanceReadSpace[inst].lb.clientProposals[i].Timestamp,
 				}
-				r.ReplyProposeTS(propreply, r.instanceReadSpace[inst].lb.clientProposals[i].Reply, r.instanceReadSpace[inst].lb.clientProposals[i].Mutex)
+				r.ReplyProposeTSDelayed(propreply, r.instanceReadSpace[inst].lb.clientProposals[i].Reply, r.instanceReadSpace[inst].lb.clientProposals[i].Mutex, r.instanceReadSpace[inst].lb.clientProposals[i].ClientId)
 			}
 		}
 	} else {
@@ -637,8 +638,8 @@ func (r *Replica) startCausalCommit(inst int32, proposals []*defs.GPropose, cmds
 				status: COMMITTED,
 				lb:     &LeaderBookkeeping{proposals, 0, 0, 0, 0, 0},
 			}
-			// Immediately reply for causal writes (if Dreply is false)
-			if r.instanceSpace[inst].lb.clientProposals != nil && !r.Dreply {
+			// Causal writes: always reply immediately at commit time (fast path)
+			if r.instanceSpace[inst].lb.clientProposals != nil {
 				for i := 0; i < len(r.instanceSpace[inst].cmds); i++ {
 					propreply := &defs.ProposeReplyTS{
 						OK:        defs.TRUE,
@@ -646,7 +647,7 @@ func (r *Replica) startCausalCommit(inst int32, proposals []*defs.GPropose, cmds
 						Value:     state.NIL(),
 						Timestamp: r.instanceSpace[inst].lb.clientProposals[i].Timestamp,
 					}
-					r.ReplyProposeTS(propreply, r.instanceSpace[inst].lb.clientProposals[i].Reply, r.instanceSpace[inst].lb.clientProposals[i].Mutex)
+					r.ReplyProposeTSDelayed(propreply, r.instanceSpace[inst].lb.clientProposals[i].Reply, r.instanceSpace[inst].lb.clientProposals[i].Mutex, r.instanceSpace[inst].lb.clientProposals[i].ClientId)
 				}
 			}
 			r.bcastCausalCommit(inst, r.defaultBallot, deps, cmds, r.majorityCommittedUpTo)
@@ -853,18 +854,8 @@ func (r *Replica) handleAcceptReply(areply *AcceptReply) {
 
 		r.updateCommittedUpTo()
 
-		// Reply to client if needed
-		if inst.lb.clientProposals != nil && !r.Dreply {
-			for i := 0; i < len(inst.cmds); i++ {
-				propreply := &defs.ProposeReplyTS{
-					OK:        defs.TRUE,
-					CommandId: inst.lb.clientProposals[i].CommandId,
-					Value:     state.NIL(),
-					Timestamp: inst.lb.clientProposals[i].Timestamp,
-				}
-				r.ReplyProposeTS(propreply, inst.lb.clientProposals[i].Reply, inst.lb.clientProposals[i].Mutex)
-			}
-		}
+		// Strong ops reply after execute in executeStrongCommands (not here)
+		// to match Raft's commit+execute-then-reply behavior.
 
 		r.bcastStrongCommit(areply.Instance, inst.ballot, inst.deps, inst.cmds, r.majorityCommittedUpTo)
 	}
@@ -905,18 +896,9 @@ func (r *Replica) executeWeakReadCommands() {
 				}
 			}
 
-			// Execute the read commands
+			// Execute the read commands (client already replied at commit time)
 			for j := 0; j < len(inst.cmds); j++ {
-				val := inst.cmds[j].Execute(r.State)
-				if inst.lb != nil && inst.lb.clientProposals != nil && j < len(inst.lb.clientProposals) && r.Dreply {
-					propreply := &defs.ProposeReplyTS{
-						OK:        defs.TRUE,
-						CommandId: inst.lb.clientProposals[j].CommandId,
-						Value:     val,
-						Timestamp: inst.lb.clientProposals[j].Timestamp,
-					}
-					r.ReplyProposeTS(propreply, inst.lb.clientProposals[j].Reply, inst.lb.clientProposals[j].Mutex)
-				}
+				inst.cmds[j].Execute(r.State)
 			}
 			inst.status = EXECUTED
 			r.executedReadUpTo = i
@@ -988,7 +970,7 @@ func (r *Replica) executeStrongCommands(i int32) bool {
 				Value:     val,
 				Timestamp: inst.lb.clientProposals[j].Timestamp,
 			}
-			r.ReplyProposeTS(propreply, inst.lb.clientProposals[j].Reply, inst.lb.clientProposals[j].Mutex)
+			r.ReplyProposeTSDelayed(propreply, inst.lb.clientProposals[j].Reply, inst.lb.clientProposals[j].Mutex, inst.lb.clientProposals[j].ClientId)
 		}
 	}
 	inst.status = EXECUTED
@@ -1018,17 +1000,9 @@ func (r *Replica) executeWeakWriteCommands(i int32) bool {
 		}
 	}
 
+	// Causal writes: client already replied at commit time, just execute
 	for j := 0; j < len(inst.cmds); j++ {
-		val := inst.cmds[j].Execute(r.State)
-		if inst.lb != nil && inst.lb.clientProposals != nil && j < len(inst.lb.clientProposals) && r.Dreply {
-			propreply := &defs.ProposeReplyTS{
-				OK:        defs.TRUE,
-				CommandId: inst.lb.clientProposals[j].CommandId,
-				Value:     val,
-				Timestamp: inst.lb.clientProposals[j].Timestamp,
-			}
-			r.ReplyProposeTS(propreply, inst.lb.clientProposals[j].Reply, inst.lb.clientProposals[j].Mutex)
-		}
+		inst.cmds[j].Execute(r.State)
 	}
 	inst.status = EXECUTED
 	if i == r.executedUpTo+1 {
