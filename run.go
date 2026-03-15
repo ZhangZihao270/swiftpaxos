@@ -26,6 +26,7 @@ import (
 	"github.com/imdea-software/swiftpaxos/paxos"
 	"github.com/imdea-software/swiftpaxos/raft"
 	raftht "github.com/imdea-software/swiftpaxos/raft-ht"
+	"github.com/imdea-software/swiftpaxos/mongotunable"
 	"github.com/imdea-software/swiftpaxos/replica/defs"
 	"github.com/imdea-software/swiftpaxos/swift"
 )
@@ -117,6 +118,14 @@ func runReplica(c *config.Config, logger *dlog.Logger) {
 	case "raftht":
 		log.Println("Starting Raft-HT replica...")
 		rep := raftht.New(c.Alias, replicaId, nodeList, isLeader, f, c, logger)
+		rpc.Register(rep)
+	case "mongotunable":
+		log.Println("Starting MongoDB-Tunable replica...")
+		rep := mongotunable.New(c.Alias, replicaId, nodeList, isLeader, f, false, c, logger)
+		rpc.Register(rep)
+	case "pileus":
+		log.Println("Starting Pileus replica...")
+		rep := mongotunable.New(c.Alias, replicaId, nodeList, isLeader, f, true, c, logger)
 		rpc.Register(rep)
 	}
 

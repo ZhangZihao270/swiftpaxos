@@ -8330,27 +8330,17 @@ These scripts are permanent — rerun with `bash scripts/eval-exp3.1-final.sh [o
   - [x] 117b3: Message handlers
   - [x] 117b4: Execution goroutines
 
-- [ ] 117c: Create `mongotunable/client.go` (~80 LOC)
+- [x] 117c: Create `mongotunable/client.go` (~110 LOC)
   - `SupportsWeak() = true`
   - SendStrongWrite/SendStrongRead: set CL=STRONG
   - SendWeakWrite/SendWeakRead: set CL=CAUSAL
-  - For Pileus mode: client-side flag `isPileus` → SendWeakWrite delegates to SendStrongWrite
-  - Alternatively: Pileus behavior enforced server-side in handlePropose (simpler)
+  - Pileus behavior enforced server-side in handlePropose (isPileus flag)
 
-- [ ] 117d: Register protocols in `run.go` + `main.go` (~30 LOC)
-  - `run.go`:
-    - `case "mongotunable"` → `mongotunable.New(..., isPileus=false)`
-    - `case "pileus"` → `mongotunable.New(..., isPileus=true)`
-  - `main.go`:
-    - `case "mongotunable"` → create hybrid client, `c.Leaderless=false`
-    - `case "pileus"` → create hybrid client, `c.Leaderless=false`
-  - Both are leader-based protocols
+- [x] 117d: Register protocols in `run.go` + `main.go`
+  - `run.go`: `case "mongotunable"` → isPileus=false, `case "pileus"` → isPileus=true
+  - `main.go`: client creation with HybridLoop, metrics aggregation
 
-- [ ] 117e: Build + unit test
-  - `go build -o swiftpaxos-dist .`
-  - `go test ./mongotunable/`
-  - Verify: message serialization round-trips
-  - Verify: isPileus=true forces PUT→STRONG
+- [x] 117e: Build + unit test — `go build` + `go test ./...` all pass
 
 - [ ] 117f: Spot test — mongotunable t=8, w50%, weakRatio=50%
   - Config: 5r-5m-3c, writes=50%, weakRatio=50%, --startup-delay 25

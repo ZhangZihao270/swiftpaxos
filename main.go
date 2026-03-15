@@ -20,6 +20,7 @@ import (
 	epaxosho "github.com/imdea-software/swiftpaxos/epaxos-ho"
 	epaxosswift "github.com/imdea-software/swiftpaxos/epaxos-swift"
 	"github.com/imdea-software/swiftpaxos/master"
+	"github.com/imdea-software/swiftpaxos/mongotunable"
 	"github.com/imdea-software/swiftpaxos/raft"
 	raftht "github.com/imdea-software/swiftpaxos/raft-ht"
 	"github.com/imdea-software/swiftpaxos/replica/defs"
@@ -121,6 +122,9 @@ func runClient(c *config.Config, verbose bool) {
 	case "raftht":
 		c.WaitClosest = false
 		c.Fast = false
+	case "mongotunable", "pileus":
+		c.WaitClosest = false
+		c.Fast = false
 	}
 
 	numThreads := c.GetNumClientThreads()
@@ -154,7 +158,7 @@ func runClient(c *config.Config, verbose bool) {
 
 	// Aggregate and print/export metrics
 	p := strings.ToLower(c.Protocol)
-	if p == "curp" || p == "curpht" || p == "curpho" || p == "raft" || p == "raftht" || p == "epaxos" || p == "epaxosswift" || p == "epaxosho" {
+	if p == "curp" || p == "curpht" || p == "curpho" || p == "raft" || p == "raftht" || p == "epaxos" || p == "epaxosswift" || p == "epaxosho" || p == "mongotunable" || p == "pileus" {
 		aggregated := client.AggregateMetrics(allMetrics)
 		if numThreads > 1 {
 			l := dlog.New(*logFile, verbose)
@@ -307,6 +311,17 @@ func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads i
 		epaxoshoCl := epaxosho.NewClient(b)
 		hbc := client.NewHybridBufferClient(b, c.WeakRatio, c.WeakWrites, c.ReplyTimeout)
 		hbc.SetHybridClient(epaxoshoCl)
+		printResults := (numThreads == 1)
+		hbc.HybridLoopWithOptions(printResults)
+		return hbc.GetMetrics(), hbc.GetDuration()
+	} else if p == "mongotunable" || p == "pileus" {
+		mtCl := mongotunable.NewClient(b)
+		weakWrites := c.WeakWrites
+		if weakWrites == 0 && c.WeakRatio > 0 {
+			weakWrites = 50
+		}
+		hbc := client.NewHybridBufferClient(b, c.WeakRatio, weakWrites, c.ReplyTimeout)
+		hbc.SetHybridClient(mtCl)
 		printResults := (numThreads == 1)
 		hbc.HybridLoopWithOptions(printResults)
 		return hbc.GetMetrics(), hbc.GetDuration()
