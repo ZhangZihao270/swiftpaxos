@@ -8138,6 +8138,77 @@ These scripts are permanent — rerun with `bash scripts/eval-exp3.1-final.sh [o
 
 ---
 
+### Phase 115: Execute Exp 2.1 + Exp 2.2 (EPaxos-HO vs EPaxos)
+
+**Goal**: Run Exp 2.1 (throughput-vs-latency) and Exp 2.2 (conflict sweep) for EPaxos-HO vs vanilla EPaxos. Create permanent scripts/configs for reproducibility.
+
+**Exp 2.1** — Throughput vs Latency:
+- Protocols: epaxosho (weakRatio=50), epaxos (weakRatio=0)
+- Write groups: 5%, 50%
+- Threads: 1, 2, 4, 8, 16, 32, 64, 96
+- zipfSkew=0, reqs=3000, 1 rep (quick validation)
+- Total: 2 protocols × 8 threads × 2 write groups × 1 rep = 32 runs
+
+**Exp 2.2** — Conflict Rate Sweep:
+- Protocols: epaxosho (weakRatio=50), epaxos (weakRatio=0)
+- Thread count: t=32 (fixed)
+- Zipf skew: 0, 0.25, 0.5, 0.75, 0.99, 1.2, 1.5, 2.0
+- writes=50, reqs=3000, 1 rep (quick validation)
+- Total: 2 protocols × 8 skew values × 1 rep = 16 runs
+
+**Tasks**:
+
+- [x] 115a: Create `configs/exp2.1-base.conf` (~50 LOC) [26:03:14]
+  - Based on exp3.1-base.conf template, protocol=epaxos, weakRatio=0, writes=5
+  - Note: `leaderless` config not needed — main.go sets it automatically per protocol
+
+- [x] 115b: Create `configs/exp2.2-base.conf` (~50 LOC) [26:03:14]
+  - Same layout, writes=50, weakWrites=50, fixed clientThreads=32
+
+- [x] 115c: Create `scripts/eval-exp2.1-final.sh` (~120 LOC) [26:03:14]
+  - Parameters: `THREADS=(1 2 4 8 16 32 64 96)`, `WRITE_GROUPS=(5 50)`, `REPS=1`
+  - Protocols: epaxos, epaxosho
+  - For epaxosho: `weakRatio=50`, `weakWrites=$writes`
+  - For epaxos: `weakRatio=0`
+  - Generate temp config per run (sed override on base config)
+  - Output structure:
+    ```
+    results/eval-exp2.1/<date>/
+      exp2.1/w5/epaxos/t1/run1/  ...
+      exp2.1/w5/epaxosho/t1/run1/  ...
+      exp2.1/w50/epaxos/t1/run1/  ...
+      ...
+    ```
+  - After all runs: generate `summary-exp2.1-w5.csv` and `summary-exp2.1-w50.csv`
+  - Use `--startup-delay 25`, `timeout 300` per run
+  - Ensure clean between runs (`pkill -9 swiftpaxos-dist` on all hosts)
+
+- [x] 115d: Create `scripts/eval-exp2.2-final.sh` (~100 LOC) [26:03:14]
+  - Sweeps zipfSkew=(0 0.25 0.5 0.75 0.99 1.2 1.5 2.0), fixed t=32, 1 rep
+  - Protocols: epaxosho (weakRatio=50), epaxos (weakRatio=0)
+
+- [ ] 115e: Run Exp 2.1
+  - `bash scripts/eval-exp2.1-final.sh results/eval-exp2.1-$(date +%Y%m%d)`
+  - 32 runs, ~2-3 hours
+
+- [ ] 115f: Run Exp 2.2
+  - `bash scripts/eval-exp2.2-final.sh results/eval-exp2.2-$(date +%Y%m%d)`
+  - 16 runs, ~1 hour
+
+- [ ] 115g: Tabulate and verify results
+  - Exp 2.1: compare EPaxos-HO vs EPaxos throughput and latency at each thread count
+    - Expected: EPaxos-HO ~2x throughput at low-mid threads (50% weak ops → instant replies)
+    - Expected: EPaxos-HO saturates earlier than EPaxos at high threads (structural overhead)
+    - Compare with Phase 105 (EPaxos-HO) and Phase 107 (EPaxos) results
+  - Exp 2.2: compare conflict sensitivity
+    - Expected: both degrade under high skew, EPaxos-HO may degrade more (weak deps)
+    - Compare with Phase 110.1 results
+  - If results match expectations, mark as final. Otherwise investigate.
+
+**Status**: ⬜ **TODO**
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
