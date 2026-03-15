@@ -8350,15 +8350,19 @@ These scripts are permanent — rerun with `bash scripts/eval-exp3.1-final.sh [o
     - raftht (control): 6,501 ops/sec
   - All protocols functional, no hangs/crashes
 
-- [ ] 117g: Run Exp 1.1 with all 4 protocols
+- [x] 117g: Run Exp 1.1 with all 4 protocols
   - Script: `scripts/eval-exp1.1-4proto.sh`
-  - Config: same as Phase 116 (w5%, w50%, t=1..96)
-  - 4 protocols × 8 thread counts × 2 write groups × 1 rep = 64 runs
-  - Tabulate: compare Raft, Raft-HT, MongoDB-Tunable, Pileus
+  - All 64 runs completed (4 protos × 8 threads × 2 write groups)
+  - Results: `results/eval-exp1.1-4proto-20260315/summary-exp1.1-4proto.csv`
+  - Peak throughput at t=96:
+    - w5%: raft=21.8K, raftht=34.0K, mongotunable=59.7K, pileus=60.1K
+    - w50%: raft=11.7K, raftht=14.9K, mongotunable=53.9K, pileus=47.3K
+  - MongoDB-Tunable achieves 2.8-4.6x higher throughput than Raft-HT
+    (instance-based consensus has less HOL blocking than log-based)
 
 **Estimated LOC**: ~1,200 (mongotunable package) + ~30 (wiring)
 
-**Status**: 🔄 **IN PROGRESS** (117a-e done, 117f-g pending execution)
+**Status**: ✅ **DONE**
 
 ---
 
