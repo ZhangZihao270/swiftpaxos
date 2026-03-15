@@ -852,6 +852,41 @@ func TestExp32ConfigFile(t *testing.T) {
 	}
 }
 
+// TestExp11ConfigFile tests that configs/exp1.1-base.conf parses correctly
+func TestExp11ConfigFile(t *testing.T) {
+	c, err := Read("../configs/exp1.1-base.conf", "test")
+	if err != nil {
+		t.Fatalf("Failed to parse exp1.1-base.conf: %v", err)
+	}
+	if c.Protocol != "raft" {
+		t.Errorf("Protocol = %s, want raft", c.Protocol)
+	}
+	if c.Reqs != 3000 {
+		t.Errorf("Reqs = %d, want 3000", c.Reqs)
+	}
+	if c.Pendings != 15 {
+		t.Errorf("Pendings = %d, want 15", c.Pendings)
+	}
+	if c.KeySpace != 1000000 {
+		t.Errorf("KeySpace = %d, want 1000000", c.KeySpace)
+	}
+	if c.ZipfSkew != 0 {
+		t.Errorf("ZipfSkew = %f, want 0", c.ZipfSkew)
+	}
+	if c.WeakRatio != 0 {
+		t.Errorf("WeakRatio = %d, want 0", c.WeakRatio)
+	}
+	if c.Writes != 5 {
+		t.Errorf("Writes = %d, want 5", c.Writes)
+	}
+	if c.WeakWrites != 5 {
+		t.Errorf("WeakWrites = %d, want 5", c.WeakWrites)
+	}
+	if c.ClientThreads != 32 {
+		t.Errorf("ClientThreads = %d, want 32", c.ClientThreads)
+	}
+}
+
 // TestExp21ConfigFile tests that configs/exp2.1-base.conf parses correctly
 func TestExp21ConfigFile(t *testing.T) {
 	c, err := Read("../configs/exp2.1-base.conf", "test")

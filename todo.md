@@ -8237,6 +8237,46 @@ These scripts are permanent — rerun with `bash scripts/eval-exp3.1-final.sh [o
 
 ---
 
+### Phase 116: Execute Exp 1.1 (Raft-HT vs Vanilla Raft)
+
+**Goal**: Run Exp 1.1 throughput-vs-latency for Raft-HT and vanilla Raft. Create permanent scripts/configs.
+
+**Exp 1.1** — Throughput vs Latency:
+- Protocols: raftht (weakRatio=50), raft (weakRatio=0)
+- Write groups: 5%, 50%
+- Threads: 1, 2, 4, 8, 16, 32, 64, 96
+- zipfSkew=0, reqs=3000, 1 rep (quick validation)
+- Total: 2 protocols × 8 threads × 2 write groups × 1 rep = 32 runs
+
+**Tasks**:
+
+- [x] 116a: Create `configs/exp1.1-base.conf` (~50 LOC) [26:03:14]
+  - Based on exp3.1-base.conf, protocol=raft, weakRatio=0, writes=5
+  - Removed maxDescRoutines/batchDelayUs (Raft doesn't use these)
+
+- [x] 116b: Create `scripts/eval-exp1.1-final.sh` (~160 LOC) [26:03:14]
+  - Sweeps 8 thread counts × 2 write groups × 2 protocols (raftht, raft) × 1 rep = 32 runs
+  - Generates summary CSV with averaged results
+
+- [ ] 116c: Run Exp 1.1
+  - `bash scripts/eval-exp1.1-final.sh results/eval-exp1.1-$(date +%Y%m%d)`
+  - 32 runs, ~1-2 hours
+
+- [ ] 116d: Tabulate and verify results
+  - Compare Raft-HT vs Raft throughput and latency at each thread count
+  - Expected (w5%):
+    - Raft-HT ~1.8-1.9x throughput vs Raft (50% weak ops → instant replies)
+    - Raft-HT s_p50 ≈ Raft s_p50 (strong path identical, T property)
+    - Raft-HT w_p50 ≈ 12.5ms (1-way delay, no commit needed)
+  - Expected (w50%):
+    - Raft-HT advantage smaller (more writes → both paths slower)
+    - Raft-HT s_p50 still ≈ Raft s_p50
+  - Compare with Phase 100 spot test results (Raft 12.3K, Raft-HT 14.0K at t=64 w50%)
+
+**Status**: ⬜ **TODO**
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
