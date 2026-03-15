@@ -8342,10 +8342,13 @@ These scripts are permanent — rerun with `bash scripts/eval-exp3.1-final.sh [o
 
 - [x] 117e: Build + unit test — `go build` + `go test ./...` all pass
 
-- [ ] 117f: Spot test — mongotunable t=8, w50%, weakRatio=50%
+- [x] 117f: Spot test — mongotunable t=8, w50%, weakRatio=50%
   - Script: `scripts/eval-phase117f-spot.sh`
-  - Tests mongotunable, pileus, raftht (control) at t=8, w50%, weakRatio=50%
-  - Run: `bash scripts/eval-phase117f-spot.sh`
+  - Results (t=8, w50%, weakRatio=50%):
+    - mongotunable: 5,537 ops/sec
+    - pileus: 5,522 ops/sec
+    - raftht (control): 6,501 ops/sec
+  - All protocols functional, no hangs/crashes
 
 - [ ] 117g: Run Exp 1.1 with all 4 protocols
   - Update `scripts/eval-exp1.1-final.sh`: add mongotunable + pileus
