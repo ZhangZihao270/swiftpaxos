@@ -452,25 +452,13 @@ func (r *Replica) broadcastAppendEntries() {
 	}
 	r.logMu.Unlock()
 
-	// Single r.M acquisition for all writes + flush.
-	r.M.Lock()
+	// Async send via sender goroutine (non-blocking channel enqueue).
 	for i := int32(0); i < int32(r.n); i++ {
 		if i == r.id || msgs[i] == nil {
 			continue
 		}
-		w := r.PeerWriters[i]
-		if w == nil {
-			continue
-		}
-		w.WriteByte(r.cs.appendEntriesRPC)
-		msgs[i].Marshal(w)
+		r.sender.SendTo(i, msgs[i], r.cs.appendEntriesRPC)
 	}
-	for _, w := range r.PeerWriters {
-		if w != nil {
-			w.Flush()
-		}
-	}
-	r.M.Unlock()
 }
 
 // sendAppendEntries sends an AppendEntries RPC to a specific follower

@@ -8422,6 +8422,60 @@ Currently Mongo/Pileus has unfair advantages:
 ## Legend
 
 - `[ ]` - Undone task
+### Phase 119: Raft/Raft-HT Async Broadcast Optimization
+
+**Goal**: Replace synchronous `r.M.Lock() + Write + Flush` broadcast in Raft/Raft-HT with async `r.sender` pattern used by CURP-HT and Mongo. Expected peak tput improvement from ~34K → ~45K.
+
+**Root cause of current bottleneck**:
+- `broadcastAppendEntries()` holds `r.M.Lock()` while writing + flushing to ALL followers
+- One slow follower Flush blocks the entire event loop (all other peers + client proposals wait)
+- CURP-HT/Mongo use `r.sender.SendToAll()` which only does a channel enqueue (non-blocking)
+- The sender goroutine handles actual network I/O in the background
+
+**Current peak throughput (w5%, t=96)**:
+- Async protocols: CURP-HT 45K, Mongo 45K
+- Sync protocols: EPaxos-HO 41K, Raft-HT 34K, Raft 22K
+
+**Approach**: Raft/Raft-HT already have access to `r.sender` (from base `replica.Replica`).
+Replace the custom `broadcastAppendEntries()` with per-peer `r.sender.SendTo()` calls.
+
+**Challenge**: Current `broadcastAppendEntries()` constructs per-follower messages with
+different `nextIndex` → different entry slices. Need to create per-follower AppendEntries
+messages first, THEN enqueue them via sender.
+
+**Tasks**:
+
+- [x] 119a: Refactor Raft-HT `broadcastAppendEntries` to async
+  - Replaced `r.M.Lock()` + manual `WriteByte/Marshal/Flush` with per-peer `r.sender.SendTo()`
+  - logMu still held only for reading log entries (fast), network I/O is fully async
+
+- [x] 119b: Apply same refactor to Raft `broadcastAppendEntries`
+  - Identical change as 119a
+
+- [x] 119c: Refactor `sendAppendEntries` (single-peer) to async
+  - Already used `r.sender.SendTo()` — no changes needed
+
+- [x] 119d: Also convert `handleAppendEntriesReply` reply broadcast
+  - No synchronous sends found in either Raft or Raft-HT (all use sender/ReplyProposeTSDelayed)
+
+- [x] 119e: Build + test
+  - `go build` passes, `go test ./raft/ ./raft-ht/` pass, full `go test ./...` passes
+
+- [ ] 119f: Spot test — Raft + Raft-HT at w5%, t=1,8,32,64,96
+  - Compare with Phase 116 results (before optimization)
+  - **Expected**: Raft-HT peak ~45K (from 34K, +32%)
+  - **Expected**: Raft peak ~30K+ (from 22K, +36%)
+  - **Expected**: s_p50 at t=1 unchanged (~85ms)
+  - **Expected**: s_p50 at t=96 should improve significantly (less queuing)
+  - If target met, re-run full Exp 1.1 with all 4 protocols
+
+**Status**: 🔄 **IN PROGRESS** (119a-e done, 119f pending)
+
+---
+
+## Legend
+
+- `[ ]` - Undone task
 - `[x]` - Done task with timestamp [yy:mm:dd, hh:mm]
 - Priority: HIGH > MEDIUM > LOW
 - Each task should be small enough (<500 LOC)
