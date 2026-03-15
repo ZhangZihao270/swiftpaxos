@@ -8187,25 +8187,53 @@ These scripts are permanent — rerun with `bash scripts/eval-exp3.1-final.sh [o
   - Sweeps zipfSkew=(0 0.25 0.5 0.75 0.99 1.2 1.5 2.0), fixed t=32, 1 rep
   - Protocols: epaxosho (weakRatio=50), epaxos (weakRatio=0)
 
-- [ ] 115e: Run Exp 2.1
-  - `bash scripts/eval-exp2.1-final.sh results/eval-exp2.1-$(date +%Y%m%d)`
-  - 32 runs, ~2-3 hours
+- [x] 115e: Run Exp 2.1 [26:03:14]
+  - Results → `results/eval-exp2.1-20260314/`
+  - 32 runs completed successfully (~1h10m)
 
-- [ ] 115f: Run Exp 2.2
-  - `bash scripts/eval-exp2.2-final.sh results/eval-exp2.2-$(date +%Y%m%d)`
-  - 16 runs, ~1 hour
+- [x] 115f: Run Exp 2.2 [26:03:14]
+  - Results → `results/eval-exp2.2-20260314/`
+  - 16 runs completed successfully (~36m)
 
-- [ ] 115g: Tabulate and verify results
-  - Exp 2.1: compare EPaxos-HO vs EPaxos throughput and latency at each thread count
-    - Expected: EPaxos-HO ~2x throughput at low-mid threads (50% weak ops → instant replies)
-    - Expected: EPaxos-HO saturates earlier than EPaxos at high threads (structural overhead)
-    - Compare with Phase 105 (EPaxos-HO) and Phase 107 (EPaxos) results
-  - Exp 2.2: compare conflict sensitivity
-    - Expected: both degrade under high skew, EPaxos-HO may degrade more (weak deps)
-    - Compare with Phase 110.1 results
-  - If results match expectations, mark as final. Otherwise investigate.
+- [x] 115g: Tabulate and verify results [26:03:14]
+  - **Exp 2.1: Throughput vs Latency** (EPaxos-HO vs EPaxos):
+    | Threads | HO tput (w5%) | EP tput (w5%) | Ratio | HO tput (w50%) | EP tput (w50%) | Ratio |
+    |---------|---------------|---------------|-------|----------------|----------------|-------|
+    | 1       | 1,770         | 863           | 2.1x  | 1,749          | 860            | 2.0x  |
+    | 2       | 3,509         | 1,701         | 2.1x  | 3,479          | 1,704          | 2.0x  |
+    | 4       | 6,925         | 3,356         | 2.1x  | 6,879          | 3,342          | 2.1x  |
+    | 8       | 13,603        | 6,434         | 2.1x  | 13,783         | 6,436          | 2.1x  |
+    | 16      | 26,830        | 11,950        | 2.2x  | 27,021         | 11,979         | 2.3x  |
+    | 32      | 39,624        | 18,483        | 2.1x  | 37,621         | 16,604         | 2.3x  |
+    | 64      | 40,941        | 28,770        | 1.4x  | 39,769         | 28,371         | 1.4x  |
+    | 96      | 41,183        | 37,322        | 1.1x  | 40,023         | 36,418         | 1.1x  |
+  - **Key findings (Exp 2.1)**:
+    - EPaxos-HO achieves consistent **2.0-2.3x throughput** over EPaxos at t=1-32
+    - At saturation (t=64-96), gap narrows to 1.1-1.4x as EPaxos catches up
+    - EPaxos-HO weak ops: sub-ms latency (0.14-0.43ms) across all thread counts
+    - EPaxos-HO strong p50: flat at ~51ms up to t=16, then rises under saturation
+    - Write ratio (5% vs 50%) has minimal impact on throughput ratio
+  - **Exp 2.2: Conflict Rate Sweep** (t=32, writes=50):
+    | ZipfSkew | HO tput  | HO s_p50 | HO w_p50 | EP tput  | EP s_p50 |
+    |----------|----------|----------|----------|----------|----------|
+    | 0        | 38,010   | 75.7ms   | 0.29ms   | 16,878   | 84.9ms   |
+    | 0.25     | 38,421   | 74.9ms   | 0.27ms   | 17,588   | 80.6ms   |
+    | 0.50     | 39,140   | 73.6ms   | 0.26ms   | 16,496   | 84.4ms   |
+    | 0.75     | 39,380   | 71.4ms   | 0.26ms   | 13,756   | 100.3ms  |
+    | 0.99     | 31,142   | 89.5ms   | 0.26ms   | 13,264   | 106.4ms  |
+    | 1.20     | 28,311   | 99.8ms   | 0.30ms   | 13,015   | 109.2ms  |
+    | 1.50     | 26,965   | 103.9ms  | 0.28ms   | 13,755   | 103.9ms  |
+    | 2.00     | 26,874   | 104.6ms  | 0.27ms   | 13,603   | 105.2ms  |
+  - **Key findings (Exp 2.2)**:
+    - EPaxos-HO maintains 2x+ advantage at low contention (zipf 0-0.75)
+    - Both degrade under high contention (zipf ≥ 0.99), gap narrows to ~2x
+    - EPaxos-HO weak ops unaffected by contention (always ~0.27ms)
+    - At extreme contention (zipf 2.0), both converge to ~104ms strong latency
+    - EPaxos-HO throughput advantage: 2.3x at zipf=0 → 2.0x at zipf=2.0
+  - **Conclusions**: Results match expectations. EPaxos-HO provides consistent 2x throughput
+    gain from instant weak replies, with graceful degradation under contention.
 
-**Status**: ⬜ **TODO**
+**Status**: ✅ **DONE** (all sub-tasks complete)
 
 ---
 
