@@ -8321,14 +8321,14 @@ These scripts are permanent — rerun with `bash scripts/eval-exp3.1-final.sh [o
   - Cache pools for all types; serialization follows existing SwiftPaxos pattern (single defs.go)
   - 15 tests: round-trip for all types, cache get/put, BinarySize, negative values, multi-command, constants
 
-- [ ] 117b: Create `mongotunable/mongotunable.go` — main protocol logic (~1,900 LOC)
+- [x] 117b: Create `mongotunable/mongotunable.go` — main protocol logic (~600 LOC)
   - Port from `Orca/optimizedmongodbtunable/optimizedmongodbtunable.go`
   - Adapt: `genericsmr` → `replica`, `genericsmrproto` → `defs`, `fastrpc` → `rpc`
-  - `New(...)` takes `isPileus bool` parameter
-  - When `isPileus=true`: force all PUT commands to CL=STRONG in handlePropose
-  - Event loop: handle prepareChan, acceptChan, commitChan[], commitShortChan[],
-    prepareReplyChan, acceptReplyChan, commitAckChan, majorityCommitChan
-  - Execution: executeWriteCommands (strong path + weak path), executeWeakReadCommands
+  - Skipped INJECT_SLOWDOWN debug code, durable storage (recordInstanceMetadata/sync)
+  - [x] 117b1: Struct, constructor, helpers, event loop
+  - [x] 117b2: handlePropose + startCommit + broadcast functions
+  - [x] 117b3: Message handlers
+  - [x] 117b4: Execution goroutines
 
 - [ ] 117c: Create `mongotunable/client.go` (~80 LOC)
   - `SupportsWeak() = true`
