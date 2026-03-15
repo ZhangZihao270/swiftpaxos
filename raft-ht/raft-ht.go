@@ -243,7 +243,7 @@ func (r *Replica) run() {
 	}
 
 	onOffProposeChan := r.ProposeChan
-	onOffWeakProposeChan := r.cs.weakProposeChan
+	onOffWeakProposeChan := r.cs.WeakProposeChan
 
 	go r.WaitForClientConnections()
 
@@ -266,9 +266,9 @@ func (r *Replica) run() {
 
 		case <-batchClockChan:
 			onOffProposeChan = r.ProposeChan
-			onOffWeakProposeChan = r.cs.weakProposeChan
+			onOffWeakProposeChan = r.cs.WeakProposeChan
 
-		case m := <-r.cs.appendEntriesChan:
+		case m := <-r.cs.AppendEntriesChan:
 			ae := m.(*AppendEntries)
 			r.handleAppendEntries(ae)
 			// Reset election timer on valid AppendEntries (leader is alive)
@@ -276,15 +276,15 @@ func (r *Replica) run() {
 				r.resetElectionTimer()
 			}
 
-		case m := <-r.cs.appendEntriesReplyChan:
+		case m := <-r.cs.AppendEntriesReplyChan:
 			aer := m.(*AppendEntriesReply)
 			r.handleAppendEntriesReplyBatch(aer)
 
-		case m := <-r.cs.requestVoteChan:
+		case m := <-r.cs.RequestVoteChan:
 			rv := m.(*RequestVote)
 			r.handleRequestVote(rv)
 
-		case m := <-r.cs.requestVoteReplyChan:
+		case m := <-r.cs.RequestVoteReplyChan:
 			rvr := m.(*RequestVoteReply)
 			r.handleRequestVoteReply(rvr)
 
@@ -374,7 +374,7 @@ func (r *Replica) handleAllProposals(firstStrong *defs.GPropose, firstWeak *MWea
 			reply.CmdId = CommandId{ClientId: firstStrong.ClientId, SeqNum: firstStrong.CommandId}
 			reply.Value = state.NIL()
 			reply.LeaderId = r.knownLeader
-			r.sender.SendToClient(firstStrong.ClientId, reply, r.cs.raftReplyRPC)
+			r.sender.SendToClient(firstStrong.ClientId, reply, r.cs.RaftReplyRPC)
 		}
 		if firstWeak != nil {
 			reply := &MWeakReply{
@@ -383,7 +383,7 @@ func (r *Replica) handleAllProposals(firstStrong *defs.GPropose, firstWeak *MWea
 				CmdId:    CommandId{ClientId: firstWeak.ClientId, SeqNum: firstWeak.CommandId},
 				Slot:     -1,
 			}
-			r.sender.SendToClient(firstWeak.ClientId, reply, r.cs.weakReplyRPC)
+			r.sender.SendToClient(firstWeak.ClientId, reply, r.cs.WeakReplyRPC)
 		}
 		return
 	}
@@ -414,7 +414,7 @@ drainWeak:
 	// Drain weak proposals
 	for total < maxBatchSize {
 		select {
-		case m := <-r.cs.weakProposeChan:
+		case m := <-r.cs.WeakProposeChan:
 			weaks = append(weaks, m.(*MWeakPropose))
 			total++
 		default:
@@ -477,7 +477,7 @@ drained:
 			CmdId:    we.cmdId,
 			Slot:     we.idx,
 		}
-		r.sender.SendToClient(we.wp.ClientId, reply, r.cs.weakReplyRPC)
+		r.sender.SendToClient(we.wp.ClientId, reply, r.cs.WeakReplyRPC)
 	}
 
 	// Single broadcast for ALL entries (strong + weak)
@@ -552,7 +552,7 @@ func (r *Replica) broadcastAppendEntries() {
 		if w == nil {
 			continue
 		}
-		w.WriteByte(r.cs.appendEntriesRPC)
+		w.WriteByte(r.cs.AppendEntriesRPC)
 		msgs[i].Marshal(w)
 	}
 	for _, w := range r.PeerWriters {
@@ -566,7 +566,7 @@ func (r *Replica) broadcastAppendEntries() {
 // sendAppendEntries sends an AppendEntries RPC to a specific follower.
 func (r *Replica) sendAppendEntries(peerId int32) {
 	ae := r.buildAppendEntries(peerId)
-	r.sender.SendTo(peerId, ae, r.cs.appendEntriesRPC)
+	r.sender.SendTo(peerId, ae, r.cs.AppendEntriesRPC)
 }
 
 // buildAppendEntries constructs an AppendEntries message for the given follower.
@@ -622,7 +622,7 @@ func (r *Replica) handleAppendEntries(msg *AppendEntries) {
 		reply.Term = r.currentTerm
 		reply.Success = 0
 		reply.MatchIndex = -1
-		r.sender.SendTo(msg.LeaderId, reply, r.cs.appendEntriesReplyRPC)
+		r.sender.SendTo(msg.LeaderId, reply, r.cs.AppendEntriesReplyRPC)
 		return
 	}
 
@@ -649,7 +649,7 @@ func (r *Replica) handleAppendEntries(msg *AppendEntries) {
 			reply.Term = r.currentTerm
 			reply.Success = 0
 			reply.MatchIndex = matchIdx
-			r.sender.SendTo(msg.LeaderId, reply, r.cs.appendEntriesReplyRPC)
+			r.sender.SendTo(msg.LeaderId, reply, r.cs.AppendEntriesReplyRPC)
 			return
 		}
 		if r.log[msg.PrevLogIndex].Term != msg.PrevLogTerm {
@@ -662,7 +662,7 @@ func (r *Replica) handleAppendEntries(msg *AppendEntries) {
 			reply.Term = r.currentTerm
 			reply.Success = 0
 			reply.MatchIndex = matchIdx
-			r.sender.SendTo(msg.LeaderId, reply, r.cs.appendEntriesReplyRPC)
+			r.sender.SendTo(msg.LeaderId, reply, r.cs.AppendEntriesReplyRPC)
 			return
 		}
 	}
@@ -714,7 +714,7 @@ func (r *Replica) handleAppendEntries(msg *AppendEntries) {
 	reply.Term = r.currentTerm
 	reply.Success = 1
 	reply.MatchIndex = matchIdx
-	r.sender.SendTo(msg.LeaderId, reply, r.cs.appendEntriesReplyRPC)
+	r.sender.SendTo(msg.LeaderId, reply, r.cs.AppendEntriesReplyRPC)
 }
 
 // handleAppendEntriesReplyBatch drains all pending replies before calling
@@ -725,7 +725,7 @@ func (r *Replica) handleAppendEntriesReplyBatch(first *AppendEntriesReply) {
 	// Drain additional replies
 	for {
 		select {
-		case m := <-r.cs.appendEntriesReplyChan:
+		case m := <-r.cs.AppendEntriesReplyChan:
 			r.applyReplyUpdate(m.(*AppendEntriesReply))
 		default:
 			goto done
@@ -835,7 +835,7 @@ func (r *Replica) handleRequestVote(msg *RequestVote) {
 		reply.VoterId = r.id
 		reply.Term = r.currentTerm
 		reply.VoteGranted = 0
-		r.sender.SendTo(msg.CandidateId, reply, r.cs.requestVoteReplyRPC)
+		r.sender.SendTo(msg.CandidateId, reply, r.cs.RequestVoteReplyRPC)
 		return
 	}
 
@@ -856,7 +856,7 @@ func (r *Replica) handleRequestVote(msg *RequestVote) {
 	reply.VoterId = r.id
 	reply.Term = r.currentTerm
 	reply.VoteGranted = voteGranted
-	r.sender.SendTo(msg.CandidateId, reply, r.cs.requestVoteReplyRPC)
+	r.sender.SendTo(msg.CandidateId, reply, r.cs.RequestVoteReplyRPC)
 }
 
 // isLogUpToDate checks if the candidate's log is at least as up-to-date as ours (§5.4.1).
@@ -919,7 +919,7 @@ func (r *Replica) startElection() {
 		rv.Term = r.currentTerm
 		rv.LastLogIndex = lastLogIndex
 		rv.LastLogTerm = lastLogTerm
-		r.sender.SendTo(i, rv, r.cs.requestVoteRPC)
+		r.sender.SendTo(i, rv, r.cs.RequestVoteRPC)
 	}
 }
 
@@ -974,7 +974,7 @@ func (r *Replica) executeCommands() {
 					reply.CmdId = CommandId{ClientId: pe.propose.ClientId, SeqNum: pe.propose.CommandId}
 					reply.Value = val
 					reply.LeaderId = -1 // success: no redirect needed
-					r.sender.SendToClient(pe.propose.ClientId, reply, r.cs.raftReplyRPC)
+					r.sender.SendToClient(pe.propose.ClientId, reply, r.cs.RaftReplyRPC)
 				}
 			}
 			r.stateMu.Unlock()
@@ -1003,7 +1003,7 @@ func (r *Replica) notifyCommit() {
 // with executeCommands' write lock.
 func (r *Replica) weakReadLoop() {
 	for !r.Shutdown {
-		m, ok := <-r.cs.weakReadChan
+		m, ok := <-r.cs.WeakReadChan
 		if !ok {
 			return
 		}
@@ -1014,7 +1014,22 @@ func (r *Replica) weakReadLoop() {
 
 // processWeakRead reads committed state and replies to client.
 // Safe to call from any goroutine — acquires stateMu read lock.
+// If msg.MinIndex > 0, waits until lastApplied >= MinIndex (causal tracking).
 func (r *Replica) processWeakRead(msg *MWeakRead) {
+	// Causal tracking: wait until lastApplied >= MinIndex
+	if msg.MinIndex > 0 {
+		const maxWait = 2000 // max 2s (2000 iterations × 1ms)
+		for i := 0; i < maxWait; i++ {
+			r.logMu.Lock()
+			applied := r.lastApplied
+			r.logMu.Unlock()
+			if applied >= msg.MinIndex {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+
 	r.stateMu.RLock()
 	cmd := state.Command{Op: state.GET, K: msg.Key, V: state.NIL()}
 	value := cmd.Execute(r.State)
@@ -1032,7 +1047,7 @@ func (r *Replica) processWeakRead(msg *MWeakRead) {
 		Rep:     value,
 		Version: version,
 	}
-	r.sender.SendToClient(msg.ClientId, reply, r.cs.weakReadReplyRPC)
+	r.sender.SendToClient(msg.ClientId, reply, r.cs.WeakReadReplyRPC)
 }
 
 // --- Raft-HT: Weak Write Path ---

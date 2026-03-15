@@ -428,30 +428,30 @@ func TestInitCsWeakChannels(t *testing.T) {
 	initCs(cs, table)
 
 	// Check weak channels are non-nil
-	if cs.weakProposeChan == nil {
+	if cs.WeakProposeChan == nil {
 		t.Error("weakProposeChan should be non-nil")
 	}
-	if cs.weakReplyChan == nil {
+	if cs.WeakReplyChan == nil {
 		t.Error("weakReplyChan should be non-nil")
 	}
-	if cs.weakReadChan == nil {
+	if cs.WeakReadChan == nil {
 		t.Error("weakReadChan should be non-nil")
 	}
-	if cs.weakReadReplyChan == nil {
+	if cs.WeakReadReplyChan == nil {
 		t.Error("weakReadReplyChan should be non-nil")
 	}
 
 	// Check all RPC IDs are distinct (9 total: 5 vanilla Raft + 4 weak)
 	ids := map[uint8]string{
-		cs.appendEntriesRPC:      "appendEntries",
-		cs.appendEntriesReplyRPC: "appendEntriesReply",
-		cs.requestVoteRPC:        "requestVote",
-		cs.requestVoteReplyRPC:   "requestVoteReply",
-		cs.raftReplyRPC:          "raftReply",
-		cs.weakProposeRPC:        "weakPropose",
-		cs.weakReplyRPC:          "weakReply",
-		cs.weakReadRPC:           "weakRead",
-		cs.weakReadReplyRPC:      "weakReadReply",
+		cs.AppendEntriesRPC:      "appendEntries",
+		cs.AppendEntriesReplyRPC: "appendEntriesReply",
+		cs.RequestVoteRPC:        "requestVote",
+		cs.RequestVoteReplyRPC:   "requestVoteReply",
+		cs.RaftReplyRPC:          "raftReply",
+		cs.WeakProposeRPC:        "weakPropose",
+		cs.WeakReplyRPC:          "weakReply",
+		cs.WeakReadRPC:           "weakRead",
+		cs.WeakReadReplyRPC:      "weakReadReply",
 	}
 	if len(ids) != 9 {
 		t.Errorf("Expected 9 distinct RPC IDs, got %d (some collide)", len(ids))

@@ -21,6 +21,7 @@ import (
 	epaxosswift "github.com/imdea-software/swiftpaxos/epaxos-swift"
 	"github.com/imdea-software/swiftpaxos/master"
 	"github.com/imdea-software/swiftpaxos/mongotunable"
+	"github.com/imdea-software/swiftpaxos/pileus"
 	"github.com/imdea-software/swiftpaxos/raft"
 	raftht "github.com/imdea-software/swiftpaxos/raft-ht"
 	"github.com/imdea-software/swiftpaxos/replica/defs"
@@ -314,7 +315,7 @@ func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads i
 		printResults := (numThreads == 1)
 		hbc.HybridLoopWithOptions(printResults)
 		return hbc.GetMetrics(), hbc.GetDuration()
-	} else if p == "mongotunable" || p == "pileus" {
+	} else if p == "mongotunable" {
 		mtCl := mongotunable.NewClient(b)
 		weakWrites := c.WeakWrites
 		if weakWrites == 0 && c.WeakRatio > 0 {
@@ -322,6 +323,17 @@ func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads i
 		}
 		hbc := client.NewHybridBufferClient(b, c.WeakRatio, weakWrites, c.ReplyTimeout)
 		hbc.SetHybridClient(mtCl)
+		printResults := (numThreads == 1)
+		hbc.HybridLoopWithOptions(printResults)
+		return hbc.GetMetrics(), hbc.GetDuration()
+	} else if p == "pileus" {
+		plCl := pileus.NewClient(b)
+		weakWrites := c.WeakWrites
+		if weakWrites == 0 && c.WeakRatio > 0 {
+			weakWrites = 50
+		}
+		hbc := client.NewHybridBufferClient(b, c.WeakRatio, weakWrites, c.ReplyTimeout)
+		hbc.SetHybridClient(plCl)
 		printResults := (numThreads == 1)
 		hbc.HybridLoopWithOptions(printResults)
 		return hbc.GetMetrics(), hbc.GetDuration()

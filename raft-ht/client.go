@@ -76,7 +76,7 @@ func NewClient(b *client.BufferClient) *Client {
 	// This ensures a single reader goroutine per replica connection,
 	// avoiding the data race from using both WaitReplies and RegisterRPCTable.
 	t := fastrpc.NewTableId(defs.RPC_TABLE)
-	initCs(&c.cs, t)
+	InitClientCs(&c.cs, t)
 	c.RegisterRPCTable(t)
 
 	// Handle ALL replies in a single goroutine
@@ -89,17 +89,17 @@ func (c *Client) handleMsgs() {
 	for {
 		select {
 		// Strong op replies (from leader, after commit)
-		case m := <-c.cs.raftReplyChan:
+		case m := <-c.cs.RaftReplyChan:
 			rep := m.(*RaftReply)
 			c.handleRaftReply(rep)
 
 		// Weak write replies (from leader, immediate)
-		case m := <-c.cs.weakReplyChan:
+		case m := <-c.cs.WeakReplyChan:
 			rep := m.(*MWeakReply)
 			c.handleWeakReply(rep)
 
 		// Weak read replies (from nearest replica)
-		case m := <-c.cs.weakReadReplyChan:
+		case m := <-c.cs.WeakReadReplyChan:
 			rep := m.(*MWeakReadReply)
 			c.handleWeakReadReply(rep)
 
@@ -191,7 +191,7 @@ func (c *Client) handleWeakReply(rep *MWeakReply) {
 			}
 		}
 		c.mu.Unlock()
-		c.SendMsg(leader, c.cs.weakProposeRPC, p)
+		c.SendMsg(leader, c.cs.WeakProposeRPC, p)
 		return
 	}
 
@@ -293,7 +293,7 @@ func (c *Client) handleReaderDead(deadReplica int32) {
 	}
 	// Resend pending weak write commands to new leader
 	for _, wp := range weakCmds {
-		c.SendMsg(newLeader, c.cs.weakProposeRPC, wp)
+		c.SendMsg(newLeader, c.cs.WeakProposeRPC, wp)
 	}
 }
 
@@ -344,7 +344,7 @@ func (c *Client) SendWeakWrite(key int64, value []byte) int32 {
 	}
 
 	if leader != -1 {
-		c.SendMsg(leader, c.cs.weakProposeRPC, p)
+		c.SendMsg(leader, c.cs.WeakProposeRPC, p)
 	}
 	return seqnum
 }
@@ -367,7 +367,7 @@ func (c *Client) SendWeakRead(key int64) int32 {
 	}
 
 	if closest != -1 {
-		c.SendMsg(int32(closest), c.cs.weakReadRPC, msg)
+		c.SendMsg(int32(closest), c.cs.WeakReadRPC, msg)
 	}
 	return seqnum
 }

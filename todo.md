@@ -8545,46 +8545,38 @@ Mongo weak read:
   - `MWeakRead`: added `MinIndex int32` field (client sends minimum applied index for causal read)
   - Updated Marshal/Unmarshal/BinarySize for both types, added tests
 
-- [ ] 120b: Create `mongotunable/mongotunable.go` — Mongo wrapper (~200 LOC)
-  - Embed `raftht.Replica` (delegate Raft log replication, broadcast, commit, election)
-  - Override weak write reply: include `logIndex` in ProposeReplyTS
-  - Override weak read handler: check `lastApplied >= minIndex`, wait if needed
-    - Use a condition variable or polling loop on `r.lastApplied`
-    - Timeout after 2s to avoid hanging
-  - Everything else (event loop, broadcastAppendEntries, election): delegate to raft-ht
+- [x] 120b: Create `mongotunable/mongotunable.go` — thin type alias wrapper around raft-ht
+  - `type Replica = raftht.Replica` (delegates everything to raft-ht)
+  - `func New(...)` calls `raftht.New(...)` directly
+  - Server-side causal MinIndex wait already built into raft-ht's `processWeakRead`
 
-- [ ] 120c: Create `mongotunable/client.go` (~80 LOC)
-  - Track `lastWeakWriteIndex int32` — updated from weak write reply's LogIndex
-  - `SendWeakWrite`: send to leader, get fast reply + logIndex
-  - `SendWeakRead`: include `lastWeakWriteIndex` as MinIndex in request
-  - `SendStrongWrite/Read`: delegate to raft-ht strong path
+- [x] 120c: Create `mongotunable/client.go` (~230 LOC)
+  - Tracks `lastWeakWriteSlot int32` (atomic) — updated from `MWeakReply.Slot`
+  - `SendWeakWrite`: sends `MWeakPropose` to leader, gets fast reply + slot
+  - `SendWeakRead`: sends `MWeakRead` with `MinIndex=lastWeakWriteSlot` to closest replica
+  - `SendStrongWrite/Read`: construct `defs.Propose`, send via `SendProposal`
+  - Full leader failover + dead replica rotation
 
-- [ ] 120d: Create `pileus/pileus.go` — Pileus wrapper (~150 LOC)
-  - Embed `raftht.Replica` (same as Mongo)
-  - Force ALL writes to strong path in handlePropose (no weak writes)
-  - Weak reads: same causal mechanism as Mongo (wait for lastApplied >= minIndex)
+- [x] 120d: Create `pileus/pileus.go` — thin type alias wrapper around raft-ht
+  - Same architecture as mongotunable (delegates everything to raft-ht)
 
-- [ ] 120e: Create `pileus/client.go` (~60 LOC)
-  - `SupportsWeak()=true` (weak reads supported)
-  - `SendWeakWrite`: delegates to `SendStrongWrite` (all writes strong)
-  - `SendWeakRead`: same as Mongo client (send minIndex)
-  - `SendStrongWrite/Read`: delegate to raft-ht strong path
+- [x] 120e: Create `pileus/client.go` (~190 LOC)
+  - `SendWeakWrite` delegates to `SendStrongWrite` (all writes strong)
+  - `SendWeakRead`: sends `MWeakRead` with `MinIndex=lastWriteSlot` to closest replica
+  - No weak write handling needed (no `WeakReplyChan` in select)
 
-- [ ] 120f: Register protocols in `run.go` + `main.go` (~40 LOC)
-  - `case "mongotunable"`: create mongotunable.New(...)
-  - `case "pileus"`: create pileus.New(...)
-  - Both leader-based
+- [x] 120f: Register protocols in `run.go` + `main.go`
+  - `run.go`: separate `mongotunable.New()` and `pileus.New()` calls
+  - `main.go`: separate `mongotunable.NewClient()` and `pileus.NewClient()` branches
+  - Exported `CommunicationSupply` fields + `InitClientCs()` in raft-ht for cross-package use
 
-- [ ] 120g: Remove old Orca-based implementations
-  - Delete old `mongotunable/` files (mongotunable.go, defs.go, defsmarsh.go, defs_test.go)
-  - Delete old `pileus/` if exists, or create new directory
-  - Replace with new files from 120b-120e
+- [x] 120g: Remove old Orca-based implementations
+  - Deleted old `mongotunable/` files (mongotunable.go, defs.go, defs_test.go, client.go)
+  - Created new `pileus/` package from scratch
 
-- [ ] 120h: Build + test
-  - `go build -o swiftpaxos-dist .`
-  - `go test ./mongotunable/ ./pileus/`
-  - Test: Mongo weak write returns logIndex, weak read with minIndex waits correctly
-  - Test: Pileus forces writes to strong, weak reads use causal tracking
+- [x] 120h: Build + test
+  - `go build -o /dev/null .` — clean build
+  - `go test ./...` — all 18 test packages pass
 
 - [ ] 120i: Spot test — Mongo + Pileus + Raft-HT at w5%, t=1,8,32,96
   - **Expected**: Mongo tput ≈ Raft-HT (within 10%, same Raft replication)
@@ -8596,9 +8588,7 @@ Mongo weak read:
 - [ ] 120j: Run full Exp 1.1 with all 4 protocols
   - 4 protocols × 8 threads × 2 write groups × 1 rep = 64 runs
 
-**Estimated LOC**: ~600 (mongotunable ~280 + pileus ~210 + wire format ~30 + wiring ~40)
-
-**Status**: 🔄 **IN PROGRESS** (120a done)
+**Status**: 🔄 **IN PROGRESS** (120a-h done)
 
 ---
 

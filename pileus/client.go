@@ -1,4 +1,4 @@
-package mongotunable
+package pileus
 
 import (
 	"log"
@@ -12,8 +12,9 @@ import (
 	"github.com/imdea-software/swiftpaxos/state"
 )
 
-// Client implements the HybridClient interface for MongoDB-Tunable.
-// Extends Raft-HT's client with causal tracking: tracks the last weak write's
+// Client implements the HybridClient interface for Pileus.
+// All writes are forced to the strong (Raft consensus) path.
+// Weak reads use causal tracking: the client tracks the last strong write's
 // log index and sends it as MinIndex in weak read requests.
 type Client struct {
 	*client.BufferClient
@@ -22,25 +23,24 @@ type Client struct {
 	leader      int32
 	numReplicas int32
 
-	// Weak command tracking
+	// Weak command tracking (for weak reads only)
 	weakPending map[int32]struct{}
 	delivered   map[int32]struct{}
 
 	// Per-command key tracking
 	weakPendingKeys   map[int32]int64
-	weakPendingValues map[int32]state.Value
 	strongPendingKeys map[int32]int64
 	strongPendingCmds map[int32]*defs.Propose
 
 	deadReplicas map[int32]bool
 
-	// Causal tracking: last weak write log index (for MinIndex in weak reads)
-	lastWeakWriteSlot int32 // atomic
+	// Causal tracking: last strong write log index (for MinIndex in weak reads)
+	lastWriteSlot int32 // atomic
 
 	mu sync.Mutex
 }
 
-// NewClient creates a MongoDB-Tunable client with causal tracking.
+// NewClient creates a Pileus client.
 func NewClient(b *client.BufferClient) *Client {
 	c := &Client{
 		BufferClient: b,
@@ -52,7 +52,6 @@ func NewClient(b *client.BufferClient) *Client {
 		delivered:   make(map[int32]struct{}),
 
 		weakPendingKeys:   make(map[int32]int64),
-		weakPendingValues: make(map[int32]state.Value),
 		strongPendingKeys: make(map[int32]int64),
 		strongPendingCmds: make(map[int32]*defs.Propose),
 		deadReplicas:      make(map[int32]bool),
@@ -73,10 +72,6 @@ func (c *Client) handleMsgs() {
 		case m := <-c.cs.RaftReplyChan:
 			rep := m.(*raftht.RaftReply)
 			c.handleRaftReply(rep)
-
-		case m := <-c.cs.WeakReplyChan:
-			rep := m.(*raftht.MWeakReply)
-			c.handleWeakReply(rep)
 
 		case m := <-c.cs.WeakReadReplyChan:
 			rep := m.(*raftht.MWeakReadReply)
@@ -108,48 +103,6 @@ func (c *Client) handleRaftReply(rep *raftht.RaftReply) {
 	delete(c.strongPendingCmds, seqnum)
 	delete(c.strongPendingKeys, seqnum)
 	c.RegisterReply(rep.Value, seqnum)
-}
-
-func (c *Client) handleWeakReply(rep *raftht.MWeakReply) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	seqnum := rep.CmdId.SeqNum
-
-	if rep.LeaderId >= 0 && rep.LeaderId != c.leader && rep.Slot < 0 {
-		if !c.deadReplicas[rep.LeaderId] {
-			c.leader = rep.LeaderId
-			c.LeaderId = int(rep.LeaderId)
-		}
-		return
-	}
-
-	delete(c.weakPending, seqnum)
-
-	// Causal tracking: update last weak write slot
-	if rep.Slot >= 0 {
-		for {
-			old := atomic.LoadInt32(&c.lastWeakWriteSlot)
-			if rep.Slot <= old {
-				break
-			}
-			if atomic.CompareAndSwapInt32(&c.lastWeakWriteSlot, old, rep.Slot) {
-				break
-			}
-		}
-	}
-
-	val := state.NIL()
-	if v, ok := c.weakPendingValues[seqnum]; ok {
-		val = v
-		delete(c.weakPendingValues, seqnum)
-	}
-	delete(c.weakPendingKeys, seqnum)
-
-	if _, ok := c.delivered[seqnum]; !ok {
-		c.delivered[seqnum] = struct{}{}
-		c.RegisterReply(val, seqnum)
-	}
 }
 
 func (c *Client) handleWeakReadReply(rep *raftht.MWeakReadReply) {
@@ -224,25 +177,15 @@ func (c *Client) SendStrongRead(key int64) int32 {
 	return seqnum
 }
 
+// SendWeakWrite forces all writes to the strong path (Raft consensus).
+// This is the key Pileus difference from MongoDB-Tunable.
 func (c *Client) SendWeakWrite(key int64, value []byte) int32 {
-	seqnum := c.GetNextSeqnum()
-	wp := &raftht.MWeakPropose{
-		CommandId: seqnum,
-		ClientId:  c.ClientId,
-		Command:   state.Command{Op: state.PUT, K: state.Key(key), V: value},
-	}
-	c.mu.Lock()
-	c.weakPending[seqnum] = struct{}{}
-	c.weakPendingKeys[seqnum] = key
-	c.weakPendingValues[seqnum] = value
-	c.mu.Unlock()
-	c.SendMsg(c.leader, c.cs.WeakProposeRPC, wp)
-	return seqnum
+	return c.SendStrongWrite(key, value)
 }
 
 func (c *Client) SendWeakRead(key int64) int32 {
 	seqnum := c.GetNextSeqnum()
-	minIdx := atomic.LoadInt32(&c.lastWeakWriteSlot)
+	minIdx := atomic.LoadInt32(&c.lastWriteSlot)
 	wr := &raftht.MWeakRead{
 		CommandId: seqnum,
 		ClientId:  c.ClientId,

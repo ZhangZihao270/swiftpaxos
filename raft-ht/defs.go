@@ -958,55 +958,62 @@ type byteReader interface {
 // --- CommunicationSupply ---
 
 type CommunicationSupply struct {
-	maxLatency time.Duration
+	MaxLatency time.Duration
 
-	appendEntriesChan      chan fastrpc.Serializable
-	appendEntriesReplyChan chan fastrpc.Serializable
-	requestVoteChan        chan fastrpc.Serializable
-	requestVoteReplyChan   chan fastrpc.Serializable
-	raftReplyChan          chan fastrpc.Serializable
+	AppendEntriesChan      chan fastrpc.Serializable
+	AppendEntriesReplyChan chan fastrpc.Serializable
+	RequestVoteChan        chan fastrpc.Serializable
+	RequestVoteReplyChan   chan fastrpc.Serializable
+	RaftReplyChan          chan fastrpc.Serializable
 
 	// Raft-HT weak channels
-	weakProposeChan    chan fastrpc.Serializable
-	weakReplyChan      chan fastrpc.Serializable
-	weakReadChan       chan fastrpc.Serializable
-	weakReadReplyChan  chan fastrpc.Serializable
+	WeakProposeChan   chan fastrpc.Serializable
+	WeakReplyChan     chan fastrpc.Serializable
+	WeakReadChan      chan fastrpc.Serializable
+	WeakReadReplyChan chan fastrpc.Serializable
 
-	appendEntriesRPC      uint8
-	appendEntriesReplyRPC uint8
-	requestVoteRPC        uint8
-	requestVoteReplyRPC   uint8
-	raftReplyRPC          uint8
+	AppendEntriesRPC      uint8
+	AppendEntriesReplyRPC uint8
+	RequestVoteRPC        uint8
+	RequestVoteReplyRPC   uint8
+	RaftReplyRPC          uint8
 
 	// Raft-HT weak RPCs
-	weakProposeRPC    uint8
-	weakReplyRPC      uint8
-	weakReadRPC       uint8
-	weakReadReplyRPC  uint8
+	WeakProposeRPC   uint8
+	WeakReplyRPC     uint8
+	WeakReadRPC      uint8
+	WeakReadReplyRPC uint8
+}
+
+// InitClientCs initializes a CommunicationSupply for client-side use.
+// Registers only the reply types that clients receive (RaftReply, MWeakReply,
+// MWeakReadReply) and the request types that clients send (MWeakPropose, MWeakRead).
+func InitClientCs(cs *CommunicationSupply, t *fastrpc.Table) {
+	initCs(cs, t)
 }
 
 func initCs(cs *CommunicationSupply, t *fastrpc.Table) {
-	cs.maxLatency = 0
+	cs.MaxLatency = 0
 
-	cs.appendEntriesChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
-	cs.appendEntriesReplyChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
-	cs.requestVoteChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
-	cs.requestVoteReplyChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
-	cs.raftReplyChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
+	cs.AppendEntriesChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
+	cs.AppendEntriesReplyChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
+	cs.RequestVoteChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
+	cs.RequestVoteReplyChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
+	cs.RaftReplyChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
 
-	cs.weakProposeChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
-	cs.weakReplyChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
-	cs.weakReadChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
-	cs.weakReadReplyChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
+	cs.WeakProposeChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
+	cs.WeakReplyChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
+	cs.WeakReadChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
+	cs.WeakReadReplyChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
 
-	cs.appendEntriesRPC = t.Register(new(AppendEntries), cs.appendEntriesChan)
-	cs.appendEntriesReplyRPC = t.Register(new(AppendEntriesReply), cs.appendEntriesReplyChan)
-	cs.requestVoteRPC = t.Register(new(RequestVote), cs.requestVoteChan)
-	cs.requestVoteReplyRPC = t.Register(new(RequestVoteReply), cs.requestVoteReplyChan)
-	cs.raftReplyRPC = t.Register(new(RaftReply), cs.raftReplyChan)
+	cs.AppendEntriesRPC = t.Register(new(AppendEntries), cs.AppendEntriesChan)
+	cs.AppendEntriesReplyRPC = t.Register(new(AppendEntriesReply), cs.AppendEntriesReplyChan)
+	cs.RequestVoteRPC = t.Register(new(RequestVote), cs.RequestVoteChan)
+	cs.RequestVoteReplyRPC = t.Register(new(RequestVoteReply), cs.RequestVoteReplyChan)
+	cs.RaftReplyRPC = t.Register(new(RaftReply), cs.RaftReplyChan)
 
-	cs.weakProposeRPC = t.Register(new(MWeakPropose), cs.weakProposeChan)
-	cs.weakReplyRPC = t.Register(new(MWeakReply), cs.weakReplyChan)
-	cs.weakReadRPC = t.Register(new(MWeakRead), cs.weakReadChan)
-	cs.weakReadReplyRPC = t.Register(new(MWeakReadReply), cs.weakReadReplyChan)
+	cs.WeakProposeRPC = t.Register(new(MWeakPropose), cs.WeakProposeChan)
+	cs.WeakReplyRPC = t.Register(new(MWeakReply), cs.WeakReplyChan)
+	cs.WeakReadRPC = t.Register(new(MWeakRead), cs.WeakReadChan)
+	cs.WeakReadReplyRPC = t.Register(new(MWeakReadReply), cs.WeakReadReplyChan)
 }
