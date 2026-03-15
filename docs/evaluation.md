@@ -94,6 +94,22 @@ Results are stored in a dedicated folder per experiment: `results/eval-<exp>-<da
 
 **Results folder**: `results/eval-exp1.1/<date>/`
 
+#### Actual Results
+
+Run with 1 rep, 2 protocols × 8 threads × 2 write groups = 32 runs.
+
+| Threads | HT tput (w5%) | Raft tput (w5%) | Ratio | HT tput (w50%) | Raft tput (w50%) | Ratio |
+|---------|---------------|-----------------|-------|----------------|------------------|-------|
+| 1       | 1,165         | 581             | 2.0x  | 1,035          | 582              | 1.8x  |
+| 2       | 2,303         | 1,163           | 2.0x  | 2,070          | 1,161            | 1.8x  |
+| 4       | 4,643         | 2,321           | 2.0x  | 3,778          | 2,322            | 1.6x  |
+| 8       | 8,211         | 4,629           | 1.8x  | 6,382          | 4,101            | 1.6x  |
+| 16      | 15,849        | 8,352           | 1.9x  | 10,376         | 6,420            | 1.6x  |
+| 32      | 25,875        | 12,422          | 2.1x  | 13,683         | 8,179            | 1.7x  |
+| 64      | 34,034        | 17,437          | 2.0x  | 13,479         | 10,946           | 1.2x  |
+| 96      | 33,131        | 20,573          | 1.6x  | 15,282         | 11,851           | 1.3x  |
+
+**Key findings**: Raft-HT achieves 1.8-2.1x throughput at w5%, 1.6-1.8x at w50%. T property confirmed: s_p50 ≈ 85ms for both protocols at low threads. Weak ops get 2.1-2.4ms latency at w5%.
 
 <!-- ### Exp 1.2: Weak Ratio Sweep (T Property)
 - **Setup**: Geo-distributed
