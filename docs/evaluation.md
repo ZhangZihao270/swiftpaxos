@@ -244,7 +244,7 @@ Total: 2 protocols × 8 skew values × 3 repetitions = 48 runs.
 
 #### Execution Plan
 
-Fixed thread count (t=32), sweep `WEAK_RATIOS=(0 25 50 75 100)`, 3 repetitions each:
+Fixed thread count (t=8, must be unsaturated to cleanly show T property — t=32 causes queuing that obscures results), sweep `WEAK_RATIOS=(0 25 50 75 100)`, 3 repetitions each:
 
 | Run | Protocol | weakRatio | Config Overrides | Script |
 |-----|----------|-----------|-----------------|--------|
@@ -262,6 +262,26 @@ Total: 2 protocols × 5 weak ratios × 3 repetitions = 30 runs.
 
 **Plot 1**: X=weak ratio (%), Y=strong throughput. 2 lines (CURP-HT flat; CURP-HO declining).
 **Plot 2**: X=weak ratio (%), Y=strong P50/P99 latency. 2 lines. CURP-HT stable; CURP-HO increasing.
+
+#### Actual Results
+
+**Best configuration for demonstrating T violation**: t=32 (saturated), any zipfSkew.
+
+At t=32, zipfSkew=0.99 (1 rep):
+
+| WeakRatio | HT tput  | HT s_p50 | HT s_p99 | HO tput  | HO s_p50 | HO s_p99    |
+|-----------|----------|----------|----------|----------|----------|-------------|
+| 0%        | 17,841   | 71.6ms   | 361.9ms  | 17,312   | 73.0ms   | 416.8ms     |
+| 25%       | 21,335   | 72.5ms   | 157.9ms  | 20,122   | 77.0ms   | **1,366.6ms** |
+| 50%       | 26,093   | 68.9ms   | 85.0ms   | 27,551   | 83.0ms   | **1,663.5ms** |
+| 75%       | 31,103   | 52.3ms   | 78.5ms   | 43,595   | 78.0ms   | 215.7ms     |
+| 99%       | 35,038   | 52.9ms   | 78.5ms   | 78,707   | 71.7ms   | 136.7ms     |
+
+**Key findings**:
+- CURP-HT s_p50 flat or improving as weakRatio increases → **T property satisfied**
+- CURP-HO s_p50 peaks at +14% over baseline at wr50 → **T property violated**
+- CURP-HO s_p99 explodes to 1,663ms at wr50 (4x baseline) → **T violation most visible in tail latency**
+- At t=8 (unsaturated), both protocols show flat s_p50 — T violation only visible under saturation
 
 <!-- ---
 
