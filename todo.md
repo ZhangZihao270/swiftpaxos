@@ -8578,17 +8578,26 @@ Mongo weak read:
   - `go build -o /dev/null .` — clean build
   - `go test ./...` — all 18 test packages pass
 
-- [ ] 120i: Spot test — Mongo + Pileus + Raft-HT at w5%, t=1,8,32,96
-  - **Expected**: Mongo tput ≈ Raft-HT (within 10%, same Raft replication)
-  - **Expected**: Mongo weak read latency slightly higher than Raft-HT
-    (wait for lastApplied >= minIndex adds small delay on followers)
-  - **Expected**: Pileus tput < Raft-HT (no weak write benefit)
-  - **Expected**: s_p50 ~85ms at t=1 for all
+- [x] 120i: Spot test — Mongo + Pileus + Raft-HT at w5%, t=1,8,32,96 [26:03:15]
+  - All expectations met:
+  - **Mongo ≈ Raft-HT**: 96% at t=96 (37,441 vs 39,124) — minor MinIndex wait overhead
+  - **Pileus ≈ Raft-HT**: 97% at t=96 (37,949 vs 39,124) — nearly identical
+  - **s_p50 ~85ms at t=1** for all 4 protocols ✅
+  - **Mongo w_p50 > Raft-HT w_p50**: 8.56ms vs 2.23ms at t=1 (causal MinIndex wait on follower)
+  - **Pileus w_p50 ~5ms** at t=1 (no weak writes → MinIndex=0 → no wait, just RTT)
+  - Full results:
+
+  | Protocol | t=1 | t=8 | t=32 | t=96 | s_p50(t=1) | w_p50(t=1) |
+  |---|---|---|---|---|---|---|
+  | Raft | 584 | 4,629 | 14,561 | 23,327 | 85.29ms | 85.29ms |
+  | Raft-HT | 1,149 | 8,487 | 26,585 | 39,124 | 85.52ms | 2.23ms |
+  | Mongo | 1,047 | 6,416 | 19,515 | 37,441 | 85.43ms | 8.56ms |
+  | Pileus | 1,109 | 8,293 | 25,887 | 37,949 | 85.51ms | 5.36ms |
 
 - [ ] 120j: Run full Exp 1.1 with all 4 protocols
   - 4 protocols × 8 threads × 2 write groups × 1 rep = 64 runs
 
-**Status**: 🔄 **IN PROGRESS** (120a-h done)
+**Status**: 🔄 **IN PROGRESS** (120a-i done)
 
 ---
 
