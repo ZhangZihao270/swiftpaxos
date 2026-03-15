@@ -8351,9 +8351,9 @@ These scripts are permanent — rerun with `bash scripts/eval-exp3.1-final.sh [o
   - All protocols functional, no hangs/crashes
 
 - [ ] 117g: Run Exp 1.1 with all 4 protocols
-  - Update `scripts/eval-exp1.1-final.sh`: add mongotunable + pileus
+  - Script: `scripts/eval-exp1.1-4proto.sh`
   - Config: same as Phase 116 (w5%, w50%, t=1..96)
-  - 4 protocols × 8 threads × 2 write groups × 1 rep = 64 runs
+  - 4 protocols × 8 thread counts × 2 write groups × 1 rep = 64 runs
   - Tabulate: compare Raft, Raft-HT, MongoDB-Tunable, Pileus
 
 **Estimated LOC**: ~1,200 (mongotunable package) + ~30 (wiring)
