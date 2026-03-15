@@ -338,6 +338,8 @@ func (r *Replica) bcastPrepare(instance int32, ballot int32, toInfinity bool) {
 	if r.Thrifty {
 		n = r.N >> 1
 	}
+
+	r.M.Lock()
 	q := r.Id
 	for sent := 0; sent < n; {
 		q = (q + 1) % int32(r.N)
@@ -348,8 +350,18 @@ func (r *Replica) bcastPrepare(instance int32, ballot int32, toInfinity bool) {
 			continue
 		}
 		sent++
-		r.sender.SendTo(q, args, r.cs.prepareRPC)
+		w := r.PeerWriters[q]
+		if w != nil {
+			w.WriteByte(r.cs.prepareRPC)
+			args.Marshal(w)
+		}
 	}
+	for _, w := range r.PeerWriters {
+		if w != nil {
+			w.Flush()
+		}
+	}
+	r.M.Unlock()
 }
 
 // bcastAccept broadcasts an Accept message to a majority of peers.
@@ -367,6 +379,8 @@ func (r *Replica) bcastAccept(instance int32, ballot int32, deps int32, command 
 	if r.Thrifty {
 		n = r.N >> 1
 	}
+
+	r.M.Lock()
 	q := r.Id
 	for sent := 0; sent < n; {
 		q = (q + 1) % int32(r.N)
@@ -377,8 +391,18 @@ func (r *Replica) bcastAccept(instance int32, ballot int32, deps int32, command 
 			continue
 		}
 		sent++
-		r.sender.SendTo(q, args, r.cs.acceptRPC)
+		w := r.PeerWriters[q]
+		if w != nil {
+			w.WriteByte(r.cs.acceptRPC)
+			args.Marshal(w)
+		}
 	}
+	for _, w := range r.PeerWriters {
+		if w != nil {
+			w.Flush()
+		}
+	}
+	r.M.Unlock()
 }
 
 // bcastStrongCommit broadcasts commit to majority via CommitShort, rest via full Commit.
@@ -402,10 +426,12 @@ func (r *Replica) bcastStrongCommit(instance int32, ballot int32, deps int32, co
 	if r.Thrifty {
 		n = r.N >> 1
 	}
-	q := r.Id
-	sent := 0
 
 	numChans := len(r.cs.commitShortRPC)
+
+	r.M.Lock()
+	q := r.Id
+	sent := 0
 
 	// Send CommitShort to majority
 	for sent < n {
@@ -417,7 +443,12 @@ func (r *Replica) bcastStrongCommit(instance int32, ballot int32, deps int32, co
 			continue
 		}
 		sent++
-		r.sender.SendTo(q, &pcs, r.cs.commitShortRPC[rand.Intn(numChans)])
+		w := r.PeerWriters[q]
+		if w != nil {
+			rpc := r.cs.commitShortRPC[rand.Intn(numChans)]
+			w.WriteByte(rpc)
+			pcs.Marshal(w)
+		}
 	}
 	// Send full Commit to the rest (if thrifty)
 	if r.Thrifty && q != r.Id {
@@ -430,9 +461,20 @@ func (r *Replica) bcastStrongCommit(instance int32, ballot int32, deps int32, co
 				continue
 			}
 			sent++
-			r.sender.SendTo(q, &pc, r.cs.commitRPC[rand.Intn(numChans)])
+			w := r.PeerWriters[q]
+			if w != nil {
+				rpc := r.cs.commitRPC[rand.Intn(numChans)]
+				w.WriteByte(rpc)
+				pc.Marshal(w)
+			}
 		}
 	}
+	for _, w := range r.PeerWriters {
+		if w != nil {
+			w.Flush()
+		}
+	}
+	r.M.Unlock()
 }
 
 // bcastCausalCommit broadcasts a full Commit to all peers (causal path, no ack needed).
@@ -446,6 +488,8 @@ func (r *Replica) bcastCausalCommit(instance int32, ballot int32, deps int32, co
 	pcc.Command = command
 
 	numChans := len(r.cs.commitRPC)
+
+	r.M.Lock()
 	q := r.Id
 	for sent := 0; sent < r.N; {
 		q = (q + 1) % int32(r.N)
@@ -456,8 +500,19 @@ func (r *Replica) bcastCausalCommit(instance int32, ballot int32, deps int32, co
 			continue
 		}
 		sent++
-		r.sender.SendTo(q, &pcc, r.cs.commitRPC[rand.Intn(numChans)])
+		w := r.PeerWriters[q]
+		if w != nil {
+			rpc := r.cs.commitRPC[rand.Intn(numChans)]
+			w.WriteByte(rpc)
+			pcc.Marshal(w)
+		}
 	}
+	for _, w := range r.PeerWriters {
+		if w != nil {
+			w.Flush()
+		}
+	}
+	r.M.Unlock()
 }
 
 // --- handlePropose: processes client proposals ---
