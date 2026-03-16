@@ -8608,6 +8608,59 @@ Mongo weak read:
 
 ---
 
+### Phase 121: Pileus-HT — Pileus with Fast Weak Writes
+
+**Goal**: Create `pileusht/` — a Pileus variant where weak writes get fast reply from
+leader (like Raft-HT), instead of waiting for majority replication. This gives Pileus
+the "HT" (Hybrid Two-phase) treatment.
+
+**Difference from existing protocols**:
+
+| Protocol | Strong write | Weak write | Weak read |
+|----------|-------------|------------|-----------|
+| Raft | majority commit | N/A | N/A |
+| Raft-HT | majority commit | leader immediate reply | follower local read |
+| Pileus | majority commit | **majority commit** (all writes strong) | follower causal read (minIndex) |
+| **Pileus-HT** | majority commit | **leader immediate reply** | follower causal read (minIndex) |
+
+**Key distinction from Raft-HT**: Pileus-HT's weak reads still use the causal `minIndex`
+mechanism (read-your-writes guarantee), while Raft-HT's weak reads have no ordering
+guarantee.
+
+**Architecture**: Fork `pileus/` → `pileusht/`, change weak write path to match Raft-HT.
+
+**Tasks**:
+
+- [x] 121a: Create `pileusht/` package [26:03:16]
+  - `pileusht/pileusht.go`: Raft-HT wrapper (type alias + New), 30 LOC
+  - `pileusht/client.go`: Full HybridClient with fast weak writes + causal MinIndex, 230 LOC
+  - Behaviorally identical to mongotunable; conceptually Pileus + fast weak writes
+
+- [x] 121b: (merged into 121a) client.go created with causal tracking [26:03:16]
+
+- [x] 121c: Register protocol in `run.go` + `main.go` [26:03:16]
+  - Added `case "pileusht"` in run.go and main.go
+  - Added to metrics aggregation check
+
+- [x] 121d: Build + test [26:03:16]
+  - `go build` succeeds, `go test ./...` all pass
+
+- [ ] 121e: Run Exp 1.1 — Pileus-HT spot test at w5%, t=1,8,32,96
+  - Compare with Raft-HT and Pileus from Phase 120
+  - **Expected**: Pileus-HT tput ≈ Raft-HT (same fast weak write path)
+  - **Expected**: Pileus-HT w_p50 for reads slightly higher than Raft-HT (causal wait)
+  - **Expected**: Pileus-HT w_p50 for writes ≈ Raft-HT (immediate reply)
+
+- [ ] 121f: Run Exp 1.1 — Pileus-HT only
+  - 1 protocol × 8 threads × 2 write groups × 1 rep = 16 runs
+  - Merge results with Phase 120j (Raft, Raft-HT, Mongo, Pileus) for complete 5-protocol table
+
+**Estimated LOC**: ~300 (pileusht package + wiring)
+
+**Status**: 🔄 **IN PROGRESS** (121a-d done, 121e-f remaining)
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
