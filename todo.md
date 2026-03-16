@@ -8645,11 +8645,11 @@ guarantee.
 - [x] 121d: Build + test [26:03:16]
   - `go build` succeeds, `go test ./...` all pass
 
-- [ ] 121e: Run Exp 1.1 — Pileus-HT spot test at w5%, t=1,8,32,96
-  - Compare with Raft-HT and Pileus from Phase 120
-  - **Expected**: Pileus-HT tput ≈ Raft-HT (same fast weak write path)
-  - **Expected**: Pileus-HT w_p50 for reads slightly higher than Raft-HT (causal wait)
-  - **Expected**: Pileus-HT w_p50 for writes ≈ Raft-HT (immediate reply)
+- [x] 121e: Run Exp 1.1 — Pileus-HT spot test at w5%, t=1,8,32,96 [26:03:16]
+  - Pileus-HT t=96: 35,968 ops/s (107% of Raft-HT's 33,528) ✅
+  - w_p50: 9.89ms at t=1 (vs Raft-HT 2.34ms) — causal MinIndex wait overhead
+  - s_p50: 85.50ms at t=1 (same as all protocols) ✅
+  - Confirms: fast weak write path works correctly, tput ≈ Raft-HT
 
 - [ ] 121f: Run Exp 1.1 — Pileus-HT only
   - 1 protocol × 8 threads × 2 write groups × 1 rep = 16 runs
@@ -8657,7 +8657,7 @@ guarantee.
 
 **Estimated LOC**: ~300 (pileusht package + wiring)
 
-**Status**: 🔄 **IN PROGRESS** (121a-d done, 121e-f remaining)
+**Status**: 🔄 **IN PROGRESS** (121a-e done, 121f remaining)
 
 ---
 
