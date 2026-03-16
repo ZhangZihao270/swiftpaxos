@@ -8665,6 +8665,73 @@ guarantee.
 
 ---
 
+### Phase 122: Pileus-HT v2 — Client Cache Merge (Replace MinIndex Wait)
+
+**Goal**: Replace Pileus-HT's causal MinIndex wait with client-side cache merge, eliminating the ~50ms weak read penalty while preserving read-your-writes consistency.
+
+**Problem**: Current Pileus-HT weak reads wait for follower's `lastApplied >= MinIndex` (~50ms = replication lag). This makes Pileus-HT slower than plain Pileus at w5%.
+
+**Solution**: Client caches weak write results locally. Weak reads check cache first, then merge with follower's stale read. No replica-side waiting needed.
+
+**How it works**:
+1. **Weak write**: leader executes → replies with (key, value, logIndex) → client caches `{key → (value, logIndex)}`
+2. **Weak read**:
+   - Client sends read to closest follower (no MinIndex, just a normal read)
+   - Follower replies immediately with its local state (may be stale)
+   - Client merges: if cache has a newer value for the same key (higher logIndex), use cache; otherwise use follower's reply
+3. **Cache eviction**: entries evicted when logIndex is confirmed committed (or after TTL)
+
+**Read-your-writes guarantee**: If client wrote key K at logIndex=100, and follower hasn't applied it yet (returns stale value), client's cache has the fresh value → client returns the cached value. No waiting.
+
+**Consistency comparison**:
+- Raft-HT: NO read-your-writes (weak read may miss own recent writes)
+- Pileus-HT v1 (MinIndex): read-your-writes via replica wait (~50ms penalty)
+- Pileus-HT v2 (cache merge): read-your-writes via client cache (~0ms penalty)
+
+**Tasks**:
+
+- [x] 122a: Verify weak write reply has needed info [26:03:16]
+  - No server changes needed: client already tracks key/value in weakPendingKeys/Values
+  - MWeakReply.Slot already provides logIndex; client has all info for cache
+
+- [x] 122b: Implement client-side write cache in pileusht/client.go [26:03:16]
+  - Added `writeCache map[int64]cacheEntry` with `{Value, LogIndex}`
+  - Populated in handleWeakReply when rep.Slot >= 0; higher slot wins
+  - No TTL needed — evicted when follower catches up (version >= logIndex)
+
+- [x] 122c: Implement cache merge for weak reads [26:03:16]
+  - handleWeakReadReply merges follower's Version with cache's LogIndex
+  - If cache.LogIndex > follower.Version → return cached value (read-your-writes)
+  - If follower caught up (Version >= LogIndex) → return follower value, evict cache
+  - Added weakReadKeys map to track which key each weak read was for
+
+- [x] 122d: Remove MinIndex mechanism [26:03:16]
+  - SendWeakRead now sends MinIndex=0 (no follower wait)
+  - Removed lastWeakWriteSlot atomic tracking
+  - Removed sync/atomic import
+  - Read-your-writes now via cache merge (~0ms) instead of follower wait (~50ms)
+
+- [x] 122e: Build + unit test [26:03:16]
+  - 7 unit tests: cache basic, populate on reply, higher slot wins,
+    client newer, follower caught up, no cache entry, equal version
+  - All tests pass, full suite passes
+
+- [ ] 122f: Spot test — Pileus-HT v2 at t=1,8,32,96 w5%
+  - **Expected**: w_p50 drops from ~50ms to <5ms (like plain Pileus)
+  - **Expected**: tput increases to ≥ Pileus level (35K+ at t=96 w5%)
+  - **Expected**: s_p50 unchanged (~85ms at low threads)
+
+- [ ] 122g: Run Exp 1.1 — Pileus-HT v2 only (16 runs)
+  - 1 protocol × 8 threads × 2 write groups × 1 rep = 16 runs
+  - Merge with Phase 120j + 121f results
+  - **Target**: Pileus-HT ≈ Raft-HT throughput, with read-your-writes guarantee
+
+**Estimated LOC**: ~200 (net change, mostly in client.go)
+
+**Status**: 🔄 **IN PROGRESS** (122a-e done, 122f-g remaining)
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task

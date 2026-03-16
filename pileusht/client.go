@@ -3,7 +3,6 @@ package pileusht
 import (
 	"log"
 	"sync"
-	"sync/atomic"
 
 	"github.com/imdea-software/swiftpaxos/client"
 	"github.com/imdea-software/swiftpaxos/replica/defs"
@@ -12,10 +11,21 @@ import (
 	"github.com/imdea-software/swiftpaxos/state"
 )
 
-// Client implements the HybridClient interface for Pileus-HT.
-// Weak writes get fast leader reply (like Raft-HT), with causal tracking:
-// the client tracks the last weak write's log index and sends it as MinIndex
-// in weak read requests (read-your-writes guarantee).
+// cacheEntry holds a recently written value for read-your-writes merging.
+type cacheEntry struct {
+	Value    state.Value
+	LogIndex int32 // log index assigned by leader
+}
+
+// Client implements the HybridClient interface for Pileus-HT v2.
+// Weak writes get fast leader reply (like Raft-HT). Weak reads use
+// client-side cache merge for read-your-writes guarantee (~0ms penalty)
+// instead of the MinIndex follower wait approach (~50ms penalty).
+//
+// Cache merge: on weak write reply, client caches {key → (value, logIndex)}.
+// On weak read reply, client compares follower's Version with cache's LogIndex;
+// if cache is newer, returns cached value (read-your-writes). Otherwise returns
+// follower's reply (follower has caught up).
 type Client struct {
 	*client.BufferClient
 
@@ -33,15 +43,18 @@ type Client struct {
 	strongPendingKeys map[int32]int64
 	strongPendingCmds map[int32]*defs.Propose
 
+	// Per-command key tracking for weak reads (for cache merge)
+	weakReadKeys map[int32]int64
+
 	deadReplicas map[int32]bool
 
-	// Causal tracking: last weak write log index (for MinIndex in weak reads)
-	lastWeakWriteSlot int32 // atomic
+	// Client-side write cache for read-your-writes (key → most recent write)
+	writeCache map[int64]cacheEntry
 
 	mu sync.Mutex
 }
 
-// NewClient creates a Pileus-HT client with causal tracking.
+// NewClient creates a Pileus-HT v2 client with cache-based causal tracking.
 func NewClient(b *client.BufferClient) *Client {
 	c := &Client{
 		BufferClient: b,
@@ -56,7 +69,9 @@ func NewClient(b *client.BufferClient) *Client {
 		weakPendingValues: make(map[int32]state.Value),
 		strongPendingKeys: make(map[int32]int64),
 		strongPendingCmds: make(map[int32]*defs.Propose),
+		weakReadKeys:      make(map[int32]int64),
 		deadReplicas:      make(map[int32]bool),
+		writeCache:        make(map[int64]cacheEntry),
 	}
 
 	t := fastrpc.NewTableId(defs.RPC_TABLE)
@@ -127,15 +142,17 @@ func (c *Client) handleWeakReply(rep *raftht.MWeakReply) {
 
 	delete(c.weakPending, seqnum)
 
-	// Causal tracking: update last weak write slot
+	// Cache the write result for read-your-writes merge
 	if rep.Slot >= 0 {
-		for {
-			old := atomic.LoadInt32(&c.lastWeakWriteSlot)
-			if rep.Slot <= old {
-				break
-			}
-			if atomic.CompareAndSwapInt32(&c.lastWeakWriteSlot, old, rep.Slot) {
-				break
+		if key, ok := c.weakPendingKeys[seqnum]; ok {
+			if val, vok := c.weakPendingValues[seqnum]; vok {
+				existing, exists := c.writeCache[key]
+				if !exists || rep.Slot > existing.LogIndex {
+					c.writeCache[key] = cacheEntry{
+						Value:    val,
+						LogIndex: rep.Slot,
+					}
+				}
 			}
 		}
 	}
@@ -159,11 +176,26 @@ func (c *Client) handleWeakReadReply(rep *raftht.MWeakReadReply) {
 
 	seqnum := rep.CmdId.SeqNum
 	delete(c.weakPending, seqnum)
+
+	// Cache merge: if client has a newer cached write for this key, use it
+	result := rep.Rep
+	if key, ok := c.weakReadKeys[seqnum]; ok {
+		if cached, cok := c.writeCache[key]; cok {
+			if cached.LogIndex > rep.Version {
+				// Client's own write is newer than follower's state
+				result = cached.Value
+			} else {
+				// Follower has caught up — evict cache entry
+				delete(c.writeCache, key)
+			}
+		}
+		delete(c.weakReadKeys, seqnum)
+	}
 	delete(c.weakPendingKeys, seqnum)
 
 	if _, ok := c.delivered[seqnum]; !ok {
 		c.delivered[seqnum] = struct{}{}
-		c.RegisterReply(rep.Rep, seqnum)
+		c.RegisterReply(result, seqnum)
 	}
 }
 
@@ -226,8 +258,7 @@ func (c *Client) SendStrongRead(key int64) int32 {
 }
 
 // SendWeakWrite sends a weak write to the leader for fast reply.
-// Unlike plain Pileus (which forces all writes through the strong path),
-// Pileus-HT gives weak writes the fast leader reply (like Raft-HT).
+// The reply includes a log index (Slot) which is cached for read-your-writes.
 func (c *Client) SendWeakWrite(key int64, value []byte) int32 {
 	seqnum := c.GetNextSeqnum()
 	wp := &raftht.MWeakPropose{
@@ -244,20 +275,20 @@ func (c *Client) SendWeakWrite(key int64, value []byte) int32 {
 	return seqnum
 }
 
-// SendWeakRead sends a weak read to the closest replica with causal MinIndex.
-// The MinIndex is the last weak write's log index, ensuring read-your-writes.
+// SendWeakRead sends a weak read to the closest replica without MinIndex.
+// Read-your-writes is guaranteed via client-side cache merge, not follower wait.
 func (c *Client) SendWeakRead(key int64) int32 {
 	seqnum := c.GetNextSeqnum()
-	minIdx := atomic.LoadInt32(&c.lastWeakWriteSlot)
 	wr := &raftht.MWeakRead{
 		CommandId: seqnum,
 		ClientId:  c.ClientId,
 		Key:       state.Key(key),
-		MinIndex:  minIdx,
+		MinIndex:  0, // No follower wait — use cache merge instead
 	}
 	c.mu.Lock()
 	c.weakPending[seqnum] = struct{}{}
 	c.weakPendingKeys[seqnum] = key
+	c.weakReadKeys[seqnum] = key
 	c.mu.Unlock()
 	closest := int32(c.ClosestId)
 	c.SendMsg(closest, c.cs.WeakReadRPC, wr)
