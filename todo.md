@@ -8651,13 +8651,17 @@ guarantee.
   - s_p50: 85.50ms at t=1 (same as all protocols) ✅
   - Confirms: fast weak write path works correctly, tput ≈ Raft-HT
 
-- [ ] 121f: Run Exp 1.1 — Pileus-HT only
-  - 1 protocol × 8 threads × 2 write groups × 1 rep = 16 runs
-  - Merge results with Phase 120j (Raft, Raft-HT, Mongo, Pileus) for complete 5-protocol table
+- [x] 121f: Run Exp 1.1 — Pileus-HT (16 runs) [26:03:16]
+  - **w5% t=96**: Pileus-HT=33,781 (101% of Raft-HT=33,528) ✅
+  - **w50% t=96**: Pileus-HT=15,313 (102% of Raft-HT=15,065) ✅
+  - w_p50 at w5% t=96: 48.49ms (vs Raft-HT 38.07ms) — causal MinIndex overhead
+  - w_p50 at w50% t=96: 190.59ms (vs Raft-HT 189.61ms) — near identical
+  - Pileus-HT ≈ Mongo-Tunable in behavior (both: fast weak writes + causal reads)
+  - Results: `results/eval-exp1.1-pileusht-20260316/summary-exp1.1-pileusht.csv`
 
 **Estimated LOC**: ~300 (pileusht package + wiring)
 
-**Status**: 🔄 **IN PROGRESS** (121a-e done, 121f remaining)
+**Status**: ✅ **DONE** (Phase 121 complete)
 
 ---
 
