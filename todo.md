@@ -8725,14 +8725,17 @@ guarantee.
   - **Throughput at t=96**: 37.8K > Raft-HT (33.5K) > Pileus (35.7K)
   - Results: `results/eval-5r5m3c-phase122f-20260316/`
 
-- [ ] 122g: Run Exp 1.1 — Pileus-HT v2 only (16 runs)
-  - 1 protocol × 8 threads × 2 write groups × 1 rep = 16 runs
-  - Merge with Phase 120j + 121f results
-  - **Target**: Pileus-HT ≈ Raft-HT throughput, with read-your-writes guarantee
+- [x] 122g: Run Exp 1.1 — Pileus-HT v2 (16 runs) [26:03:16]
+  - 16 runs (1 protocol × 8 threads × 2 write groups × 1 rep), ~45min
+  - **w5% t=96**: Pileus-HT v2=34.1K ≈ Raft-HT (33.5K), w_p50=37.8ms
+  - **w50% t=96**: Pileus-HT v2=14.7K ≈ Raft-HT (15.1K), w_p50=197.3ms
+  - **w5% t=1**: w_p50=2.5ms (was ~50ms with MinIndex wait) — cache merge works
+  - Pileus-HT v2 = Raft-HT throughput + read-your-writes via cache merge
+  - Results: `results/eval-exp1.1-pileusht-v2-20260316/summary-exp1.1-pileusht.csv`
 
 **Estimated LOC**: ~200 (net change, mostly in client.go)
 
-**Status**: 🔄 **IN PROGRESS** (122a-e done, 122f-g remaining)
+**Status**: ✅ **DONE** (Phase 122 complete)
 
 ---
 
