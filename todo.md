@@ -8716,10 +8716,14 @@ guarantee.
     client newer, follower caught up, no cache entry, equal version
   - All tests pass, full suite passes
 
-- [ ] 122f: Spot test — Pileus-HT v2 at t=1,8,32,96 w5%
-  - **Expected**: w_p50 drops from ~50ms to <5ms (like plain Pileus)
-  - **Expected**: tput increases to ≥ Pileus level (35K+ at t=96 w5%)
-  - **Expected**: s_p50 unchanged (~85ms at low threads)
+- [x] 122f: Spot test — Pileus-HT v2 at t=1,8,32,96 w5% [26:03:16]
+  - t=1: 1,190 ops/s, s_p50=85.3ms, w_p50=2.2ms
+  - t=8: 8,468, s_p50=90.2ms, w_p50=2.3ms
+  - t=32: 26,691, s_p50=107.5ms, w_p50=4.7ms
+  - t=96: **37,845** ops/s, s_p50=194.6ms, w_p50=32.4ms
+  - **w_p50 at t=1**: 2.2ms (was ~50ms with MinIndex wait) — cache merge works!
+  - **Throughput at t=96**: 37.8K > Raft-HT (33.5K) > Pileus (35.7K)
+  - Results: `results/eval-5r5m3c-phase122f-20260316/`
 
 - [ ] 122g: Run Exp 1.1 — Pileus-HT v2 only (16 runs)
   - 1 protocol × 8 threads × 2 write groups × 1 rep = 16 runs
