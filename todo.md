@@ -8594,10 +8594,17 @@ Mongo weak read:
   | Mongo | 1,047 | 6,416 | 19,515 | 37,441 | 85.43ms | 8.56ms |
   | Pileus | 1,109 | 8,293 | 25,887 | 37,949 | 85.51ms | 5.36ms |
 
-- [ ] 120j: Run full Exp 1.1 with all 4 protocols
-  - 4 protocols × 8 threads × 2 write groups × 1 rep = 64 runs
+- [x] 120j: Run full Exp 1.1 with all 4 protocols [26:03:15]
+  - 64 runs (4 protocols × 8 threads × 2 write groups × 1 rep), ~3h runtime
+  - **w5% t=96**: Raft=20.3K, Raft-HT=33.5K, Mongo=32.6K (97%), Pileus=35.7K (106%)
+  - **w50% t=96**: Raft=12.2K, Raft-HT=15.1K, Mongo=13.7K (91%), Pileus=12.6K (84%)
+  - Mongo/Pileus track Raft-HT within 3-16% — confirms fair comparison on same Raft engine
+  - Previous (Orca-based): Mongo/Pileus were 49% faster due to instance-based architecture
+  - Mongo w_p50 higher than Raft-HT at low threads (11ms vs 2.3ms) due to causal MinIndex wait
+  - Pileus w_p50 ~5ms at w5% (no weak writes → MinIndex=0 → no wait)
+  - Results: `results/eval-exp1.1-4proto-20260315/summary-exp1.1-4proto.csv`
 
-**Status**: 🔄 **IN PROGRESS** (120a-i done)
+**Status**: ✅ **DONE** (Phase 120 complete)
 
 ---
 
