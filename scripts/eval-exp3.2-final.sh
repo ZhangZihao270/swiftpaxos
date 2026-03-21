@@ -71,6 +71,8 @@ run_benchmark() {
     return 1
 }
 
+cp "$SUMMARY_CSV" "$WORK_DIR/results/latest/exp3.2.csv" 2>/dev/null || true
+log "Updated results/latest/exp3.2.csv"
 log "Exp 3.2 (Final): T Property Verification (Weak Ratio Sweep)"
 log "Layout: 5 replicas on 5 machines, 3 clients"
 log "Protocols: ${PROTOCOLS[*]}"
@@ -182,4 +184,6 @@ for protocol in "${PROTOCOLS[@]}"; do
 done
 
 log ""
+cp "$SUMMARY_CSV" "$WORK_DIR/results/latest/exp3.2.csv" 2>/dev/null || true
+log "Updated results/latest/exp3.2.csv"
 log "Exp 3.2 complete! Results: $SUMMARY_CSV"

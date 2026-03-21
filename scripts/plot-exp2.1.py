@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Exp 3.1: CURP-HO vs CURP-HT vs CURP baseline — 2×2 figure.
+Exp 2.1: EPaxos-HO vs Vanilla EPaxos — 2×2 figure.
 
 Layout:
   ┌─────────────────────┬────────────────────────┐
@@ -10,7 +10,7 @@ Layout:
   └─────────────────────┴────────────────────────┘
 
 Data sources:
-  - CSV: results/latest/exp3.1.csv
+  - CSV: results/latest/exp2.1.csv
   - CDF: per-run latencies.json (at fixed thread count)
 """
 
@@ -21,8 +21,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from plot_style import *
 
-PROTOCOLS     = ['curpho', 'curpht', 'curp-baseline']
-HYBRID_PROTOS = {'curpho', 'curpht'}
+PROTOCOLS     = ['epaxos', 'epaxosho']
+HYBRID_PROTOS = {'epaxosho'}
 
 WRITE_GROUPS = [
     (5,  'w=5%'),
@@ -31,13 +31,13 @@ WRITE_GROUPS = [
 
 CDF_THREADS = 32
 
-RESULT_DIR = 'eval-exp3.1-20260314'
+RESULT_DIR = 'eval-exp2.1-20260314'
 
 
 def load_latencies(base, proto, wg, threads):
     """Load per-request latencies from latencies.json."""
     path = os.path.join(base, 'results', RESULT_DIR,
-                        'exp3.1', f'w{wg}', proto,
+                        'exp2.1', f'w{wg}', proto,
                         f't{threads}', 'run1', 'latencies.json')
     if not os.path.exists(path):
         return None
@@ -71,7 +71,7 @@ def plot_tput_lat(ax, rows, wg, wg_label):
 
     ax.set_xlabel('Throughput (Kops/sec)')
     ax.set_ylabel('Avg P50 Latency (ms)')
-    ax.set_title(f'CURP Throughput vs Latency ({wg_label})', fontsize=11)
+    ax.set_title(f'EPaxos-HO vs EPaxos ({wg_label})', fontsize=11)
     ax.legend(loc='upper left', fontsize=8, ncol=1)
     ax.set_xlim(left=0)
     ax.set_ylim(bottom=0)
@@ -112,7 +112,7 @@ def plot_cdf(ax, base, wg, wg_label):
 
 def main():
     base = base_dir()
-    csv_path = os.path.join(base, 'results', 'latest', 'exp3.1.csv')
+    csv_path = os.path.join(base, 'results', 'latest', 'exp2.1.csv')
     out_dir  = os.path.join(base, 'evaluation', 'plots')
 
     setup_style()
@@ -125,7 +125,7 @@ def main():
         plot_cdf(axes[row_idx, 1], base, wg, wg_label)
 
     plt.tight_layout(h_pad=3, w_pad=3)
-    save_figure(fig, out_dir, 'exp3.1-throughput-latency')
+    save_figure(fig, out_dir, 'exp2.1-throughput-latency')
 
 
 if __name__ == '__main__':

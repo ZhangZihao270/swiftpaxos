@@ -19,7 +19,7 @@ MCReplicas    == {r1, r2, r3}
 MCClients     == {c1, c2}
 MCKeys        == {k1}
 MCValues      == {v1, v2}
-MCMaxOps      == 1
+MCMaxOps      == 2
 MCNil         == nil
 MCInitLeader  == r1
 

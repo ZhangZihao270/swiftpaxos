@@ -31,6 +31,12 @@ PROTOCOL_COLORS = {
     'curpht':        WONG['green'],
     'curp-baseline': WONG['purple'],
     'epaxos':        WONG['cyan'],
+    # Exp 1.1 extra protocols (don't appear in the same figure as curp/epaxos)
+    'mongotunable':  WONG['black'],
+    'pileus':        WONG['purple'],
+    'pileusht':      WONG['cyan'],
+    # Exp 2.1
+    'epaxosho':      WONG['blue'],
 }
 
 PROTOCOL_MARKERS = {
@@ -40,6 +46,10 @@ PROTOCOL_MARKERS = {
     'curpht':        'D',
     'curp-baseline': 'v',
     'epaxos':        'P',
+    'mongotunable':  '*',
+    'pileus':        'P',
+    'pileusht':      'D',
+    'epaxosho':      'o',
 }
 
 PROTOCOL_LABELS = {
@@ -49,6 +59,10 @@ PROTOCOL_LABELS = {
     'curpht':        'CURP-HT',
     'curp-baseline': 'CURP (baseline)',
     'epaxos':        'EPaxos',
+    'mongotunable':  'MongoDB',
+    'pileus':        'Pileus',
+    'pileusht':      'Pileus-HT',
+    'epaxosho':      'EPaxos-HO',
 }
 
 def load_csv_optional(path):
@@ -188,6 +202,33 @@ def extract_tput_latency_with_errbars(rows, protocol):
 
 def base_dir():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+def extract_tput_latency_wg(rows, protocol, write_group):
+    """Extract throughput-vs-latency from the newer CSV format.
+
+    Newer CSVs have columns: write_group, protocol, threads,
+    avg_throughput, avg_s_p50, avg_s_p99, avg_w_p50, avg_w_p99.
+    write_group is an integer (5 or 50).
+    """
+    filtered = [r for r in rows
+                if r['protocol'] == protocol
+                and int(r['write_group']) == write_group]
+    filtered.sort(key=lambda r: int(r['threads']))
+    return {
+        'threads':    [int(r['threads']) for r in filtered],
+        'throughput': [float(r['avg_throughput']) for r in filtered],
+        's_p50':      [get_val(r, 'avg_s_p50') for r in filtered],
+        's_p99':      [get_val(r, 'avg_s_p99') for r in filtered],
+        'w_p50':      [get_val(r, 'avg_w_p50') for r in filtered],
+        'w_p99':      [get_val(r, 'avg_w_p99') for r in filtered],
+    }
+
+def merge_rows(*row_lists):
+    """Merge multiple row lists (concatenate)."""
+    result = []
+    for lst in row_lists:
+        result.extend(lst)
+    return result
 
 def save_figure(fig, out_dir, name):
     os.makedirs(out_dir, exist_ok=True)

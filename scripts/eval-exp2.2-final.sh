@@ -3,7 +3,9 @@
 # Exp 2.2 (Final): EPaxos-HO vs EPaxos — Conflict Rate Sweep
 #
 # 5 replicas on 5 separate machines, 3 clients co-located with replicas 0-2.
-# Sweeps zipfSkew at fixed thread count (t=32), 1 rep each.
+# Sweeps zipfSkew at fixed thread count (t=16), 1 rep each.
+# Why t=16: at t=32, EPaxos is already slow-path dominated (~105ms p50),
+# masking the effect of key conflicts. t=16 keeps EPaxos in fast-path range.
 # writes=50, weakWrites=50.
 #
 # Protocols:
@@ -19,7 +21,7 @@ cd "$WORK_DIR"
 DATE=$(date +%Y%m%d)
 BASE_DIR="${1:-results/eval-exp2.2-$DATE}"
 EXP_DIR="$BASE_DIR/exp2.2"
-FIXED_THREADS=32
+FIXED_THREADS=16
 ZIPF_SKEWS=(0 0.25 0.5 0.75 0.99 1.2 1.5 2.0)
 REPS=1
 MAX_RETRIES=2
@@ -78,6 +80,8 @@ run_benchmark() {
     return 1
 }
 
+cp "$SUMMARY_CSV" "$WORK_DIR/results/latest/exp2.2.csv" 2>/dev/null || true
+log "Updated results/latest/exp2.2.csv"
 log "Exp 2.2 (Final): EPaxos-HO vs EPaxos — Conflict Rate Sweep"
 log "Layout: 5 replicas on 5 machines, 3 clients"
 log "Protocols: epaxosho, epaxos"
@@ -189,4 +193,6 @@ for proto_spec in "${PROTOCOLS[@]}"; do
 done
 
 log ""
+cp "$SUMMARY_CSV" "$WORK_DIR/results/latest/exp2.2.csv" 2>/dev/null || true
+log "Updated results/latest/exp2.2.csv"
 log "Exp 2.2 complete! Results: $SUMMARY_CSV"

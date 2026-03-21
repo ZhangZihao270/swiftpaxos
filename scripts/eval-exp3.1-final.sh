@@ -74,6 +74,8 @@ run_benchmark() {
     return 1
 }
 
+cp "$SUMMARY_CSV" "$WORK_DIR/results/latest/exp3.1.csv" 2>/dev/null || true
+log "Updated results/latest/exp3.1.csv"
 log "Exp 3.1 (Final): CURP Throughput vs Latency"
 log "Layout: 5 replicas on 5 machines, 3 clients"
 log "Thread counts: ${THREAD_COUNTS[*]}"
@@ -186,4 +188,6 @@ for W in "${WRITE_GROUPS[@]}"; do
 done
 
 log ""
+cp "$SUMMARY_CSV" "$WORK_DIR/results/latest/exp3.1.csv" 2>/dev/null || true
+log "Updated results/latest/exp3.1.csv"
 log "Exp 3.1 complete! Results: $SUMMARY_CSV"

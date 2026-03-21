@@ -19,7 +19,7 @@ MCReplicas    == {r1, r2, r3}
 MCClients     == {c1, c2}
 MCKeys        == {k1}
 MCValues      == {v1, v2}
-MCMaxOps      == 1
+MCMaxOps      == 2
 MCNil         == nil
 MCInitLeader  == r1
 
@@ -38,13 +38,14 @@ MCSymmetry == Permutations({r2, r3})
 \* State Constraint
 \* ============================================================================
 
-MaxLogLen == MaxOps * Cardinality(Clients) + 2
+MaxLogLen == MCMaxOps * Cardinality(MCClients) + 2
 
 MCStateConstraint ==
     /\ \A r \in Replicas : Len(log[r]) <= MaxLogLen
-    /\ \A c \in Clients : opsCompleted[c] <= MaxOps
-    /\ Cardinality(messages) <= 8
-    /\ epoch <= MaxLogLen * 3
+    /\ \A c \in Clients : opsCompleted[c] <= MCMaxOps
+    /\ Cardinality(messages) <= 12
+    /\ epoch <= MaxLogLen * 4
+    /\ nextWriteId <= MCMaxOps * Cardinality(MCClients) + 1
 
 \* ============================================================================
 \* Type Invariant
@@ -60,12 +61,13 @@ MCTypeInv ==
         /\ commitIndex[r] <= Len(log[r])
     /\ \A c \in Clients :
         /\ clientState[c] \in {Idle, Waiting}
-        /\ opsCompleted[c] \in 0..MaxOps
+        /\ opsCompleted[c] \in 0..MCMaxOps
         /\ clientInvEpoch[c] \in Nat
     \* History entries have valid retVer (Nat)
     /\ \A i \in 1..Len(history) :
         /\ history[i].retVer \in Nat
         /\ history[i].slot \in Nat
+    /\ nextWriteId \in Nat
 
 \* Combined invariant for model checking: type + safety
 MCSafetyInv == SafetyInv

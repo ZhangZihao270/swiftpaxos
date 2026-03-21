@@ -63,6 +63,8 @@ run_benchmark() {
     return 1
 }
 
+cp "$SUMMARY_CSV" "$WORK_DIR/results/latest/exp1.1-pileusht.csv" 2>/dev/null || true
+log "Updated results/latest/exp1.1-pileusht.csv"
 log "Exp 1.1 (Pileus-HT): Throughput vs Latency"
 log "Layout: 5 replicas on 5 machines, 3 clients"
 log "Thread counts: ${THREAD_COUNTS[*]}"
@@ -161,4 +163,6 @@ for W in "${WRITE_GROUPS[@]}"; do
 done
 
 log ""
+cp "$SUMMARY_CSV" "$WORK_DIR/results/latest/exp1.1-pileusht.csv" 2>/dev/null || true
+log "Updated results/latest/exp1.1-pileusht.csv"
 log "Exp 1.1 (Pileus-HT) complete! Results: $SUMMARY_CSV"
