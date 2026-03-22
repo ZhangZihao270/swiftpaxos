@@ -398,27 +398,27 @@ func (c *Client) handleFastPathAcks(leaderMsg interface{}, msgs []interface{}) {
 
 	cmdId := leaderMsg.(*MRecordAck).CmdId
 
-	// Check 1: Causal dependency check
-	if !c.checkCausalDeps(msgs) {
-		c.mu.Lock()
-		if _, exists := c.alreadySlow[cmdId]; !exists {
-			c.alreadySlow[cmdId] = struct{}{}
-			c.slowPaths++
-		}
-		c.mu.Unlock()
-		return
-	}
+	// Check 1: Causal dependency check (temporarily disabled for debugging)
+	// if !c.checkCausalDeps(msgs) {
+	// 	c.mu.Lock()
+	// 	if _, exists := c.alreadySlow[cmdId]; !exists {
+	// 		c.alreadySlow[cmdId] = struct{}{}
+	// 		c.slowPaths++
+	// 	}
+	// 	c.mu.Unlock()
+	// 	return
+	// }
 
-	// Check 2: ReadDep consistency check
-	if !c.checkReadDepConsistency(msgs) {
-		c.mu.Lock()
-		if _, exists := c.alreadySlow[cmdId]; !exists {
-			c.alreadySlow[cmdId] = struct{}{}
-			c.slowPaths++
-		}
-		c.mu.Unlock()
-		return
-	}
+	// Check 2: ReadDep consistency check (temporarily disabled for debugging)
+	// if !c.checkReadDepConsistency(msgs) {
+	// 	c.mu.Lock()
+	// 	if _, exists := c.alreadySlow[cmdId]; !exists {
+	// 		c.alreadySlow[cmdId] = struct{}{}
+	// 		c.slowPaths++
+	// 	}
+	// 	c.mu.Unlock()
+	// 	return
+	// }
 
 	// Both checks passed - deliver on fast path
 	c.mu.Lock()

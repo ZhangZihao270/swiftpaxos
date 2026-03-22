@@ -26,7 +26,7 @@ WEAK_RATIOS=(0 25 50 75 100)
 REPS=3
 MAX_RETRIES=2
 
-ALL_HOSTS=(130.245.173.101 130.245.173.103 130.245.173.104 130.245.173.125 130.245.173.126)
+ALL_HOSTS=(13.58.3.12 100.26.140.158 52.35.107.158 3.250.222.202 15.222.250.161)
 
 CONFIG="/tmp/eval-exp3.2-final-$$.conf"
 cp configs/exp3.2-base.conf "$CONFIG"
@@ -50,7 +50,7 @@ apply_config() {
 
 ensure_clean() {
     for host in "${ALL_HOSTS[@]}"; do
-        ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$host" "pkill -9 -x swiftpaxos-dist" 2>/dev/null || true
+        ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "${SSH_USER:-$(whoami)}@$host" "pkill -9 -x swiftpaxos-dist" 2>/dev/null || true
     done
     sleep 3
 }

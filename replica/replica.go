@@ -575,9 +575,12 @@ func (r *Replica) waitForPeerConnections(done chan bool) {
 	var b [4]byte
 	bs := b[:4]
 
-	// Bind to specific IP to allow multiple replicas on same machine.
+	// Listen on all interfaces (0.0.0.0) with the replica's port.
+	// This is required for AWS where instances can only bind to private IPs
+	// but peers connect via public IPs.
 	// Use SO_REUSEADDR to avoid TIME_WAIT conflicts between consecutive benchmark runs.
-	addr := r.PeerAddrList[r.Id]
+	_, port, _ := net.SplitHostPort(r.PeerAddrList[r.Id])
+	addr := "0.0.0.0:" + port
 	lc := net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
 			return c.Control(func(fd uintptr) {

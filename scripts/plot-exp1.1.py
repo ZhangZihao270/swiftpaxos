@@ -44,7 +44,9 @@ PROTO_DIR = {
     'pileusht':      'pileusht',
 }
 
-# Result directories (4-proto and pileusht are separate runs)
+# Result directories for raw latencies.json
+# TODO: after re-running with merged script, all will be in the same dir.
+# For now, pileusht was run separately.
 RESULT_DIRS = {
     'raft':         'eval-exp1.1-4proto-20260315',
     'raftht':       'eval-exp1.1-4proto-20260315',
@@ -89,7 +91,7 @@ def plot_tput_lat(ax, rows, wg, wg_label):
                 avg_lat.append((s + w) / 2.0)
 
         x, y = clean_pairs(data['throughput'], avg_lat)
-        x, y = pareto_frontier(x, y)
+        # x, y = pareto_frontier(x, y)
         if x:
             ax.plot(x, y, color=color, marker=marker, label=label, zorder=3)
 
@@ -140,13 +142,11 @@ def plot_cdf(ax, base, wg, wg_label):
 def main():
     base = base_dir()
 
-    # CSV data for throughput-latency subplots
-    proto4_csv   = os.path.join(base, 'results', 'latest', 'exp1.1-4proto.csv')
-    pileusht_csv = os.path.join(base, 'results', 'latest', 'exp1.1-pileusht.csv')
-    out_dir = os.path.join(base, 'evaluation', 'plots')
+    csv_path = os.path.join(base, 'results', 'latest', 'exp1.1.csv')
+    out_dir  = os.path.join(base, 'evaluation', 'plots')
 
     setup_style()
-    rows = merge_rows(load_csv(proto4_csv), load_csv(pileusht_csv))
+    rows = load_csv(csv_path)
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 9))
 

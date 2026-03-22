@@ -39,7 +39,7 @@ STARTUP_DELAY=15
 RESULTS_DIR=""
 SSH_USER="${SSH_USER:-$(whoami)}"
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10"
-WORK_DIR="$(pwd)"
+WORK_DIR="${REMOTE_WORK_DIR:-$(pwd)}"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do

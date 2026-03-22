@@ -65,7 +65,7 @@ def plot_tput_lat(ax, rows, wg, wg_label):
                 avg_lat.append((s + w) / 2.0)
 
         x, y = clean_pairs(data['throughput'], avg_lat)
-        x, y = pareto_frontier(x, y)
+        # x, y = pareto_frontier(x, y)
         if x:
             ax.plot(x, y, color=color, marker=marker, label=label, zorder=3)
 

@@ -136,7 +136,8 @@ func runReplica(c *config.Config, logger *dlog.Logger) {
 	}
 
 	rpc.HandleHTTP()
-	// Bind RPC listener to specific IP to allow multiple replicas on same machine.
+	// Listen on all interfaces (0.0.0.0) for RPC.
+	// Required for AWS where instances bind to private IPs but peers connect via public IPs.
 	// Use SO_REUSEADDR to avoid TIME_WAIT conflicts between consecutive benchmark runs.
 	lc := net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
@@ -145,7 +146,7 @@ func runReplica(c *config.Config, logger *dlog.Logger) {
 			})
 		},
 	}
-	l, err := lc.Listen(context.Background(), "tcp", fmt.Sprintf("%s:%d", addr, port+1000))
+	l, err := lc.Listen(context.Background(), "tcp", fmt.Sprintf("0.0.0.0:%d", port+1000))
 	if err != nil {
 		log.Fatal("listen error:", err)
 	}
