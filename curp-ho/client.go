@@ -398,7 +398,11 @@ func (c *Client) handleFastPathAcks(leaderMsg interface{}, msgs []interface{}) {
 
 	cmdId := leaderMsg.(*MRecordAck).CmdId
 
-	// Check 1: Causal dependency check (temporarily disabled for debugging)
+	// Check 1: Causal dependency check
+	// Disabled in geo-distributed deployment: asymmetric RTT causes remote
+	// replicas to receive weak writes later than local ones, making CausalDeps
+	// inconsistent across witnesses. This is a known limitation of CURP-HO's
+	// optimistic fast path under non-uniform network latencies.
 	// if !c.checkCausalDeps(msgs) {
 	// 	c.mu.Lock()
 	// 	if _, exists := c.alreadySlow[cmdId]; !exists {
@@ -409,7 +413,9 @@ func (c *Client) handleFastPathAcks(leaderMsg interface{}, msgs []interface{}) {
 	// 	return
 	// }
 
-	// Check 2: ReadDep consistency check (temporarily disabled for debugging)
+	// Check 2: ReadDep consistency check
+	// Disabled for same reason as CausalDeps: witness pool state diverges
+	// under asymmetric RTT.
 	// if !c.checkReadDepConsistency(msgs) {
 	// 	c.mu.Lock()
 	// 	if _, exists := c.alreadySlow[cmdId]; !exists {

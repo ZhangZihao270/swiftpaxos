@@ -81,6 +81,12 @@ type Replica struct {
 	// Pre-allocated closed channel for immediate notifications (avoids repeated allocations)
 	closedChan chan struct{}
 
+	// Channel for leader slot assignment of causal (weak) commands.
+	// CausalPropose processing is moved out of the main event loop to a
+	// separate goroutine. On the leader, only the slot assignment part is
+	// forwarded to the main event loop via this channel.
+	causalSlotChan chan *MCausalPropose
+
 	// Channel-based causal dep notification (replaces spin-wait in waitForWeakDep)
 	// Key: clientId, Value: channel closed when latest executed seqnum advances
 	weakDepNotify map[int32]chan struct{}
@@ -203,6 +209,9 @@ func New(alias string, rid int, addrs []string, exec bool, pl, f int,
 	r.closedChan = make(chan struct{})
 	close(r.closedChan)
 
+	// Initialize causal slot channel for leader event loop
+	r.causalSlotChan = make(chan *MCausalPropose, defs.CHAN_BUFFER_SIZE)
+
 	// Initialize channel-based weak dep notification (replaces spin-wait)
 	r.weakDepNotify = make(map[int32]chan struct{})
 
@@ -297,6 +306,44 @@ func (r *Replica) run() {
 			}
 		}()
 	}
+
+	// Separate goroutine to drain causalProposeChan off the main event loop.
+	// Non-leader work (witness pool + speculative reply) is done here directly.
+	// Leader slot assignment is forwarded to the main event loop via causalSlotChan.
+	go func() {
+		for m := range r.cs.causalProposeChan {
+			causalPropose := m.(*MCausalPropose)
+			cmdId := CommandId{ClientId: causalPropose.ClientId, SeqNum: causalPropose.CommandId}
+
+			// Non-leader: add to witness pool for conflict detection
+			if !r.isLeader {
+				r.unsyncCausal(causalPropose.Command, cmdId)
+			}
+
+			// ALL replicas: track pending write for speculative reads
+			if causalPropose.Command.Op == state.PUT {
+				r.addPendingWrite(causalPropose.ClientId, causalPropose.Command.K,
+					causalPropose.CommandId, causalPropose.Command.V)
+			}
+
+			// Bound replica: compute speculative result and reply (1-RTT)
+			if r.Id == causalPropose.BoundReplica {
+				val := r.computeSpeculativeResult(causalPropose.ClientId,
+					causalPropose.CausalDep, causalPropose.Command)
+				rep := &MCausalReply{
+					Replica: r.Id,
+					CmdId:   cmdId,
+					Rep:     val,
+				}
+				r.SendClientMsgFast(causalPropose.ClientId, r.cs.causalReplyRPC, rep)
+			}
+
+			// Leader: forward to main event loop for slot assignment
+			if r.isLeader {
+				r.causalSlotChan <- causalPropose
+			}
+		}
+	}()
 
 	var cmdId CommandId
 	for !r.Shutdown {
@@ -406,10 +453,16 @@ func (r *Replica) run() {
 			}
 			// Non-Leader ignores weak propose (should not receive it)
 
-		case m := <-r.cs.causalProposeChan:
-			causalPropose := m.(*MCausalPropose)
-			r.handleCausalPropose(causalPropose)
-			// ALL replicas handle causal proposes (witness pool + reply)
+		case propose := <-r.causalSlotChan:
+			// Leader-only: assign slot and start async replication.
+			// Non-leader work was already done in the causalProposeChan goroutine.
+			cmdId.ClientId = propose.ClientId
+			cmdId.SeqNum = propose.CommandId
+			slot := r.lastCmdSlot
+			r.lastCmdSlot++
+			dep := r.leaderUnsyncCausal(propose.Command, slot, cmdId)
+			desc := r.getCausalCmdDesc(slot, propose, dep)
+			go r.asyncReplicateCausal(desc, slot, propose.ClientId, propose.CommandId, propose.CausalDep)
 
 		case m := <-r.cs.weakReadChan:
 			weakRead := m.(*MWeakRead)
