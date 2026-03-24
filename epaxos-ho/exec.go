@@ -56,7 +56,10 @@ func (r *Replica) executeCommands() {
 					if r.InstanceSpace[q][inst] == nil {
 						continue
 					}
-					break
+					// Continue past non-nil uncommitted instances instead of breaking.
+					// Prevents stuck strong instances from blocking executable
+					// causal instances further in the sequence.
+					continue
 				}
 
 				if ok := r.exec.executeCommand(int32(q), inst); ok {

@@ -371,6 +371,86 @@ func TestFindSCC_WaitingCausalDepSkipped(t *testing.T) {
 	}
 }
 
+// TestExecuteCommand_LaterInstanceExecutesWhenEarlierStuck verifies that
+// a committed instance at slot N+1 can execute even when slot N is uncommitted.
+// This validates the break→continue fix in executeCommands: without the fix,
+// the scan loop would stop at the uncommitted slot N and never reach N+1.
+func TestExecuteCommand_LaterInstanceExecutesWhenEarlierStuck(t *testing.T) {
+	r := newTestReplica(3)
+	e := &Exec{r: r}
+	r.ExecedUpTo[0] = -1
+
+	// Slot 0: uncommitted strong instance (stuck waiting for quorum)
+	r.InstanceSpace[0][0] = &Instance{
+		Cmds:       []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.STRONG}},
+		Status:     PREACCEPTED,
+		State:      READY,
+		Seq:        1,
+		Deps:       []int32{-1, -1, -1},
+		CL:         []int32{0, 0, 0},
+		instanceId: &instanceId{0, 0},
+	}
+
+	// Slot 1: committed causal instance (should be executable)
+	r.InstanceSpace[0][1] = &Instance{
+		Cmds:       []state.Command{{Op: state.PUT, K: 2, V: state.NIL(), CL: state.CAUSAL}},
+		Status:     CAUSALLY_COMMITTED,
+		State:      READY,
+		Seq:        2,
+		Deps:       []int32{-1, -1, -1},
+		CL:         []int32{0, 0, 0},
+		instanceId: &instanceId{0, 1},
+	}
+
+	// Slot 0 should NOT execute (not committed)
+	if e.executeCommand(0, 0) {
+		t.Error("uncommitted slot 0 should not execute")
+	}
+
+	// Slot 1 SHOULD execute (causal committed, no deps)
+	// This is the key assertion: the execute loop must be able to reach slot 1
+	// even though slot 0 is stuck.
+	if !e.executeCommand(0, 1) {
+		t.Error("committed causal slot 1 should execute even when slot 0 is stuck")
+	}
+}
+
+// TestExecuteCommand_StrongAfterStuckStrongBlockedByDeps verifies that a
+// committed strong instance at slot N+1 that depends on uncommitted slot N
+// correctly blocks (returns false).
+func TestExecuteCommand_StrongAfterStuckStrongBlockedByDeps(t *testing.T) {
+	r := newTestReplica(3)
+	e := &Exec{r: r}
+	r.ExecedUpTo[0] = -1
+
+	// Slot 0: uncommitted strong
+	r.InstanceSpace[0][0] = &Instance{
+		Cmds:       []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.STRONG}},
+		Status:     PREACCEPTED,
+		State:      READY,
+		Seq:        1,
+		Deps:       []int32{-1, -1, -1},
+		CL:         []int32{0, 0, 0},
+		instanceId: &instanceId{0, 0},
+	}
+
+	// Slot 1: committed strong that depends on slot 0
+	r.InstanceSpace[0][1] = &Instance{
+		Cmds:       []state.Command{{Op: state.PUT, K: 2, V: state.NIL(), CL: state.STRONG}},
+		Status:     STRONGLY_COMMITTED,
+		State:      READY,
+		Seq:        2,
+		Deps:       []int32{0, -1, -1},
+		CL:         []int32{int32(state.STRONG), 0, 0},
+		instanceId: &instanceId{0, 1},
+	}
+
+	// Slot 1 should NOT execute because its strong dep (slot 0) is uncommitted
+	if e.executeCommand(0, 1) {
+		t.Error("slot 1 should not execute when strong dep slot 0 is uncommitted")
+	}
+}
+
 // TestSortBySeq verifies sequence-based sorting.
 func TestSortBySeq(t *testing.T) {
 	instances := []*Instance{

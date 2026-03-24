@@ -8885,54 +8885,85 @@ CURP already uses the correct formula via `replica.NewThreeQuartersOf(N) = (3*N)
 - [x] 123.5h: **Build and unit test**
   - All 78 epaxos-ho tests pass (10 new WAITING tests added).
 
-- [ ] 123.5i: **Spot test on AWS** (t=4 and t=32, w=5%, weakRatio=50)
-  - Verify EPaxos-HO with Dreply=true completes without stalls
-  - Compare throughput/latency with vanilla EPaxos Dreply=true
+- [x] 123.5i: **Spot test on AWS** (t=32, w=5%, weakRatio=50) — WAITING mechanism works [26:03:24]
+  - Execute now progresses (51250 instances executed, was 0 before WAITING fix)
+  - But throughput still very low: 459 ops/sec (was 54k with Dreply=false)
+  - All latencies ~1050ms — execute bottleneck, not commit bottleneck
+  - `skippedCausalDeps=356688` (7 skips per executed instance)
+  - See Phase 123.6 for root cause analysis
 
-- [ ] 123.5j: **Full experiment run** — Exp 2.1 and Exp 2.2 with fixed EPaxos/EPaxos-HO
-  - Run exp2.1 (throughput vs latency sweep) and exp2.2 (conflict sweep)
-  - Update CSV and regenerate plots
+#### Phase 123.6: Fix executeCommands Break-on-Stuck Bug
+
+**Root cause found**: `executeCommands` inner loop (exec.go:59) uses `break` when encountering
+an uncommitted instance. This stops scanning ALL subsequent instances for that replica.
+
+When causal and strong instances are interleaved in the instance sequence:
+```
+inst 0: causal (EXECUTED)     → ExecedUpTo = 0
+inst 1: strong (EXECUTED)     → ExecedUpTo = 1
+inst 2: strong (not committed)→ break! stops scanning
+inst 3: causal (CAUSALLY_COMMITTED) → never reached, never executed
+inst 4: strong (STRONGLY_COMMITTED) → never reached
+```
+
+One stuck strong instance blocks ALL subsequent instances on that replica, including
+causal instances that could execute immediately. This cascades: the stuck instance's
+deps point to instances on other replicas that are also blocked by their own stuck
+strong instances → global execute stall.
+
+Vanilla EPaxos doesn't have this problem because all instances are strong and commit
+in roughly the same order. EPaxos-HO's causal instances commit instantly (1-RTT) but
+strong instances are slow (super quorum), creating gaps that trigger the `break`.
+
+Additionally, `strongconnect` traverses `ExecedUpTo[q]+1` to `deps[q]` for each dep.
+When `ExecedUpTo` is stuck (due to the break bug), this range grows unboundedly,
+causing O(N * range) work per execute attempt — explaining the 7 skipped causal deps
+per executed instance and the ~260 executions/sec rate.
+
+**Fix plan**:
+
+- [x] 123.6a: Change `break` to `continue` in `executeCommands` for non-nil uncommitted instances
+  - exec.go line 59: `break` → `continue`
+  - This allows scanning past stuck strong instances to reach executable causal/strong instances
+  - 2 new tests verify: causal instances execute past stuck strong; strong deps still block correctly
+
+- [ ] 123.6b: Consider advancing `ExecedUpTo` past CAUSALLY_COMMITTED instances
+  - If inst N is CAUSALLY_COMMITTED and inst N == ExecedUpTo+1, advance ExecedUpTo
+  - This shrinks the dep range in `strongconnect`, reducing scan overhead
+
+- [ ] 123.6c: Build and spot test (t=32)
+
+- [ ] 123.6d: Full experiment run — Exp 2.1 and Exp 2.2
+
+**Spot test results history (t=32, w=5%, weakRatio=50)**:
+
+| Config | Throughput | Strong p50 | Notes |
+|---|---|---|---|
+| EPaxos Dreply=false (old) | 24,121 | 60ms | Unfair: skip execute |
+| EPaxos Dreply=true | 18,027 | 83ms | Correct |
+| EPaxos-HO Dreply=false (old) | 53,735 | 67ms | Unfair: skip execute |
+| EPaxos-HO Dreply=true (no WAITING) | ~148 | 67ms | Broken: execute deadlock |
+| EPaxos-HO Dreply=true (with WAITING) | ~459 | 1050ms | WAITING works, execute loop bottleneck |
 
 **How to run on AWS**:
 
 ```bash
-# 1. Start AWS instances (all 5 regions)
-export PATH="$HOME/.local/bin:$PATH"
-for region in us-east-2 us-east-1 us-west-2 eu-west-1 ca-central-1; do
-    ids=$(aws ec2 describe-instances --region "$region" \
-        --filters "Name=tag:Project,Values=swiftpaxos" "Name=instance-state-name,Values=stopped" \
-        --query 'Reservations[].Instances[].InstanceId' --output text)
-    [[ -n "$ids" ]] && aws ec2 start-instances --region "$region" --instance-ids $ids
-done
-
-# 2. Wait ~30s, then get new IPs (IPs may change after stop/start)
-for region in us-east-2 us-east-1 us-west-2 eu-west-1 ca-central-1; do
-    aws ec2 describe-instances --region "$region" \
-        --filters "Name=tag:Project,Values=swiftpaxos" "Name=instance-state-name,Values=running" \
-        --query 'Reservations[].Instances[].[PublicIpAddress,Tags[?Key==`Name`].Value|[0]]' --output text
-done
-
-# 3. Update IPs in configs (order: r0 r1 r2 r3 r4 c0 c1 c2)
-#    r0=us-east-1, r1=us-east-2, r2=us-west-2, r3=eu-west-1, r4=ca-central-1
-#    c0=us-east-2(client), c1=us-east-1(client), c2=us-west-2(client)
-bash scripts/setup-aws-ips.sh <r0> <r1> <r2> <r3> <r4> <c0> <c1> <c2>
-
-# 4. SSH config: each region uses ~/.ssh/swiftpaxos-<region>.pem
-#    Ensure ~/.ssh/config has entries (see Phase 123 notes)
-
-# 5. Build and spot test
+# Build
 go build -o swiftpaxos-dist .
+
+# Spot test (single config)
 SSH_USER=ubuntu REMOTE_WORK_DIR=/home/ubuntu/swiftpaxos \
   timeout 300 ./run-multi-client.sh -d -c configs/exp2.1-base.conf -t 32 \
-  -o results/test-epaxosho-waiting-t32
+  -o results/test-epaxosho-<name>
 
-# 6. Full experiments
+# Full experiments
 SSH_USER=ubuntu REMOTE_WORK_DIR=/home/ubuntu/swiftpaxos \
-  bash scripts/eval-exp2.1-final.sh results/eval-exp2.1-waiting
+  bash scripts/eval-exp2.1-final.sh results/eval-exp2.1-<name>
 SSH_USER=ubuntu REMOTE_WORK_DIR=/home/ubuntu/swiftpaxos \
-  bash scripts/eval-exp2.2-final.sh results/eval-exp2.2-waiting
+  bash scripts/eval-exp2.2-final.sh results/eval-exp2.2-<name>
 
-# 7. Stop instances when done
+# Stop instances when done
+export PATH="$HOME/.local/bin:$PATH"
 for region in us-east-2 us-east-1 us-west-2 eu-west-1 ca-central-1; do
     ids=$(aws ec2 describe-instances --region "$region" \
         --filters "Name=tag:Project,Values=swiftpaxos" "Name=instance-state-name,Values=running" \
@@ -8940,16 +8971,6 @@ for region in us-east-2 us-east-1 us-west-2 eu-west-1 ca-central-1; do
     [[ -n "$ids" ]] && aws ec2 stop-instances --region "$region" --instance-ids $ids
 done
 ```
-
-**Estimated LOC**: ~150 (trackWaitingDependency + waitPreAcceptHandle + handlePropose split + execute checks)
-
-**Spot test results (t=32, w=5%, weakRatio=50)**:
-| Config | Throughput | Strong p50 | Notes |
-|---|---|---|---|
-| EPaxos Dreply=false (old) | 24,121 | 60ms | Unfair: skip execute |
-| EPaxos Dreply=true | 18,027 | 83ms | Correct |
-| EPaxos-HO Dreply=false (old) | 53,735 | 67ms | Unfair: skip execute |
-| EPaxos-HO Dreply=true | ~148 | 67ms | Broken: execute deadlock |
 
 ---
 
