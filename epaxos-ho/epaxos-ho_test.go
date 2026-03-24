@@ -267,6 +267,7 @@ func newTestReplica(n int) *Replica {
 		maxWriteSeqPerKeyMu:      new(sync.RWMutex),
 		clientMutex:              new(sync.Mutex),
 		causalCommitChan:         make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE),
+		instancesToRecover:       make(chan *instanceId, defs.CHAN_BUFFER_SIZE),
 	}
 	for i := 0; i < n; i++ {
 		r.InstanceSpace[i] = make([]*Instance, 1024)
@@ -3681,4 +3682,140 @@ func TestUpdateStrongSessionConflict_BatchedLocking(t *testing.T) {
 		t.Errorf("sessionConflicts[2][200]=%d, want 9", r.sessionConflicts[2][200])
 	}
 	r.sessionConflictsMu.RUnlock()
+}
+
+// --- WAITING mechanism tests ---
+
+// TestTrackWaitingDependency_NoDeps verifies no waiting when deps are all -1.
+func TestTrackWaitingDependency_NoDeps(t *testing.T) {
+	r := newTestReplica(3)
+	deps := []int32{-1, -1, -1}
+	cl := []int32{0, 0, 0}
+
+	cardinality, _ := r.trackWaitingDependency(1, 0, deps, cl, 0)
+	if cardinality != 0 {
+		t.Errorf("cardinality=%d, want 0 (no deps)", cardinality)
+	}
+}
+
+// TestTrackWaitingDependency_NilCausalDep verifies waiting on nil causal dep.
+func TestTrackWaitingDependency_NilCausalDep(t *testing.T) {
+	r := newTestReplica(3)
+	// Dep on instance 0.5 which is nil, and CL says it's causal
+	deps := []int32{5, -1, -1}
+	cl := []int32{int32(state.CAUSAL), 0, 0}
+
+	cardinality, _ := r.trackWaitingDependency(1, 0, deps, cl, 0)
+	if cardinality != 1 {
+		t.Errorf("cardinality=%d, want 1 (nil causal dep)", cardinality)
+	}
+}
+
+// TestTrackWaitingDependency_NilStrongDep verifies NO waiting on nil strong dep.
+func TestTrackWaitingDependency_NilStrongDep(t *testing.T) {
+	r := newTestReplica(3)
+	deps := []int32{5, -1, -1}
+	cl := []int32{int32(state.STRONG), 0, 0}
+
+	cardinality, _ := r.trackWaitingDependency(1, 0, deps, cl, 0)
+	if cardinality != 0 {
+		t.Errorf("cardinality=%d, want 0 (strong deps don't trigger WAITING)", cardinality)
+	}
+}
+
+// TestTrackWaitingDependency_ExistingWaitingCausalDep verifies waiting on WAITING causal dep.
+func TestTrackWaitingDependency_ExistingWaitingCausalDep(t *testing.T) {
+	r := newTestReplica(3)
+	// Dep instance exists but is in WAITING state with causal cmd
+	r.InstanceSpace[0][5] = &Instance{
+		Cmds:  []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.CAUSAL}},
+		State: WAITING,
+	}
+	deps := []int32{5, -1, -1}
+	cl := []int32{int32(state.CAUSAL), 0, 0}
+
+	cardinality, _ := r.trackWaitingDependency(1, 0, deps, cl, 0)
+	if cardinality != 1 {
+		t.Errorf("cardinality=%d, want 1 (WAITING causal dep)", cardinality)
+	}
+}
+
+// TestTrackWaitingDependency_ReadyDepNoWait verifies no waiting on READY dep.
+func TestTrackWaitingDependency_ReadyDepNoWait(t *testing.T) {
+	r := newTestReplica(3)
+	r.InstanceSpace[0][5] = &Instance{
+		Cmds:   []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.CAUSAL}},
+		State:  READY,
+		Status: CAUSALLY_COMMITTED,
+	}
+	deps := []int32{5, -1, -1}
+	cl := []int32{int32(state.CAUSAL), 0, 0}
+
+	cardinality, _ := r.trackWaitingDependency(1, 0, deps, cl, 0)
+	if cardinality != 0 {
+		t.Errorf("cardinality=%d, want 0 (READY dep)", cardinality)
+	}
+}
+
+// TestHandlePreAccept_WaitingOnCausalDep verifies follower enters WAITING state
+// when PreAccept has a causal dep that hasn't arrived yet.
+func TestHandlePreAccept_WaitingOnCausalDep(t *testing.T) {
+	r := newTestReplica(3)
+
+	// Strong command with a causal dependency on instance 0.5 (which is nil)
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	deps := []int32{5, -1, -1}
+	cl := []int32{int32(state.CAUSAL), 0, 0}
+
+	pa := &PreAccept{
+		LeaderId: 1, Replica: 1, Instance: 0, Ballot: 0,
+		Command: cmds, Seq: 5, Deps: deps, CL: cl,
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handlePreAccept(pa)
+	}()
+
+	inst := r.InstanceSpace[1][0]
+	if inst == nil {
+		t.Fatal("instance should be created")
+	}
+	if inst.State != WAITING {
+		t.Errorf("State=%d, want WAITING(%d)", inst.State, WAITING)
+	}
+}
+
+// TestHandlePreAccept_NoWaitingWhenDepsPresent verifies no WAITING when all deps exist.
+func TestHandlePreAccept_NoWaitingWhenDepsPresent(t *testing.T) {
+	r := newTestReplica(3)
+
+	// Pre-create the causal dep
+	r.InstanceSpace[0][5] = &Instance{
+		Cmds:   []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.CAUSAL}},
+		State:  READY,
+		Status: CAUSALLY_COMMITTED,
+	}
+
+	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
+	deps := []int32{5, -1, -1}
+	cl := []int32{int32(state.CAUSAL), 0, 0}
+
+	pa := &PreAccept{
+		LeaderId: 1, Replica: 1, Instance: 0, Ballot: 0,
+		Command: cmds, Seq: 5, Deps: deps, CL: cl,
+	}
+
+	func() {
+		defer func() { recover() }()
+		r.handlePreAccept(pa)
+	}()
+
+	inst := r.InstanceSpace[1][0]
+	if inst == nil {
+		t.Fatal("instance should be created")
+	}
+	if inst.State != READY {
+		t.Errorf("State=%d, want READY(%d) (all deps present)", inst.State, READY)
+	}
 }

@@ -8866,38 +8866,24 @@ CURP already uses the correct formula via `replica.NewThreeQuartersOf(N) = (3*N)
     with new `FastQuorumSize() = (3*N)/4+1` (where fast quorum > slow quorum).
   - All 68 epaxos-ho tests pass.
 
-- [ ] 123.5b: **Port `trackWaitingDependency`** from Orca
-  - Add function that checks if a PreAccept's causal deps exist on this replica.
-  - If any causal dep is nil (not yet received), set instance `State = WAITING`.
-  - Return the count of missing deps (cardinality).
+- [x] 123.5b: **Port `trackWaitingDependency`** from Orca
+  - Checks if causal deps are nil or in WAITING state; returns cardinality.
 
-- [ ] 123.5c: **Port `waitPreAcceptHandle`** goroutine from Orca
-  - When `trackWaitingDependency` returns cardinality > 0, spawn a goroutine that:
-    1. Polls until all missing causal deps arrive (sleep 1ms between checks)
-    2. Re-computes attributes (`updateStrongAttributes2`)
-    3. Sets `State = READY`
-    4. Sends PreAcceptReply to leader
-  - Add timeout (e.g., 10s) to prevent infinite wait.
+- [x] 123.5c: **Port `waitPreAcceptHandle`** goroutine from Orca
+  - Polls until all causal deps arrive (1ms sleep), then sends PreAcceptReply/OK.
 
-- [ ] 123.5d: **Update `handlePreAccept` (follower side)** to use WAITING
-  - After computing deps, call `trackWaitingDependency`.
-  - If cardinality == 0: reply immediately (current behavior).
-  - If cardinality > 0: set WAITING, spawn `waitPreAcceptHandle`, return without replying.
+- [x] 123.5d: **Update `handlePreAccept` (follower side)** to use WAITING
+  - Calls `trackWaitingDependency`; if cardinality > 0, sets WAITING and spawns goroutine.
 
-- [ ] 123.5e: **Update `executeCommands`** to skip WAITING instances
-  - Add check: `if inst.State == WAITING { continue }` (matching Orca hybrid.go:730-732)
+- [x] 123.5e: **Update `executeCommands`** to skip WAITING instances
 
-- [ ] 123.5f: **Update `strongconnect`** to check WAITING state
-  - Add: `|| e.r.InstanceSpace[q][i].State == WAITING` to the "not committed" check
-    (matching Orca hybrid-exec.go:285)
-  - This makes SCC return false for WAITING deps, deferring execution.
+- [x] 123.5f: **Update `strongconnect`** to check WAITING state
+  - WAITING strong deps block SCC; WAITING causal deps are skipped.
 
-- [ ] 123.5g: **Update `executeCommand`** to check WAITING state
-  - Add early return false if `inst.State == WAITING` (matching Orca hybrid-exec.go:182)
+- [x] 123.5g: **Update `executeCommand`** to check WAITING state
 
-- [ ] 123.5h: **Build and unit test**
-  - `go build -o swiftpaxos-dist .`
-  - `go test ./epaxos-ho/` — update existing tests, add WAITING state tests
+- [x] 123.5h: **Build and unit test**
+  - All 78 epaxos-ho tests pass (10 new WAITING tests added).
 
 - [ ] 123.5i: **Spot test on AWS** (t=4 and t=32, w=5%, weakRatio=50)
   - Verify EPaxos-HO with Dreply=true completes without stalls

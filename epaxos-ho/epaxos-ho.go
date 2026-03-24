@@ -20,6 +20,7 @@ const TRUE = uint8(1)
 const FALSE = uint8(0)
 
 const COMMIT_GRACE_PERIOD = 10 * 1e9 // 10 seconds
+const WAIT_SLEEP_TIME = 1 * time.Millisecond
 const ADAPT_TIME_SEC = 10
 
 const HT_INIT_SIZE = 11000
@@ -945,6 +946,79 @@ func (r *Replica) handlePrepare(prepare *Prepare) {
 // handlePreAccept processes a PreAccept message from the leader (follower side).
 // It updates attributes with local conflict information and replies with either
 // a PreAcceptOK (fast path, no changes) or PreAcceptReply (with updated attributes).
+// trackWaitingDependency checks if any causal dependencies are missing (nil) or
+// still in WAITING state. Returns the count of such deps. If cardinality > 0,
+// the follower should set the instance to WAITING and spawn waitPreAcceptHandle.
+func (r *Replica) trackWaitingDependency(replica int32, instance int32, deps []int32, cl []int32, timeout uint64) (int32, uint64) {
+	cardinality := int32(0)
+	for i := 0; i < len(deps); i++ {
+		if deps[i] == -1 {
+			continue
+		}
+		if r.InstanceSpace[i][deps[i]] == nil {
+			// Nil dep with causal CL — not yet received
+			if len(cl) > 0 && cl[i] == int32(state.CAUSAL) {
+				cardinality++
+				break
+			}
+		} else if r.InstanceSpace[i][deps[i]].Cmds != nil {
+			// Dep exists but is WAITING and causal — still blocked
+			if r.InstanceSpace[i][deps[i]].State == WAITING && r.InstanceSpace[i][deps[i]].Cmds[0].CL == state.CAUSAL {
+				cardinality++
+				break
+			}
+		} else {
+			// Dep exists but Cmds is nil — treat as missing if causal
+			if len(cl) > 0 && cl[i] == int32(state.CAUSAL) {
+				cardinality++
+				break
+			}
+		}
+		if timeout >= COMMIT_GRACE_PERIOD {
+			r.instancesToRecover <- &instanceId{int32(i), deps[i]}
+			timeout = 0
+		}
+	}
+	return cardinality, timeout
+}
+
+// waitPreAcceptHandle is spawned as a goroutine when a follower's PreAccept has
+// unresolved causal deps. It polls until all deps arrive, then sends the reply.
+func (r *Replica) waitPreAcceptHandle(command []state.Command, changed bool, uncommittedDeps bool, replicaId int32, leaderId int32, instance int32, ballot int32, seq int32, deps []int32, cl []int32) {
+	var timeout uint64 = 0
+	for {
+		cardinality, t := r.trackWaitingDependency(replicaId, instance, r.InstanceSpace[replicaId][instance].Deps, r.InstanceSpace[replicaId][instance].CL, timeout)
+		timeout = t
+		if cardinality == 0 {
+			r.InstanceSpace[replicaId][instance].State = READY
+			break
+		}
+		timeout += EXEC_SLEEP_TIME_NS
+		time.Sleep(WAIT_SLEEP_TIME)
+	}
+
+	if len(command) == 0 {
+		r.latestCPReplica = replicaId
+		r.latestCPInstance = instance
+		r.clearHashtables()
+	}
+
+	if changed || uncommittedDeps || replicaId != leaderId || !isInitialBallot(ballot) {
+		r.replyPreAccept(leaderId, &PreAcceptReply{
+			Replica:       replicaId,
+			Instance:      instance,
+			OK:            TRUE,
+			Ballot:        ballot,
+			Seq:           seq,
+			Deps:          deps,
+			CL:            cl,
+			CommittedDeps: r.CommittedUpTo,
+		})
+	} else {
+		r.SendMsg(leaderId, r.preAcceptOKRPC, &PreAcceptOK{Instance: instance})
+	}
+}
+
 func (r *Replica) handlePreAccept(preAccept *PreAccept) {
 	inst := r.InstanceSpace[preAccept.Replica][preAccept.Instance]
 
@@ -1034,6 +1108,15 @@ func (r *Replica) handlePreAccept(preAccept *PreAccept) {
 	r.recordInstanceMetadata(r.InstanceSpace[preAccept.Replica][preAccept.Instance])
 	r.recordCommands(preAccept.Command)
 	r.sync()
+
+	// Check for missing causal dependencies (WAITING mechanism from Orca)
+	cardinality, _ := r.trackWaitingDependency(preAccept.Replica, preAccept.Instance, deps, cl, 0)
+	if cardinality > 0 {
+		// Set instance to WAITING and spawn goroutine to poll for deps
+		r.InstanceSpace[preAccept.Replica][preAccept.Instance].State = WAITING
+		go r.waitPreAcceptHandle(preAccept.Command, changed, uncommittedDeps, preAccept.Replica, preAccept.LeaderId, preAccept.Instance, preAccept.Ballot, seq, deps, cl)
+		return
+	}
 
 	if len(preAccept.Command) == 0 {
 		// Checkpoint

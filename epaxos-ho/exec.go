@@ -41,6 +41,7 @@ func (r *Replica) executeCommands() {
 				}
 
 				if r.InstanceSpace[q][inst] == nil ||
+					r.InstanceSpace[q][inst].State == WAITING ||
 					(r.InstanceSpace[q][inst].Status != STRONGLY_COMMITTED && r.InstanceSpace[q][inst].Status != CAUSALLY_COMMITTED) {
 					if inst == problemInstance[q] {
 						timeout[q] += EXEC_SLEEP_TIME_NS
@@ -88,6 +89,9 @@ func (e *Exec) executeCommand(replica int32, instance int32) bool {
 	inst := e.r.InstanceSpace[replica][instance]
 	if inst.Status == EXECUTED || inst.Status == DISCARDED {
 		return true
+	}
+	if inst.State == WAITING {
+		return false
 	}
 	if inst.Status != STRONGLY_COMMITTED && inst.Status != CAUSALLY_COMMITTED {
 		return false
@@ -238,8 +242,8 @@ func (e *Exec) strongconnect(v *Instance, index *int) bool {
 			if e.r.InstanceSpace[q][i].Status == EXECUTED || e.r.InstanceSpace[q][i].Status == DISCARDED {
 				continue
 			}
-			if e.r.InstanceSpace[q][i].Status != STRONGLY_COMMITTED && e.r.InstanceSpace[q][i].Status != CAUSALLY_COMMITTED {
-				// Not committed yet — skip if causal, block if strong
+			if (e.r.InstanceSpace[q][i].Status != STRONGLY_COMMITTED && e.r.InstanceSpace[q][i].Status != CAUSALLY_COMMITTED) || e.r.InstanceSpace[q][i].State == WAITING {
+				// Not committed yet or still WAITING — skip if causal, block if strong
 				if e.r.InstanceSpace[q][i].Cmds != nil && e.r.InstanceSpace[q][i].Cmds[0].CL == state.CAUSAL {
 					atomic.AddInt64(&e.skippedDeps, 1)
 					continue
