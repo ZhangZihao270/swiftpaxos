@@ -333,16 +333,16 @@ func TestHandleProposeDefaultToStrong(t *testing.T) {
 }
 
 func TestHandleProposeInstanceAllocation(t *testing.T) {
-	// After Phase 109a: mixed batches use 1 unified instance, not 2 separate ones
+	// Phase 123.5a: mixed batches use 2 separate instances (matching Orca design)
 	r := newTestReplica(5)
 
 	startInst := r.crtInstance[0]
 
-	// Mixed batch (causal+strong) → 1 instance via startUnifiedCommit
-	r.crtInstance[0]++
+	// Mixed batch (causal+strong) → 2 instances (1 causal + 1 strong)
+	r.crtInstance[0] += 2
 
-	if r.crtInstance[0] != startInst+1 {
-		t.Errorf("crtInstance=%d, want %d (unified: 1 instance for mixed batch)", r.crtInstance[0], startInst+1)
+	if r.crtInstance[0] != startInst+2 {
+		t.Errorf("crtInstance=%d, want %d (split: 2 instances for mixed batch)", r.crtInstance[0], startInst+2)
 	}
 }
 
@@ -380,7 +380,7 @@ func TestHandleProposeAllCausal(t *testing.T) {
 }
 
 func TestHandleProposeAllStrong(t *testing.T) {
-	// All-strong batch → 1 instance via startUnifiedCommit
+	// All-strong batch → 1 instance via startStrongCommit
 	cmds := []state.Command{
 		{Op: state.PUT, K: 1, V: state.NIL(), CL: state.STRONG, Sid: 1},
 		{Op: state.GET, K: 2, V: state.NIL(), CL: state.STRONG, Sid: 2},
@@ -405,7 +405,7 @@ func TestHandleProposeAllStrong(t *testing.T) {
 }
 
 func TestHandleProposeMixedBatch(t *testing.T) {
-	// Mixed batch → 1 instance via startUnifiedCommit (not 2 separate instances)
+	// Phase 123.5a: Mixed batch → 2 separate instances (matching Orca design)
 	cmds := []state.Command{
 		{Op: state.PUT, K: 1, V: state.NIL(), CL: state.CAUSAL, Sid: 1},
 		{Op: state.PUT, K: 2, V: state.NIL(), CL: state.STRONG, Sid: 2},
@@ -438,60 +438,58 @@ func TestHandleProposeMixedBatch(t *testing.T) {
 	}
 }
 
-func TestStartUnifiedCommit_MixedBatch(t *testing.T) {
+func TestStartStrongCommit_SplitMixedBatch(t *testing.T) {
+	// Phase 123.5a: mixed batches are now split into separate instances.
+	// Test strong instance creation via startStrongCommit.
 	r := newTestReplica(5)
 
-	cmds := []state.Command{
-		{Op: state.PUT, K: 1, V: state.NIL(), CL: state.CAUSAL, Sid: 10},
+	strongCmds := []state.Command{
 		{Op: state.PUT, K: 2, V: state.NIL(), CL: state.STRONG, Sid: 20},
+	}
+	strongProposals := []*defs.GPropose{{Propose: &defs.Propose{CommandId: 2}}}
+
+	causalCmds := []state.Command{
+		{Op: state.PUT, K: 1, V: state.NIL(), CL: state.CAUSAL, Sid: 10},
 		{Op: state.GET, K: 3, V: state.NIL(), CL: state.CAUSAL, Sid: 10},
 	}
-
-	strongProposals := []*defs.GPropose{{Propose: &defs.Propose{CommandId: 2}}}
 	causalProposals := []*defs.GPropose{{Propose: &defs.Propose{CommandId: 1}}, {Propose: &defs.Propose{CommandId: 3}}}
 
-	r.Dreply = true // skip reply path in test (no real client connections)
-	r.startUnifiedCommit(0, 0, 0, strongProposals, causalProposals, cmds)
+	// Create causal instance at slot 0
+	r.Dreply = true
+	r.startCausalCommit(0, 0, 0, causalProposals, causalCmds)
 
-	// Verify: single instance created
-	inst := r.InstanceSpace[0][0]
-	if inst == nil {
-		t.Fatal("instance not created")
-	}
+	// Create strong instance at slot 1
+	r.startStrongCommit(0, 1, 0, strongProposals, strongCmds)
 
-	// Verify: all commands in the instance
-	if len(inst.Cmds) != 3 {
-		t.Errorf("Cmds count=%d, want 3", len(inst.Cmds))
+	// Verify: causal instance at slot 0
+	causalInst := r.InstanceSpace[0][0]
+	if causalInst == nil {
+		t.Fatal("causal instance not created")
 	}
-
-	// Verify: status is PREACCEPTED (strong path dictates)
-	if inst.Status != PREACCEPTED {
-		t.Errorf("Status=%d, want PREACCEPTED(%d)", inst.Status, PREACCEPTED)
+	if len(causalInst.Cmds) != 2 {
+		t.Errorf("causal Cmds count=%d, want 2", len(causalInst.Cmds))
 	}
-
-	// Verify: only strong proposals in lb.clientProposals
-	if len(inst.lb.clientProposals) != 1 {
-		t.Errorf("lb.clientProposals=%d, want 1 (only strong)", len(inst.lb.clientProposals))
-	}
-	if inst.lb.clientProposals[0].CommandId != 2 {
-		t.Errorf("lb.clientProposals[0].CommandId=%d, want 2", inst.lb.clientProposals[0].CommandId)
+	if causalInst.Status != CAUSALLY_COMMITTED {
+		t.Errorf("causal Status=%d, want CAUSALLY_COMMITTED(%d)", causalInst.Status, CAUSALLY_COMMITTED)
 	}
 
-	// Verify: conflicts were updated for all commands
-	r.conflictMutex.RLock()
-	if r.conflicts[0][1] != 0 {
-		t.Errorf("conflicts[0][1]=%d, want 0 (instance 0)", r.conflicts[0][1])
+	// Verify: strong instance at slot 1
+	strongInst := r.InstanceSpace[0][1]
+	if strongInst == nil {
+		t.Fatal("strong instance not created")
 	}
-	if r.conflicts[0][2] != 0 {
-		t.Errorf("conflicts[0][2]=%d, want 0", r.conflicts[0][2])
+	if len(strongInst.Cmds) != 1 {
+		t.Errorf("strong Cmds count=%d, want 1", len(strongInst.Cmds))
 	}
-	if r.conflicts[0][3] != 0 {
-		t.Errorf("conflicts[0][3]=%d, want 0", r.conflicts[0][3])
+	if strongInst.Status != PREACCEPTED {
+		t.Errorf("strong Status=%d, want PREACCEPTED(%d)", strongInst.Status, PREACCEPTED)
 	}
-	r.conflictMutex.RUnlock()
+	if len(strongInst.lb.clientProposals) != 1 {
+		t.Errorf("strong lb.clientProposals=%d, want 1", len(strongInst.lb.clientProposals))
+	}
 }
 
-func TestStartUnifiedCommit_PureStrong(t *testing.T) {
+func TestStartStrongCommit_PureStrong(t *testing.T) {
 	r := newTestReplica(5)
 
 	cmds := []state.Command{
@@ -501,25 +499,22 @@ func TestStartUnifiedCommit_PureStrong(t *testing.T) {
 
 	proposals := []*defs.GPropose{{Propose: &defs.Propose{CommandId: 1}}, {Propose: &defs.Propose{CommandId: 2}}}
 
-	r.Dreply = true // skip reply path in test
-	r.startUnifiedCommit(0, 0, 0, proposals, nil, cmds)
+	r.Dreply = true
+	r.startStrongCommit(0, 0, 0, proposals, cmds)
 
 	inst := r.InstanceSpace[0][0]
 	if inst == nil {
 		t.Fatal("instance not created")
 	}
 
-	// All commands in instance
 	if len(inst.Cmds) != 2 {
 		t.Errorf("Cmds count=%d, want 2", len(inst.Cmds))
 	}
 
-	// Status PREACCEPTED
 	if inst.Status != PREACCEPTED {
 		t.Errorf("Status=%d, want PREACCEPTED(%d)", inst.Status, PREACCEPTED)
 	}
 
-	// All proposals in lb.clientProposals (no causal proposals to skip)
 	if len(inst.lb.clientProposals) != 2 {
 		t.Errorf("lb.clientProposals=%d, want 2", len(inst.lb.clientProposals))
 	}
@@ -1946,24 +1941,29 @@ func TestHandlePreAcceptReply_SlowPath(t *testing.T) {
 	}
 }
 
-// TestHandlePreAcceptReply_FastPath verifies fast path commit with N=3.
+// TestHandlePreAcceptReply_FastPath verifies fast path commit with N=5.
+// FastQuorumSize for N=5 = (3*5)/4+1 = 4, so need 3 PreAcceptOKs (4-1).
 func TestHandlePreAcceptReply_FastPath(t *testing.T) {
-	r := newTestReplica(3)
+	r := newTestReplica(5)
 
 	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
-	setupStrongInstance(r, 0, 0, 0, cmds, 5, []int32{-1, -1, -1})
-	// For N=3: fast quorum = 3/2 + (3/2+1)/2 - 1 = 1+1-1 = 1
+	setupStrongInstance(r, 0, 0, 0, cmds, 5, []int32{-1, -1, -1, -1, -1})
 
-	reply := &PreAcceptReply{
-		Replica: 0, Instance: 0, OK: TRUE, Ballot: 0,
-		Seq: 5, Deps: []int32{-1, -1, -1}, CL: []int32{0, 0, 0},
-		CommittedDeps: []int32{-1, -1, -1},
+	makeReply := func() *PreAcceptReply {
+		return &PreAcceptReply{
+			Replica: 0, Instance: 0, OK: TRUE, Ballot: 0,
+			Seq: 5, Deps: []int32{-1, -1, -1, -1, -1}, CL: []int32{0, 0, 0, 0, 0},
+			CommittedDeps: []int32{-1, -1, -1, -1, -1},
+		}
 	}
 
-	func() {
-		defer func() { recover() }()
-		r.handlePreAcceptReply(reply)
-	}()
+	// Send 3 matching replies to reach fast quorum (FastQuorumSize()-1 = 3)
+	for i := 0; i < 3; i++ {
+		func() {
+			defer func() { recover() }()
+			r.handlePreAcceptReply(makeReply())
+		}()
+	}
 
 	if r.InstanceSpace[0][0].Status != STRONGLY_COMMITTED {
 		t.Errorf("Status=%d, want STRONGLY_COMMITTED(%d)", r.InstanceSpace[0][0].Status, STRONGLY_COMMITTED)
@@ -2028,18 +2028,21 @@ func TestHandlePreAcceptOK_NonInitialBallotIgnored(t *testing.T) {
 	}
 }
 
-// TestHandlePreAcceptOK_FastPath verifies fast path commit via PreAcceptOK.
+// TestHandlePreAcceptOK_FastPath verifies fast path commit via PreAcceptOK with N=5.
+// FastQuorumSize for N=5 = 4, so need 3 PreAcceptOKs (4-1).
 func TestHandlePreAcceptOK_FastPath(t *testing.T) {
-	r := newTestReplica(3)
+	r := newTestReplica(5)
 
 	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
-	setupStrongInstance(r, 0, 0, 0, cmds, 5, []int32{-1, -1, -1})
+	setupStrongInstance(r, 0, 0, 0, cmds, 5, []int32{-1, -1, -1, -1, -1})
 
-	// For N=3: fast quorum = 1
-	func() {
-		defer func() { recover() }()
-		r.handlePreAcceptOK(&PreAcceptOK{Instance: 0})
-	}()
+	// Send 3 PreAcceptOKs to reach fast quorum
+	for i := 0; i < 3; i++ {
+		func() {
+			defer func() { recover() }()
+			r.handlePreAcceptOK(&PreAcceptOK{Instance: 0})
+		}()
+	}
 
 	if r.InstanceSpace[0][0].Status != STRONGLY_COMMITTED {
 		t.Errorf("Status=%d, want STRONGLY_COMMITTED(%d)", r.InstanceSpace[0][0].Status, STRONGLY_COMMITTED)

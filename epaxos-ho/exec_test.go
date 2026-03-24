@@ -191,8 +191,9 @@ func TestFindSCC_SimpleNoDeps(t *testing.T) {
 	}
 }
 
-// TestFindSCC_UnmetDependencyFails verifies SCC fails when dependency not committed.
-func TestFindSCC_UnmetDependencyFails(t *testing.T) {
+// TestFindSCC_NilDependencySkipped verifies SCC skips nil dependencies
+// (they may be causal instances not yet received).
+func TestFindSCC_NilDependencySkipped(t *testing.T) {
 	r := newTestReplica(3)
 	e := &Exec{r: r}
 
@@ -206,12 +207,47 @@ func TestFindSCC_UnmetDependencyFails(t *testing.T) {
 		CL:         []int32{0, 0, 0},
 		instanceId: &instanceId{0, 2},
 	}
-	// Slot 1 is nil (not committed yet)
+	// Slot 1 is nil (causal dep not yet received — should be skipped)
+	r.ExecedUpTo[0] = 0
+
+	ok := e.findSCC(r.InstanceSpace[0][2])
+	if !ok {
+		t.Error("findSCC should succeed (nil deps are skipped as potentially causal)")
+	}
+}
+
+// TestFindSCC_StrongDepNotCommittedFails verifies SCC fails when a strong
+// dependency exists but is not committed yet (PREACCEPTED state).
+func TestFindSCC_StrongDepNotCommittedFails(t *testing.T) {
+	r := newTestReplica(3)
+	e := &Exec{r: r}
+
+	strongCmds := []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.STRONG}}
+	// Dep instance at slot 1: exists but not committed (PREACCEPTED)
+	r.InstanceSpace[0][1] = &Instance{
+		Cmds:       strongCmds,
+		Status:     PREACCEPTED,
+		State:      READY,
+		Seq:        1,
+		Deps:       []int32{-1, -1, -1},
+		CL:         []int32{0, 0, 0},
+		instanceId: &instanceId{0, 1},
+	}
+	// Instance at slot 2 depends on slot 1
+	r.InstanceSpace[0][2] = &Instance{
+		Cmds:       strongCmds,
+		Status:     STRONGLY_COMMITTED,
+		State:      READY,
+		Seq:        2,
+		Deps:       []int32{1, -1, -1},
+		CL:         []int32{0, 0, 0},
+		instanceId: &instanceId{0, 2},
+	}
 	r.ExecedUpTo[0] = 0
 
 	ok := e.findSCC(r.InstanceSpace[0][2])
 	if ok {
-		t.Error("findSCC should fail when dependency is nil")
+		t.Error("findSCC should fail when strong dep is not committed")
 	}
 }
 

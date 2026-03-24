@@ -1,7 +1,9 @@
 package epaxosho
 
 import (
+	"log"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	"github.com/imdea-software/swiftpaxos/replica/defs"
@@ -21,6 +23,9 @@ func (r *Replica) executeCommands() {
 		problemInstance[q] = -1
 		timeout[q] = 0
 	}
+
+	execCount := int64(0)
+	lastLog := time.Now()
 
 	for !r.Shutdown {
 		executed := false
@@ -56,6 +61,7 @@ func (r *Replica) executeCommands() {
 				if ok := r.exec.executeCommand(int32(q), inst); ok {
 					if r.InstanceSpace[q][inst].Status == EXECUTED || r.InstanceSpace[q][inst].Status == DISCARDED {
 						executed = true
+						execCount++
 						if inst == r.ExecedUpTo[q]+1 {
 							r.ExecedUpTo[q] = inst
 						}
@@ -65,6 +71,11 @@ func (r *Replica) executeCommands() {
 		}
 		if !executed {
 			time.Sleep(EXEC_SLEEP_TIME_NS)
+		}
+		if time.Since(lastLog) > 5*time.Second {
+			skipped := atomic.LoadInt64(&r.exec.skippedDeps)
+			log.Printf("EXEC: executed=%d skippedCausalDeps=%d execedUpTo=%v", execCount, skipped, r.ExecedUpTo)
+			lastLog = time.Now()
 		}
 	}
 }
@@ -109,7 +120,7 @@ func (e *Exec) executeCausalCommand(replica int32, instance int32) {
 		if inst.Cmds[idx].Op == state.GET {
 			flag = 1
 			val := inst.Cmds[idx].Execute(e.r.State)
-			if e.r.Dreply && inst.lb != nil && inst.lb.clientProposals != nil {
+			if e.r.Dreply && inst.lb != nil && inst.lb.clientProposals != nil && idx < len(inst.lb.clientProposals) {
 				e.r.ReplyProposeTS(
 					&defs.ProposeReplyTS{
 						OK:        TRUE,
@@ -131,7 +142,7 @@ func (e *Exec) executeCausalCommand(replica int32, instance int32) {
 				e.r.maxWriteInstancePerKeyMu.Lock()
 				e.r.maxWriteInstancePerKey[inst.Cmds[idx].K] = inst.instanceId
 				e.r.maxWriteInstancePerKeyMu.Unlock()
-				if e.r.Dreply && inst.lb != nil && inst.lb.clientProposals != nil {
+				if e.r.Dreply && inst.lb != nil && inst.lb.clientProposals != nil && idx < len(inst.lb.clientProposals) {
 					e.r.ReplyProposeTS(
 						&defs.ProposeReplyTS{
 							OK:        TRUE,
@@ -144,7 +155,7 @@ func (e *Exec) executeCausalCommand(replica int32, instance int32) {
 				}
 			} else {
 				// Stale write — discard but still reply to client.
-				if e.r.Dreply && inst.lb != nil && inst.lb.clientProposals != nil {
+				if e.r.Dreply && inst.lb != nil && inst.lb.clientProposals != nil && idx < len(inst.lb.clientProposals) {
 					e.r.ReplyProposeTS(
 						&defs.ProposeReplyTS{
 							OK:        TRUE,
@@ -214,13 +225,25 @@ func (e *Exec) strongconnect(v *Instance, index *int) bool {
 		}
 
 		for i := e.r.ExecedUpTo[q] + 1; i <= graphDepth; i++ {
-			if e.r.InstanceSpace[q][i] == nil || e.r.InstanceSpace[q][i].Cmds == nil || v.Cmds == nil {
+			if v.Cmds == nil {
 				return false
+			}
+			if e.r.InstanceSpace[q][i] == nil || e.r.InstanceSpace[q][i].Cmds == nil {
+				// Dep instance not yet received — skip instead of blocking.
+				// This can happen when a causal instance was committed on the
+				// leader but not yet propagated to this replica.
+				atomic.AddInt64(&e.skippedDeps, 1)
+				continue
 			}
 			if e.r.InstanceSpace[q][i].Status == EXECUTED || e.r.InstanceSpace[q][i].Status == DISCARDED {
 				continue
 			}
 			if e.r.InstanceSpace[q][i].Status != STRONGLY_COMMITTED && e.r.InstanceSpace[q][i].Status != CAUSALLY_COMMITTED {
+				// Not committed yet — skip if causal, block if strong
+				if e.r.InstanceSpace[q][i].Cmds != nil && e.r.InstanceSpace[q][i].Cmds[0].CL == state.CAUSAL {
+					atomic.AddInt64(&e.skippedDeps, 1)
+					continue
+				}
 				return false
 			}
 
@@ -259,7 +282,7 @@ func (e *Exec) strongconnect(v *Instance, index *int) bool {
 				if w.Cmds[idx].Op == state.GET {
 					flag = 1
 					val := w.Cmds[idx].Execute(e.r.State)
-					if e.r.Dreply && w.lb != nil && w.lb.clientProposals != nil {
+					if e.r.Dreply && w.lb != nil && w.lb.clientProposals != nil && idx < len(w.lb.clientProposals) {
 						e.r.ReplyProposeTS(
 							&defs.ProposeReplyTS{
 								OK:        TRUE,
@@ -281,7 +304,7 @@ func (e *Exec) strongconnect(v *Instance, index *int) bool {
 						e.r.maxWriteInstancePerKeyMu.Lock()
 						e.r.maxWriteInstancePerKey[w.Cmds[idx].K] = w.instanceId
 						e.r.maxWriteInstancePerKeyMu.Unlock()
-						if e.r.Dreply && w.lb != nil && w.lb.clientProposals != nil {
+						if e.r.Dreply && w.lb != nil && w.lb.clientProposals != nil && idx < len(w.lb.clientProposals) {
 							e.r.ReplyProposeTS(
 								&defs.ProposeReplyTS{
 									OK:        TRUE,
@@ -294,7 +317,7 @@ func (e *Exec) strongconnect(v *Instance, index *int) bool {
 						}
 					} else {
 						// Stale write — discard.
-						if e.r.Dreply && w.lb != nil && w.lb.clientProposals != nil {
+						if e.r.Dreply && w.lb != nil && w.lb.clientProposals != nil && idx < len(w.lb.clientProposals) {
 							e.r.ReplyProposeTS(
 								&defs.ProposeReplyTS{
 									OK:        TRUE,

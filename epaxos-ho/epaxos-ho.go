@@ -206,9 +206,7 @@ func New(alias string, id int, peerAddrList []string, exec, beacon, durable bool
 
 	r.Beacon = beacon
 	r.Durable = durable
-	// Reply at commit time (not execution time) to avoid stalls from
-	// pending dependency resolution in the SCC-based execution engine.
-	r.Dreply = false
+	r.Dreply = true
 
 	for i := 0; i < r.N; i++ {
 		r.InstanceSpace[i] = make([]*Instance, MAX_INSTANCE)
@@ -233,7 +231,7 @@ func New(alias string, id int, peerAddrList []string, exec, beacon, durable bool
 	r.tryPreAcceptRPC = r.RPC.Register(new(TryPreAccept), r.tryPreAcceptChan)
 	r.tryPreAcceptReplyRPC = r.RPC.Register(new(TryPreAcceptReply), r.tryPreAcceptReplyChan)
 
-	r.exec = &Exec{r}
+	r.exec = &Exec{r: r}
 
 	cpMarker = make([]state.Command, 0)
 
@@ -248,7 +246,8 @@ func New(alias string, id int, peerAddrList []string, exec, beacon, durable bool
 // It implements Tarjan's SCC algorithm for strong command ordering
 // and direct execution for causal commands.
 type Exec struct {
-	r *Replica
+	r           *Replica
+	skippedDeps int64 // count of causal deps skipped during execute (atomic)
 }
 
 // recordInstanceMetadata appends instance metadata to stable storage.
@@ -470,42 +469,46 @@ func (r *Replica) run() {
 func (r *Replica) handlePropose(propose *defs.GPropose) {
 	batchSize := len(r.ProposeChan) + 1
 
-	// Collect ALL commands into a single batch. Classify proposals by CL
-	// for reply timing: causal proposals get immediate replies, strong
-	// proposals wait for PreAccept quorum.
-	allCmds := make([]state.Command, 0, batchSize)
+	// Classify proposals by consistency level into separate batches.
+	// Matching Orca design: causal and strong commands get SEPARATE instances.
+	causalCmds := make([]state.Command, 0, batchSize)
 	causalProposals := make([]*defs.GPropose, 0, batchSize)
+	strongCmds := make([]state.Command, 0, batchSize)
 	strongProposals := make([]*defs.GPropose, 0, batchSize)
 
 	// Classify first proposal
-	allCmds = append(allCmds, propose.Command)
 	if propose.Command.CL == state.CAUSAL {
+		causalCmds = append(causalCmds, propose.Command)
 		causalProposals = append(causalProposals, propose)
 	} else {
+		strongCmds = append(strongCmds, propose.Command)
 		strongProposals = append(strongProposals, propose)
 	}
 
 	// Drain remaining proposals
 	for i := 1; i < batchSize; i++ {
 		prop := <-r.ProposeChan
-		allCmds = append(allCmds, prop.Command)
 		if prop.Command.CL == state.CAUSAL {
+			causalCmds = append(causalCmds, prop.Command)
 			causalProposals = append(causalProposals, prop)
 		} else {
+			strongCmds = append(strongCmds, prop.Command)
 			strongProposals = append(strongProposals, prop)
 		}
 	}
 
-	instNo := r.crtInstance[r.Id]
-	r.crtInstance[r.Id]++
-
-	if len(strongProposals) == 0 {
-		// Pure causal batch — use 1-RTT fast path (no PreAccept needed)
-		r.startCausalCommit(r.Id, instNo, 0, causalProposals, allCmds)
-	} else {
-		// Mixed or pure strong — unified instance with PreAccept consensus.
-		// Causal proposals get immediate reply; strong proposals wait for quorum.
-		r.startUnifiedCommit(r.Id, instNo, 0, strongProposals, causalProposals, allCmds)
+	// Create separate instances for causal and strong (matching Orca design).
+	// This ensures causal instances follow 1-RTT path and strong instances
+	// follow PreAccept consensus path independently.
+	if len(causalProposals) > 0 {
+		instNo := r.crtInstance[r.Id]
+		r.crtInstance[r.Id]++
+		r.startCausalCommit(r.Id, instNo, 0, causalProposals, causalCmds)
+	}
+	if len(strongProposals) > 0 {
+		instNo := r.crtInstance[r.Id]
+		r.crtInstance[r.Id]++
+		r.startStrongCommit(r.Id, instNo, 0, strongProposals, strongCmds)
 	}
 }
 
@@ -606,122 +609,6 @@ func (r *Replica) startCausalCommit(replicaId int32, instance int32, ballot int3
 		r.sync()
 
 		r.bcastCausalCommit(replicaId, instance, cpMarker, r.maxSeq, deps, cl, state.CAUSAL)
-	}
-}
-
-// startUnifiedCommit handles a batch containing any strong commands (mixed or
-// pure-strong). All commands share a single instance and dep vector. Causal
-// proposals get immediate client replies (1-RTT); strong proposals wait for
-// PreAccept quorum. The PreAccept carries all commands — followers distinguish
-// causal from strong via Command.CL at execution time.
-func (r *Replica) startUnifiedCommit(replicaId int32, instance int32, ballot int32,
-	strongProposals []*defs.GPropose, causalProposals []*defs.GPropose, cmds []state.Command) {
-
-	seq := int32(0)
-	deps := make([]int32, r.N)
-	cl := make([]int32, r.N)
-	for q := 0; q < r.N; q++ {
-		deps[q] = -1
-		cl[q] = 0
-	}
-
-	// Compute unified deps: strong per-key conflicts + causal read-from deps.
-	// updateStrongAttributes1 covers per-key conflicts, session deps, maxSeq.
-	// updateCausalAttributes adds read-from deps (GET→latest PUT).
-	seq, deps, cl, _ = r.updateStrongAttributes1(cmds, seq, deps, cl, replicaId, instance)
-	seq, deps, cl = r.updateCausalAttributes(cmds, seq, deps, cl, replicaId, instance)
-
-	comDeps := make([]int32, r.N)
-	for i := 0; i < r.N; i++ {
-		comDeps[i] = -1
-	}
-
-	// Store only strong proposals in lb.clientProposals — these get replies
-	// after PreAccept quorum. Causal proposals are replied to immediately below.
-	r.InstanceSpace[replicaId][instance] = &Instance{
-		Cmds:       cmds,
-		bal:        ballot,
-		vbal:       ballot,
-		Status:     PREACCEPTED,
-		State:      READY,
-		Seq:        seq,
-		Deps:       deps,
-		CL:         cl,
-		lb:         &LeaderBookkeeping{clientProposals: strongProposals, allEqual: true, originalDeps: deps, committedDeps: comDeps},
-		instanceId: &instanceId{replicaId, instance},
-	}
-
-	if seq >= r.maxSeq {
-		r.maxSeq = seq + 1
-	}
-
-	// Track outstanding strong commands
-	r.outstandingStrong += int64(len(strongProposals))
-
-	// Reply immediately to causal proposals (1-RTT fast path)
-	if !r.Dreply {
-		for _, prop := range causalProposals {
-			r.clientReplyCount++
-			r.ReplyProposeTS(
-				&defs.ProposeReplyTS{
-					OK:        TRUE,
-					CommandId: prop.CommandId,
-					Value:     state.NIL(),
-					Timestamp: prop.Timestamp,
-				},
-				prop.Reply,
-				prop.Mutex)
-		}
-	}
-
-	// Update conflict tracking — causal update is a superset of strong update
-	// (includes session conflicts + per-key conflicts + maxSeq)
-	r.updateCausalConflicts(cmds, replicaId, instance, seq, true)
-
-	r.recordInstanceMetadata(r.InstanceSpace[replicaId][instance])
-	r.recordCommands(cmds)
-	r.sync()
-
-	// Broadcast PreAccept — all commands go through consensus path.
-	// Commands carry CL in their struct; followers use it at execution time.
-	r.bcastPreAccept(replicaId, instance, ballot, cmds, seq, deps, cl)
-
-	cpcounter += len(cmds)
-
-	if replicaId == r.Id && DO_CHECKPOINTING && cpcounter >= CHECKPOINT_PERIOD {
-		cpcounter = 0
-
-		r.crtInstance[r.Id]++
-		instance++
-
-		r.maxSeq++
-		for q := 0; q < r.N; q++ {
-			deps[q] = r.crtInstance[int32(q)] - 1
-			cl[q] = 0
-		}
-
-		r.InstanceSpace[r.Id][instance] = &Instance{
-			Cmds:       cpMarker,
-			bal:        0,
-			vbal:       0,
-			Status:     PREACCEPTED,
-			State:      READY,
-			Seq:        r.maxSeq,
-			Deps:       deps,
-			CL:         cl,
-			lb:         &LeaderBookkeeping{allEqual: true, originalDeps: deps, committedDeps: comDeps},
-			instanceId: &instanceId{r.Id, instance},
-		}
-
-		r.latestCPReplica = r.Id
-		r.latestCPInstance = instance
-
-		r.clearHashtables()
-
-		r.recordInstanceMetadata(r.InstanceSpace[r.Id][instance])
-		r.sync()
-
-		r.bcastPreAccept(r.Id, instance, 0, cpMarker, r.maxSeq, deps, cl)
 	}
 }
 
@@ -1985,7 +1872,7 @@ func (r *Replica) handlePreAcceptReply(pareply *PreAcceptReply) {
 	}
 
 	// Fast path: all peers agreed on same attributes, all deps committed, initial ballot
-	if inst.lb.preAcceptOKs >= r.N/2+(r.N/2+1)/2-1 && inst.lb.allEqual && allCommitted && isInitialBallot(inst.bal) {
+	if inst.lb.preAcceptOKs >= r.FastQuorumSize()-1 && inst.lb.allEqual && allCommitted && isInitialBallot(inst.bal) {
 		r.Stats.M["fast"]++
 
 		r.InstanceSpace[pareply.Replica][pareply.Instance].Status = STRONGLY_COMMITTED
@@ -2015,8 +1902,8 @@ func (r *Replica) handlePreAcceptReply(pareply *PreAcceptReply) {
 		r.InstanceSpace[pareply.Replica][pareply.Instance].State = READY
 		r.bcastStrongCommit(pareply.Replica, pareply.Instance, inst.Cmds, inst.Seq, inst.Deps, inst.CL, state.STRONG)
 
-	} else if inst.lb.preAcceptOKs >= r.N/2 {
-		// Slow path: move to Accept phase
+	} else if inst.lb.preAcceptOKs >= r.N/2 && (!inst.lb.allEqual || !allCommitted || !isInitialBallot(inst.bal)) {
+		// Slow path: move to Accept phase (only when fast path is provably impossible)
 		r.Stats.M["slow"]++
 		if !allCommitted {
 			r.Stats.M["weird"]++
@@ -2057,7 +1944,7 @@ func (r *Replica) handlePreAcceptOK(pareply *PreAcceptOK) {
 	}
 
 	// Fast path commit check
-	if inst.lb.preAcceptOKs >= r.N/2+(r.N/2+1)/2-1 && inst.lb.allEqual && allCommitted && isInitialBallot(inst.bal) {
+	if inst.lb.preAcceptOKs >= r.FastQuorumSize()-1 && inst.lb.allEqual && allCommitted && isInitialBallot(inst.bal) {
 		r.Stats.M["fast"]++
 
 		r.InstanceSpace[r.Id][pareply.Instance].Status = STRONGLY_COMMITTED
@@ -2086,8 +1973,8 @@ func (r *Replica) handlePreAcceptOK(pareply *PreAcceptOK) {
 
 		r.bcastStrongCommit(r.Id, pareply.Instance, inst.Cmds, inst.Seq, inst.Deps, inst.CL, state.STRONG)
 
-	} else if inst.lb.preAcceptOKs >= r.N/2 {
-		// Slow path
+	} else if inst.lb.preAcceptOKs >= r.N/2 && (!inst.lb.allEqual || !allCommitted || !isInitialBallot(inst.bal)) {
+		// Slow path (only when fast path is provably impossible)
 		r.Stats.M["slow"]++
 		inst.Status = ACCEPTED
 		r.bcastAccept(r.Id, pareply.Instance, inst.bal, int32(len(inst.Cmds)), inst.Seq, inst.Deps, inst.CL)

@@ -8739,6 +8739,234 @@ guarantee.
 
 ---
 
+### Phase 123: EPaxos/EPaxos-HO Super Quorum Fix + Dreply Fix
+
+**Context**: Evaluation experiments (Exp 2.1, 2.2) showed EPaxos and EPaxos-HO had incorrect fast path quorum size and were replying before execute, making comparison with Raft/CURP unfair.
+
+#### Phase 123.1: Fix FastQuorumSize (Super Quorum)
+
+**Problem**: `replica.FastQuorumSize()` computed `f + (f+1)/2 = 3` for N=5, but correct EPaxos super quorum is `⌊3N/4⌋ + 1 = 4`. This means fast path only waited for 2 PreAcceptOKs instead of 3, undermining safety.
+
+EPaxos-HO had a separate inline formula `r.N/2+(r.N/2+1)/2-1 = 2` (even worse — only 2 OKs).
+
+CURP already uses the correct formula via `replica.NewThreeQuartersOf(N) = (3*N)/4 + 1 = 4`.
+
+**Fixes**:
+- [x] 123.1a: `replica/replica.go`: `FastQuorumSize()` changed from `f+(f+1)/2` to `(3*r.N)/4+1` [26:03:23]
+- [x] 123.1b: `epaxos-ho/epaxos-ho.go`: replaced 2 inline formulas `r.N/2+(r.N/2+1)/2-1` with `r.FastQuorumSize()-1` [26:03:23]
+
+**Verification**: N=5 → FastQuorumSize=4 (needs 3 PreAcceptOKs). EPaxos-HO spot test at t=32: strong p50=66ms (was ~25ms with majority quorum). Matches RTT table (3rd closest peer ≈ 59ms for Virginia).
+
+| N | Old (wrong) | New (correct) | CURP ThreeQuarters |
+|---|---|---|---|
+| 3 | 2 | 3 | 3 |
+| 5 | 3 | 4 | 4 |
+| 7 | 5 | 6 | 6 |
+
+#### Phase 123.2: Fix Dreply (Reply After Execute)
+
+**Problem**: EPaxos and EPaxos-HO had `Dreply=false`, meaning client reply was sent at commit time (not execution time). Raft and CURP reply after execute. This made throughput comparison unfair — EPaxos bypassed the execution bottleneck (dep graph ordering via Tarjan SCC).
+
+**Fixes**:
+- [x] 123.2a: `epaxos/epaxos.go`: changed `r.Dreply = false` → `r.Dreply = true` [26:03:23]
+- [x] 123.2b: `epaxos-ho/epaxos-ho.go`: changed `r.Dreply = false` → `r.Dreply = true` [26:03:23]
+- [x] 123.2c: `epaxos/exec.go`: added bounds check `idx < len(w.Lb.ClientProposals)` to prevent panic [26:03:23]
+- [x] 123.2d: `epaxos-ho/exec.go`: added bounds check `idx < len(w.lb.clientProposals)` (6 locations) [26:03:23]
+
+**Verification**: Vanilla EPaxos `Dreply=true` works: t=32 throughput=18k (was 24k with Dreply=false), latency 83ms (was 60ms). The ~30% throughput drop is the cost of waiting for execute.
+
+#### Phase 123.3: EPaxos-HO Dreply=true — Causal Dep Deadlock
+
+**Problem**: EPaxos-HO with `Dreply=true` produces ~148 ops/sec (was ~54k with Dreply=false). Two root causes found:
+
+**Root cause 1: Causal proposals missing from clientProposals in mixed batches**
+- `startUnifiedCommit` stored only `strongProposals` in `lb.clientProposals`
+- With `Dreply=true`, causal proposals in mixed batches never get replied (not in clientProposals → execute can't reply → client timeout)
+- **Fix**: store all proposals (strong + causal) ordered to match cmds [26:03:23]
+
+**Root cause 2: Execute dep graph blocked by uncommitted instances**
+- `strongconnect` returns false when any dep instance is nil or uncommitted
+- Causal instances committed on leader but not yet propagated to other replicas → nil on those replicas → execute blocks
+- **Partial fix**: skip nil/uncommitted causal deps instead of blocking [26:03:23]
+- Added `skippedDeps` counter and periodic EXEC log for diagnostics
+
+**Remaining issue**: Even after skipping causal deps, strong ops on remote replicas (3,4) are slow to commit (geo latency + super quorum = 4/5), causing execute to stall waiting for strong deps. This is a fundamental EPaxos architectural issue — commit and execute are decoupled, and the Tarjan SCC execution requires ALL deps to be committed before any instance in the SCC can execute.
+
+**Status**: 🔄 IN PROGRESS — EPaxos `Dreply=true` works, EPaxos-HO `Dreply=true` still too slow (~148 ops/sec). See Phase 123.4.
+
+#### Phase 123.4: Investigate EPaxos-HO Execute Deadlock (Dreply=true)
+
+**Goal**: Understand why EPaxos-HO execute stalls with `Dreply=true` while vanilla EPaxos works fine. Compare with Orca (`/home/users/zihao/Orca/src/hybrid/`) reference implementation.
+
+**Key findings from Orca comparison**:
+
+1. **Orca `executeCommands` skips WAITING instances** (hybrid.go:730-732):
+   ```go
+   if r.InstanceSpace[q][inst] != nil && r.InstanceSpace[q][inst].State == WAITING {
+       continue  // skip, don't break
+   }
+   ```
+   Our EPaxos-HO `executeCommands` does NOT handle WAITING state — it either breaks or tries to execute, potentially blocking the loop.
+
+2. **Orca `strongconnect` checks WAITING state** (hybrid-exec.go:285):
+   ```go
+   if (Status != STRONGLY_COMMITTED && Status != CAUSALLY_COMMITTED) || State == WAITING {
+       return false
+   }
+   ```
+   Our EPaxos-HO `strongconnect` does NOT check for WAITING state.
+
+3. **Both Orca and our code have the same `nil → return false` pattern** in strongconnect (line 271-272 in Orca). So skipping nil causal deps alone won't fix it — strong deps that are nil also block.
+
+**Diagnosis from EXEC logs**:
+- `execedUpTo=[3704 3920 3755 -1 -1]` — replica 3/4 ExecedUpTo stuck at -1
+- `outStrong=2302` stuck — strong ops not committing (quorum issue, not execute issue)
+- `skippedCausalDeps=1` — almost no causal deps skipped (not the main problem)
+- `alive=[false true true true true]` — alive[0]=false is normal (self, not connected)
+
+**Hypothesis**: The execute deadlock has TWO layers:
+1. **Commit-level**: strong ops need super quorum (4/5) but geo latency + causal broadcast traffic causes peer connection issues → strong ops stuck in PREACCEPTED
+2. **Execute-level**: even committed instances can't execute because their deps point to instances on replica 3/4 that haven't been committed/propagated yet
+
+**Tasks**:
+- [x] 123.4a-h: Full comparison with Orca reference implementation [26:03:23]
+
+**Comparison findings**:
+
+| Aspect | Orca (reference) | EPaxos-HO (ours) |
+|---|---|---|
+| Dreply default | **true** | was false (changed to true in 123.2) |
+| Mixed batch | causal + strong → **separate instances** | unified single instance |
+| WAITING mechanism | follower delays PreAcceptReply until causal dep arrives | **missing entirely** |
+| conflicts map | causal writes to conflicts (safe: WAITING protects) | causal writes to conflicts (**unsafe: no WAITING**) |
+| strongconnect | checks WAITING state | does not check |
+| executeCommands | skips WAITING instances (continue) | does not handle WAITING |
+
+**Root cause chain**: causal instance → `r.conflicts` → strong ops dep on causal → follower hasn't received causal (async broadcast) → Orca delays reply via WAITING → we reply immediately → dep graph inconsistent at execute time → `strongconnect` finds nil deps → stall.
+
+#### Phase 123.5: Port WAITING Mechanism from Orca to EPaxos-HO
+
+**Goal**: Port the WAITING mechanism from Orca's hybrid implementation so that followers delay PreAcceptReply until causal dependencies have arrived, ensuring the dep graph is consistent at execute time. This is the root cause of EPaxos-HO's execute deadlock with `Dreply=true`.
+
+**Reference files**:
+- Orca handlePreAccept: `/home/users/zihao/Orca/src/hybrid/hybrid.go:2339-2532`
+- Orca trackWaitingDependency: search for `trackWaitingDependency` in hybrid.go
+- Orca waitPreAcceptHandle: search for `waitPreAcceptHandle` in hybrid.go
+- Orca executeCommands WAITING skip: hybrid.go:730-732
+- Orca strongconnect WAITING check: hybrid-exec.go:285
+
+**Plan**:
+
+- [x] 123.5a: **Split mixed batches into separate instances** (match Orca design)
+  - In `handlePropose`, when batch has both causal and strong cmds, create TWO instances:
+    one via `startCausalCommit` (causal cmds) and one via strong PreAccept path (strong cmds).
+  - Removed `startUnifiedCommit` entirely.
+  - Fixed slow path guard: only enter slow path when fast path is provably impossible
+    (`!allEqual || !allCommitted || !isInitialBallot`), preventing premature slow path
+    with new `FastQuorumSize() = (3*N)/4+1` (where fast quorum > slow quorum).
+  - All 68 epaxos-ho tests pass.
+
+- [ ] 123.5b: **Port `trackWaitingDependency`** from Orca
+  - Add function that checks if a PreAccept's causal deps exist on this replica.
+  - If any causal dep is nil (not yet received), set instance `State = WAITING`.
+  - Return the count of missing deps (cardinality).
+
+- [ ] 123.5c: **Port `waitPreAcceptHandle`** goroutine from Orca
+  - When `trackWaitingDependency` returns cardinality > 0, spawn a goroutine that:
+    1. Polls until all missing causal deps arrive (sleep 1ms between checks)
+    2. Re-computes attributes (`updateStrongAttributes2`)
+    3. Sets `State = READY`
+    4. Sends PreAcceptReply to leader
+  - Add timeout (e.g., 10s) to prevent infinite wait.
+
+- [ ] 123.5d: **Update `handlePreAccept` (follower side)** to use WAITING
+  - After computing deps, call `trackWaitingDependency`.
+  - If cardinality == 0: reply immediately (current behavior).
+  - If cardinality > 0: set WAITING, spawn `waitPreAcceptHandle`, return without replying.
+
+- [ ] 123.5e: **Update `executeCommands`** to skip WAITING instances
+  - Add check: `if inst.State == WAITING { continue }` (matching Orca hybrid.go:730-732)
+
+- [ ] 123.5f: **Update `strongconnect`** to check WAITING state
+  - Add: `|| e.r.InstanceSpace[q][i].State == WAITING` to the "not committed" check
+    (matching Orca hybrid-exec.go:285)
+  - This makes SCC return false for WAITING deps, deferring execution.
+
+- [ ] 123.5g: **Update `executeCommand`** to check WAITING state
+  - Add early return false if `inst.State == WAITING` (matching Orca hybrid-exec.go:182)
+
+- [ ] 123.5h: **Build and unit test**
+  - `go build -o swiftpaxos-dist .`
+  - `go test ./epaxos-ho/` — update existing tests, add WAITING state tests
+
+- [ ] 123.5i: **Spot test on AWS** (t=4 and t=32, w=5%, weakRatio=50)
+  - Verify EPaxos-HO with Dreply=true completes without stalls
+  - Compare throughput/latency with vanilla EPaxos Dreply=true
+
+- [ ] 123.5j: **Full experiment run** — Exp 2.1 and Exp 2.2 with fixed EPaxos/EPaxos-HO
+  - Run exp2.1 (throughput vs latency sweep) and exp2.2 (conflict sweep)
+  - Update CSV and regenerate plots
+
+**How to run on AWS**:
+
+```bash
+# 1. Start AWS instances (all 5 regions)
+export PATH="$HOME/.local/bin:$PATH"
+for region in us-east-2 us-east-1 us-west-2 eu-west-1 ca-central-1; do
+    ids=$(aws ec2 describe-instances --region "$region" \
+        --filters "Name=tag:Project,Values=swiftpaxos" "Name=instance-state-name,Values=stopped" \
+        --query 'Reservations[].Instances[].InstanceId' --output text)
+    [[ -n "$ids" ]] && aws ec2 start-instances --region "$region" --instance-ids $ids
+done
+
+# 2. Wait ~30s, then get new IPs (IPs may change after stop/start)
+for region in us-east-2 us-east-1 us-west-2 eu-west-1 ca-central-1; do
+    aws ec2 describe-instances --region "$region" \
+        --filters "Name=tag:Project,Values=swiftpaxos" "Name=instance-state-name,Values=running" \
+        --query 'Reservations[].Instances[].[PublicIpAddress,Tags[?Key==`Name`].Value|[0]]' --output text
+done
+
+# 3. Update IPs in configs (order: r0 r1 r2 r3 r4 c0 c1 c2)
+#    r0=us-east-1, r1=us-east-2, r2=us-west-2, r3=eu-west-1, r4=ca-central-1
+#    c0=us-east-2(client), c1=us-east-1(client), c2=us-west-2(client)
+bash scripts/setup-aws-ips.sh <r0> <r1> <r2> <r3> <r4> <c0> <c1> <c2>
+
+# 4. SSH config: each region uses ~/.ssh/swiftpaxos-<region>.pem
+#    Ensure ~/.ssh/config has entries (see Phase 123 notes)
+
+# 5. Build and spot test
+go build -o swiftpaxos-dist .
+SSH_USER=ubuntu REMOTE_WORK_DIR=/home/ubuntu/swiftpaxos \
+  timeout 300 ./run-multi-client.sh -d -c configs/exp2.1-base.conf -t 32 \
+  -o results/test-epaxosho-waiting-t32
+
+# 6. Full experiments
+SSH_USER=ubuntu REMOTE_WORK_DIR=/home/ubuntu/swiftpaxos \
+  bash scripts/eval-exp2.1-final.sh results/eval-exp2.1-waiting
+SSH_USER=ubuntu REMOTE_WORK_DIR=/home/ubuntu/swiftpaxos \
+  bash scripts/eval-exp2.2-final.sh results/eval-exp2.2-waiting
+
+# 7. Stop instances when done
+for region in us-east-2 us-east-1 us-west-2 eu-west-1 ca-central-1; do
+    ids=$(aws ec2 describe-instances --region "$region" \
+        --filters "Name=tag:Project,Values=swiftpaxos" "Name=instance-state-name,Values=running" \
+        --query 'Reservations[].Instances[].InstanceId' --output text)
+    [[ -n "$ids" ]] && aws ec2 stop-instances --region "$region" --instance-ids $ids
+done
+```
+
+**Estimated LOC**: ~150 (trackWaitingDependency + waitPreAcceptHandle + handlePropose split + execute checks)
+
+**Spot test results (t=32, w=5%, weakRatio=50)**:
+| Config | Throughput | Strong p50 | Notes |
+|---|---|---|---|
+| EPaxos Dreply=false (old) | 24,121 | 60ms | Unfair: skip execute |
+| EPaxos Dreply=true | 18,027 | 83ms | Correct |
+| EPaxos-HO Dreply=false (old) | 53,735 | 67ms | Unfair: skip execute |
+| EPaxos-HO Dreply=true | ~148 | 67ms | Broken: execute deadlock |
+
+---
+
 ## Legend
 
 - `[ ]` - Undone task
