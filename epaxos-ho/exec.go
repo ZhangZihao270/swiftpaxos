@@ -10,7 +10,8 @@ import (
 	"github.com/imdea-software/swiftpaxos/state"
 )
 
-const EXEC_SLEEP_TIME_NS = 1000 // 1 microsecond
+const EXEC_SLEEP_TIME_NS = 1000    // 1 microsecond (for timeout counter)
+const EXEC_BACKOFF = time.Millisecond // sleep when no progress
 
 var execVAL state.Value // default zero value returned for discarded writes
 
@@ -84,11 +85,19 @@ func (r *Replica) executeCommands() {
 			}
 		}
 		if !executed {
-			time.Sleep(EXEC_SLEEP_TIME_NS)
+			time.Sleep(EXEC_BACKOFF)
 		}
 		if time.Since(lastLog) > 5*time.Second {
 			skipped := atomic.LoadInt64(&r.exec.skippedDeps)
-			log.Printf("EXEC: executed=%d skippedCausalDeps=%d execedUpTo=%v", execCount, skipped, r.ExecedUpTo)
+			log.Printf("EXEC: executed=%d skippedCausalDeps=%d sccCalls=%d avgVisited=%.1f maxDepth=%d execedUpTo=%v",
+				execCount, skipped, r.exec.totalSCCCalls,
+				func() float64 {
+					if r.exec.totalSCCCalls == 0 {
+						return 0
+					}
+					return float64(r.exec.totalSCCVisited) / float64(r.exec.totalSCCCalls)
+				}(),
+				r.exec.maxDepthSeen, r.ExecedUpTo)
 			lastLog = time.Now()
 		}
 	}
@@ -217,10 +226,26 @@ var sccStack []*Instance = make([]*Instance, 0, 100)
 func (e *Exec) findSCC(root *Instance) bool {
 	index := 1
 	sccStack = sccStack[0:0]
-	return e.strongconnect(root, &index)
+	e.sccVisited = 0
+	e.sccMaxDepth = 0
+	e.sccDepth = 0
+	result := e.strongconnect(root, &index)
+	e.totalSCCCalls++
+	e.totalSCCVisited += int64(e.sccVisited)
+	if e.sccMaxDepth > e.maxDepthSeen {
+		e.maxDepthSeen = e.sccMaxDepth
+	}
+	return result
 }
 
 func (e *Exec) strongconnect(v *Instance, index *int) bool {
+	e.sccVisited++
+	e.sccDepth++
+	if e.sccDepth > e.sccMaxDepth {
+		e.sccMaxDepth = e.sccDepth
+	}
+	defer func() { e.sccDepth-- }()
+
 	v.Index = *index
 	v.Lowlink = *index
 	*index++

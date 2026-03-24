@@ -8945,6 +8945,50 @@ per executed instance and the ~260 executions/sec rate.
 | EPaxos-HO Dreply=false (old) | 53,735 | 67ms | Unfair: skip execute |
 | EPaxos-HO Dreply=true (no WAITING) | ~148 | 67ms | Broken: execute deadlock |
 | EPaxos-HO Dreply=true (with WAITING) | ~459 | 1050ms | WAITING works, execute loop bottleneck |
+| EPaxos-HO Dreply=true (break→continue fix) | ~2710 | 1050ms | Execute progresses, scan too slow |
+| EPaxos-HO Dreply=true (backoff fix) | ~2712 | 1050ms | CPU fixed, latency unchanged |
+| EPaxos-HO Dreply=true (outStrong fix) | ~43 | 1052ms | outStrong decrements, but latency unchanged |
+| EPaxos-HO Dreply=true (retry disabled) | 0 | — | Completely stuck: retry is REQUIRED for commit |
+
+#### Phase 123.7: EPaxos-HO PreAcceptReply Loss — Root Cause of 1050ms Latency
+
+**Critical finding**: EPaxos-HO's `retryStuckInstances` (1s interval) is **required** for normal
+operation — without it, strong ops never commit (0 throughput). This means the first PreAccept
+broadcast's replies are being **lost or not processed**, and commit only succeeds via the 1s retry.
+
+**Evidence**:
+- Disabling `retryStuckInstances` → 0 throughput (no commits at all)
+- With retry enabled → latency ≈ 1050ms ≈ 1s retry interval (commit happens on retry, not first attempt)
+- Vanilla EPaxos (same super quorum, same Dreply=true) → 56ms latency, no retry needed
+- EPaxos-HO with weakRatio=0 (pure strong, no causal) → still 1052ms (not a causal issue)
+
+**Hypothesis**: EPaxos-HO's PreAccept handling on followers differs from vanilla EPaxos in a way
+that causes the first PreAcceptReply/PreAcceptOK to be lost or never sent. Possible causes:
+1. **WAITING mechanism intercepts PreAccept**: `handlePreAccept` calls `trackWaitingDependency`
+   and may set WAITING even when there are no causal deps (bug in CL check?)
+2. **PreAcceptOK vs PreAcceptReply routing**: EPaxos-HO has a separate `preAcceptOKChan` that
+   vanilla EPaxos doesn't have — possible channel/RPC registration mismatch
+3. **Event loop starvation**: EPaxos-HO's event loop has more channels (causalCommitChan,
+   commitShortChan, preAcceptOKChan) — the `select` may starve PreAcceptReply processing
+4. **handlePreAccept reply path differs**: EPaxos-HO's follower may not send replies for certain
+   conditions that vanilla EPaxos handles
+
+**Analysis findings (123.7b/c/d)**:
+- [x] 123.7b: Compared EPaxos-HO `handlePreAccept` line-by-line with vanilla EPaxos.
+  No code bug found. Key differences: (1) vanilla EPaxos skips `allCommitted` check for N≤7
+  while EPaxos-HO always checks it — causes premature slow path at count 2 when deps uncommitted;
+  (2) EPaxos-HO uses in-place merge on `inst.Deps` (shared slice with `lb.originalDeps`) while
+  vanilla EPaxos merges into `lb.Deps` separately; (3) EPaxos-HO slow path threshold is N/2=2 vs
+  vanilla's FastQuorumSize()-1=3. None of these explain 0 throughput with retry disabled.
+- [x] 123.7c: `trackWaitingDependency` correctly checks `cl[i] == int32(state.CAUSAL)` — won't
+  trigger for pure strong batches (CAUSAL=4, STRONG=5, NONE=0). Confirmed no bug.
+- [x] 123.7d: PreAcceptOK channel registration is correct — registered in same order on all
+  replicas, codes match (code 13 = PreAcceptOK → preAcceptOKChan). Confirmed no bug.
+
+**Next steps**:
+- [ ] 123.7a+e: Add diagnostic counters to EPaxos-HO for runtime debugging.
+  Follower: count PreAccepts received, replies sent (Reply vs OK), WAITING triggered, early returns.
+  Leader: count replies received (Reply vs OK), fast/slow commits, dropped replies (status!=PREACCEPTED).
 
 **How to run on AWS**:
 
