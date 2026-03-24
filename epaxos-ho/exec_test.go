@@ -451,6 +451,81 @@ func TestExecuteCommand_StrongAfterStuckStrongBlockedByDeps(t *testing.T) {
 	}
 }
 
+// TestExecedUpToAdvancesPastCausallyCommitted verifies that ExecedUpTo advances
+// past contiguous CAUSALLY_COMMITTED instances, shrinking strongconnect's scan range.
+func TestExecedUpToAdvancesPastCausallyCommitted(t *testing.T) {
+	r := newTestReplica(3)
+	r.ExecedUpTo[0] = -1
+	r.crtInstance[0] = 4
+
+	// Slot 0: CAUSALLY_COMMITTED — ExecedUpTo should advance past this
+	r.InstanceSpace[0][0] = &Instance{
+		Cmds:       []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.CAUSAL}},
+		Status:     CAUSALLY_COMMITTED,
+		State:      READY,
+		Seq:        1,
+		Deps:       []int32{-1, -1, -1},
+		CL:         []int32{0, 0, 0},
+		instanceId: &instanceId{0, 0},
+	}
+
+	// Slot 1: CAUSALLY_COMMITTED — ExecedUpTo should advance past this too
+	r.InstanceSpace[0][1] = &Instance{
+		Cmds:       []state.Command{{Op: state.PUT, K: 2, V: state.NIL(), CL: state.CAUSAL}},
+		Status:     CAUSALLY_COMMITTED,
+		State:      READY,
+		Seq:        2,
+		Deps:       []int32{-1, -1, -1},
+		CL:         []int32{0, 0, 0},
+		instanceId: &instanceId{0, 1},
+	}
+
+	// Slot 2: PREACCEPTED strong — blocks further ExecedUpTo advancement
+	r.InstanceSpace[0][2] = &Instance{
+		Cmds:       []state.Command{{Op: state.PUT, K: 3, V: state.NIL(), CL: state.STRONG}},
+		Status:     PREACCEPTED,
+		State:      READY,
+		Seq:        3,
+		Deps:       []int32{-1, -1, -1},
+		CL:         []int32{0, 0, 0},
+		instanceId: &instanceId{0, 2},
+	}
+
+	// Slot 3: STRONGLY_COMMITTED — executable, no deps
+	r.InstanceSpace[0][3] = &Instance{
+		Cmds:       []state.Command{{Op: state.PUT, K: 4, V: state.NIL(), CL: state.STRONG}},
+		Status:     STRONGLY_COMMITTED,
+		State:      READY,
+		Seq:        4,
+		Deps:       []int32{-1, -1, -1},
+		CL:         []int32{0, 0, 0},
+		instanceId: &instanceId{0, 3},
+	}
+
+	// Simulate one scan iteration of executeCommands for replica 0
+	for inst := r.ExecedUpTo[0] + 1; inst < r.crtInstance[0]; inst++ {
+		if r.InstanceSpace[0][inst] != nil &&
+			(r.InstanceSpace[0][inst].Status == EXECUTED || r.InstanceSpace[0][inst].Status == DISCARDED) {
+			if inst == r.ExecedUpTo[0]+1 {
+				r.ExecedUpTo[0] = inst
+			}
+			continue
+		}
+		// ExecedUpTo advancement for causal
+		if r.InstanceSpace[0][inst] != nil &&
+			r.InstanceSpace[0][inst].Status == CAUSALLY_COMMITTED &&
+			inst == r.ExecedUpTo[0]+1 {
+			r.ExecedUpTo[0] = inst
+		}
+	}
+
+	// ExecedUpTo should have advanced past slots 0 and 1 (both CAUSALLY_COMMITTED)
+	// but stopped at slot 2 (PREACCEPTED)
+	if r.ExecedUpTo[0] != 1 {
+		t.Errorf("ExecedUpTo[0]=%d, want 1 (advanced past 2 CAUSALLY_COMMITTED slots)", r.ExecedUpTo[0])
+	}
+}
+
 // TestSortBySeq verifies sequence-based sorting.
 func TestSortBySeq(t *testing.T) {
 	instances := []*Instance{

@@ -40,6 +40,16 @@ func (r *Replica) executeCommands() {
 					continue
 				}
 
+				// Advance ExecedUpTo past CAUSALLY_COMMITTED instances.
+				// Causal instances don't participate in strong SCC ordering,
+				// so keeping ExecedUpTo behind them bloats strongconnect's
+				// scan range (ExecedUpTo+1 to deps[q]) causing O(N*range) overhead.
+				if r.InstanceSpace[q][inst] != nil &&
+					r.InstanceSpace[q][inst].Status == CAUSALLY_COMMITTED &&
+					inst == r.ExecedUpTo[q]+1 {
+					r.ExecedUpTo[q] = inst
+				}
+
 				if r.InstanceSpace[q][inst] == nil ||
 					r.InstanceSpace[q][inst].State == WAITING ||
 					(r.InstanceSpace[q][inst].Status != STRONGLY_COMMITTED && r.InstanceSpace[q][inst].Status != CAUSALLY_COMMITTED) {

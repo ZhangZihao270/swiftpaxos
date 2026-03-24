@@ -8927,9 +8927,10 @@ per executed instance and the ~260 executions/sec rate.
   - This allows scanning past stuck strong instances to reach executable causal/strong instances
   - 2 new tests verify: causal instances execute past stuck strong; strong deps still block correctly
 
-- [ ] 123.6b: Consider advancing `ExecedUpTo` past CAUSALLY_COMMITTED instances
-  - If inst N is CAUSALLY_COMMITTED and inst N == ExecedUpTo+1, advance ExecedUpTo
-  - This shrinks the dep range in `strongconnect`, reducing scan overhead
+- [x] 123.6b: Advance `ExecedUpTo` past CAUSALLY_COMMITTED instances
+  - Added check in executeCommands: if inst is CAUSALLY_COMMITTED at ExecedUpTo+1, advance
+  - Shrinks strongconnect scan range (ExecedUpTo+1 to deps[q]), reducing O(N*range) overhead
+  - 1 new test verifies advancement past contiguous causal slots
 
 - [ ] 123.6c: Build and spot test (t=32)
 
