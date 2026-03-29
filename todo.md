@@ -9253,10 +9253,10 @@ beyond what strong-strong conflicts already cause.
 - `configs/exp-tao.conf`: TAO-like workload — writes=1, weakRatio=95, weakWrites=0, scanRatio=44, scanCount=1000, zipfSkew=0.8, keySpace=1M
 - `config/config_test.go`: added TestExpTaoConfigFile to verify parsing
 
-### ⬜ Step 5: Eval script
-- `scripts/eval-exp-tao.sh`: run curpho, curpht, curp-baseline (and optionally raftht, epaxos)
-- Thread sweep: 1, 2, 4, 8, 16, 32, 64, 96
-- 3 reps each
+### ✅ Step 5: Eval script [26:03:29]
+- `scripts/eval-exp-tao.sh`: runs curpho, curpht, curp-baseline with TAO workload
+- Thread sweep: 1, 2, 4, 8, 16, 32, 64, 96, 3 reps each
+- Baseline disables scanRatio (all ops strong); generates summary CSV
 
 ### ⬜ Step 6: Plot script
 - `scripts/plot-exp-tao.py`: throughput vs latency + CDF figure (similar to exp3.1 layout)
