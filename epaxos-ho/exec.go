@@ -74,7 +74,21 @@ func (r *Replica) executeCommands() {
 		}
 		if time.Since(lastLog) > 5*time.Second {
 			skipped := atomic.LoadInt64(&r.exec.skippedDeps)
-			log.Printf("EXEC: executed=%d skippedCausalDeps=%d execedUpTo=%v", execCount, skipped, r.ExecedUpTo)
+			execReplies := atomic.LoadInt64(&r.exec.execReplyCount)
+			sccCount := atomic.LoadInt64(&findSCCCount)
+			depsTotal := atomic.LoadInt64(&totalDepsSize)
+			sDeps := atomic.LoadInt64(&totalStrongDeps)
+			wDeps := atomic.LoadInt64(&totalWeakDeps)
+			nDeps := atomic.LoadInt64(&totalNilDeps)
+			avgDeps := float64(0)
+			avgSDeps := float64(0)
+			avgWDeps := float64(0)
+			if sccCount > 0 {
+				avgDeps = float64(depsTotal) / float64(sccCount)
+				avgSDeps = float64(sDeps) / float64(sccCount)
+				avgWDeps = float64(wDeps) / float64(sccCount)
+			}
+			log.Printf("EXEC: executed=%d skippedCausalDeps=%d execReply=%d sccCalls=%d avgDeps=%.1f(strong=%.1f weak=%.1f nil=%d) execedUpTo=%v", execCount, skipped, execReplies, sccCount, avgDeps, avgSDeps, avgWDeps, nDeps, r.ExecedUpTo)
 			lastLog = time.Now()
 		}
 	}
@@ -197,9 +211,40 @@ var sccStack []*Instance = make([]*Instance, 0, 100)
 
 // findSCC finds the strongly connected component containing root and
 // executes all commands in it. Returns false if dependencies are not ready.
+var totalDepsSize int64
+var findSCCCount int64
+var totalStrongDeps int64
+var totalWeakDeps int64
+var totalNilDeps int64
+
 func (e *Exec) findSCC(root *Instance) bool {
 	index := 1
 	sccStack = sccStack[0:0]
+	// Count deps size and strong/weak breakdown
+	depsSize := int64(0)
+	strongDeps := int64(0)
+	weakDeps := int64(0)
+	nilDeps := int64(0)
+	for q := 0; q < e.r.N; q++ {
+		if root.Deps[q] > e.r.ExecedUpTo[int32(q)] {
+			depsSize += int64(root.Deps[q] - e.r.ExecedUpTo[int32(q)])
+			for i := e.r.ExecedUpTo[int32(q)] + 1; i <= root.Deps[q]; i++ {
+				inst := e.r.InstanceSpace[q][i]
+				if inst == nil || inst.Cmds == nil || len(inst.Cmds) == 0 {
+					nilDeps++
+				} else if inst.Cmds[0].CL == state.CAUSAL {
+					weakDeps++
+				} else {
+					strongDeps++
+				}
+			}
+		}
+	}
+	atomic.AddInt64(&totalDepsSize, depsSize)
+	atomic.AddInt64(&totalStrongDeps, strongDeps)
+	atomic.AddInt64(&totalWeakDeps, weakDeps)
+	atomic.AddInt64(&totalNilDeps, nilDeps)
+	atomic.AddInt64(&findSCCCount, 1)
 	return e.strongconnect(root, &index)
 }
 
@@ -229,21 +274,12 @@ func (e *Exec) strongconnect(v *Instance, index *int) bool {
 				return false
 			}
 			if e.r.InstanceSpace[q][i] == nil || e.r.InstanceSpace[q][i].Cmds == nil {
-				// Dep instance not yet received — skip instead of blocking.
-				// This can happen when a causal instance was committed on the
-				// leader but not yet propagated to this replica.
-				atomic.AddInt64(&e.skippedDeps, 1)
-				continue
+				return false
 			}
 			if e.r.InstanceSpace[q][i].Status == EXECUTED || e.r.InstanceSpace[q][i].Status == DISCARDED {
 				continue
 			}
 			if e.r.InstanceSpace[q][i].Status != STRONGLY_COMMITTED && e.r.InstanceSpace[q][i].Status != CAUSALLY_COMMITTED {
-				// Not committed yet — skip if causal, block if strong
-				if e.r.InstanceSpace[q][i].Cmds != nil && e.r.InstanceSpace[q][i].Cmds[0].CL == state.CAUSAL {
-					atomic.AddInt64(&e.skippedDeps, 1)
-					continue
-				}
 				return false
 			}
 
@@ -283,6 +319,7 @@ func (e *Exec) strongconnect(v *Instance, index *int) bool {
 					flag = 1
 					val := w.Cmds[idx].Execute(e.r.State)
 					if e.r.Dreply && w.lb != nil && w.lb.clientProposals != nil && idx < len(w.lb.clientProposals) {
+						atomic.AddInt64(&e.execReplyCount, 1)
 						e.r.ReplyProposeTS(
 							&defs.ProposeReplyTS{
 								OK:        TRUE,

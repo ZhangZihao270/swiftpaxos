@@ -23,7 +23,7 @@ WRITE_GROUPS=(5 50)
 REPS=1
 MAX_RETRIES=2
 
-ALL_HOSTS=(13.58.3.12 100.26.140.158 52.35.107.158 3.250.222.202 15.222.250.161)
+ALL_HOSTS=(34.236.191.149 18.221.173.128 16.147.240.15 108.130.8.61 35.183.203.84)
 
 CONFIG="/tmp/eval-exp2.1-final-$$.conf"
 cp configs/exp2.1-base.conf "$CONFIG"
@@ -32,7 +32,7 @@ trap 'rm -f "$CONFIG"' EXIT
 # Protocol configs: name, protocol-value, weakRatio
 declare -a PROTOCOLS=(
     "epaxosho:epaxosho:50"
-    "epaxos:epaxos:0"
+    "epaxos:epaxosho:0"
 )
 
 mkdir -p "$EXP_DIR"

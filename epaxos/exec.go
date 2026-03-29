@@ -2,10 +2,14 @@ package epaxos
 
 import (
 	"sort"
+	"sync/atomic"
 
 	"github.com/imdea-software/swiftpaxos/replica/defs"
 	"github.com/imdea-software/swiftpaxos/state"
 )
+
+var execReplyCount int64 // count of replies sent from execute phase
+var execNoReplyCount int64 // count of executions without reply (not leader)
 
 const (
 	WHITE int8 = iota
@@ -119,11 +123,12 @@ func (e *Exec) strongconnect(v *Instance, index *int) bool {
 		sort.Sort(NodeArray(list))
 		for _, w := range list {
 			for idx := 0; idx < len(w.Cmds); idx++ {
-				shouldRespond := e.r.Dreply && w.Lb != nil && w.Lb.ClientProposals != nil
+				shouldRespond := e.r.Dreply && w.Lb != nil && w.Lb.ClientProposals != nil && idx < len(w.Lb.ClientProposals)
 				if w.Cmds[idx].Op == state.NONE {
 					// nothing to do
 				} else if shouldRespond {
 					val := w.Cmds[idx].Execute(e.r.State)
+					atomic.AddInt64(&execReplyCount, 1)
 					e.r.ReplyProposeTS(
 						&defs.ProposeReplyTS{
 							OK:        TRUE,
@@ -134,6 +139,7 @@ func (e *Exec) strongconnect(v *Instance, index *int) bool {
 						w.Lb.ClientProposals[idx].Mutex)
 				} else if w.Cmds[idx].Op == state.PUT {
 					w.Cmds[idx].Execute(e.r.State)
+					atomic.AddInt64(&execNoReplyCount, 1)
 				}
 			}
 			w.Status = EXECUTED

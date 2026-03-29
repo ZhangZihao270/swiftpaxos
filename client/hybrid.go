@@ -21,7 +21,7 @@ const defaultReplyTimeout = 10 * time.Second
 // tputTracker reports per-second throughput as TPUT lines for time-series analysis.
 // Usage: create with newTputTracker(), call inc() for each completed op, stop() when done.
 type tputTracker struct {
-	ops    atomic.Int64
+	ops    int64 // accessed via sync/atomic
 	stopCh chan struct{}
 	done   chan struct{}
 }
@@ -38,11 +38,11 @@ func newTputTracker(prefix string) *tputTracker {
 		for {
 			select {
 			case <-ticker.C:
-				count := t.ops.Swap(0)
+				count := atomic.SwapInt64(&t.ops, 0)
 				log.Printf("TPUT %s %d %d", prefix, time.Now().Unix(), count)
 			case <-t.stopCh:
 				// Emit final partial-second count
-				count := t.ops.Swap(0)
+				count := atomic.SwapInt64(&t.ops, 0)
 				if count > 0 {
 					log.Printf("TPUT %s %d %d", prefix, time.Now().Unix(), count)
 				}
@@ -54,7 +54,7 @@ func newTputTracker(prefix string) *tputTracker {
 }
 
 func (t *tputTracker) inc() {
-	t.ops.Add(1)
+	atomic.AddInt64(&t.ops, 1)
 }
 
 func (t *tputTracker) stop() {

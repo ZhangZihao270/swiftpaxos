@@ -246,8 +246,9 @@ func New(alias string, id int, peerAddrList []string, exec, beacon, durable bool
 // It implements Tarjan's SCC algorithm for strong command ordering
 // and direct execution for causal commands.
 type Exec struct {
-	r           *Replica
-	skippedDeps int64 // count of causal deps skipped during execute (atomic)
+	r             *Replica
+	skippedDeps   int64 // count of causal deps skipped during execute (atomic)
+	execReplyCount int64 // replies sent from execute phase (strong ops, Dreply=true)
 }
 
 // recordInstanceMetadata appends instance metadata to stable storage.
@@ -467,7 +468,7 @@ func (r *Replica) run() {
 // --- Protocol handlers ---
 
 func (r *Replica) handlePropose(propose *defs.GPropose) {
-	batchSize := len(r.ProposeChan) + 1
+	batchSize := 1 // disable batching for fair comparison
 
 	// Classify proposals by consistency level into separate batches.
 	// Matching Orca design: causal and strong commands get SEPARATE instances.
@@ -549,8 +550,10 @@ func (r *Replica) startCausalCommit(replicaId int32, instance int32, ballot int3
 
 	r.updateCommitted(replicaId)
 
-	// Reply to clients at commit time for causal ops (1-RTT fast path)
-	if r.InstanceSpace[replicaId][instance].lb.clientProposals != nil && !r.Dreply {
+	// Reply to clients at commit time for causal ops (1-RTT fast path).
+	// Causal ops always reply at commit regardless of Dreply setting.
+	// Clear clientProposals after reply to prevent double-reply in executeCausalCommand.
+	if r.InstanceSpace[replicaId][instance].lb.clientProposals != nil {
 		for i := 0; i < len(r.InstanceSpace[replicaId][instance].lb.clientProposals); i++ {
 			prop := r.InstanceSpace[replicaId][instance].lb.clientProposals[i]
 			r.clientReplyCount++
@@ -564,6 +567,7 @@ func (r *Replica) startCausalCommit(replicaId int32, instance int32, ballot int3
 				prop.Reply,
 				prop.Mutex)
 		}
+		r.InstanceSpace[replicaId][instance].lb.clientProposals = nil
 	}
 
 	r.updateCausalConflicts(cmds, replicaId, instance, seq, true)
@@ -1902,8 +1906,8 @@ func (r *Replica) handlePreAcceptReply(pareply *PreAcceptReply) {
 		r.InstanceSpace[pareply.Replica][pareply.Instance].State = READY
 		r.bcastStrongCommit(pareply.Replica, pareply.Instance, inst.Cmds, inst.Seq, inst.Deps, inst.CL, state.STRONG)
 
-	} else if inst.lb.preAcceptOKs >= r.N/2 && (!inst.lb.allEqual || !allCommitted || !isInitialBallot(inst.bal)) {
-		// Slow path: move to Accept phase (only when fast path is provably impossible)
+	} else if inst.lb.preAcceptOKs >= r.N/2 {
+		// Slow path: move to Accept phase
 		r.Stats.M["slow"]++
 		if !allCommitted {
 			r.Stats.M["weird"]++
@@ -1973,8 +1977,8 @@ func (r *Replica) handlePreAcceptOK(pareply *PreAcceptOK) {
 
 		r.bcastStrongCommit(r.Id, pareply.Instance, inst.Cmds, inst.Seq, inst.Deps, inst.CL, state.STRONG)
 
-	} else if inst.lb.preAcceptOKs >= r.N/2 && (!inst.lb.allEqual || !allCommitted || !isInitialBallot(inst.bal)) {
-		// Slow path (only when fast path is provably impossible)
+	} else if inst.lb.preAcceptOKs >= r.N/2 {
+		// Slow path: move to Accept phase
 		r.Stats.M["slow"]++
 		inst.Status = ACCEPTED
 		r.bcastAccept(r.Id, pareply.Instance, inst.bal, int32(len(inst.Cmds)), inst.Seq, inst.Deps, inst.CL)

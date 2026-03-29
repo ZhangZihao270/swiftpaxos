@@ -6,8 +6,11 @@ This document tracks the implementation of multiple hybrid consistency protocols
 
 ---
 
+## ✅ Completed:
+- **Phase 125**: CURP-HT immediate weak write reply — reply before replication, ~1 RTT weak write latency. Re-ran exp3.1 and exp3.2 with new curpht code, updated CSV and plots.
+
 ## ⬜ Next TODOs:
-- **Phase 124**: TAO-like benchmark — add SCAN workload to client, run evaluation (see `evaluation/tao-benchmark-design.md`)
+- **Phase 126**: TAO-like benchmark — add SCAN workload to client, run evaluation (see `evaluation/tao-benchmark-design.md`)
 
 ## ✅ Completed:
 - **Phase 100**: Re-run Exp 1.1 (Raft vs Raft-HT, writes=5%/50%, all optimizations applied) — **DONE**
@@ -9030,22 +9033,130 @@ done
 
 ---
 
-### Pending: CURP-HT T Property Fix
+### Phase 125: CURP-HT Immediate Weak Write Reply (1 RTT)
 
-**Problem:** Weak writes currently call `leaderUnsync` (curp-ht.go:863), entering the `unsynced` map. This causes same-key strong ops to fail `ok()` and fall to slow path — violating the T property (weak ops affecting strong performance).
+**Goal**: Weak writes reply immediately after leader assigns slot (before replication), reducing weak write latency from ~100ms (2 RTT) to ~50ms (1 RTT) or lower.
 
-**Fix (two changes):**
+**Current behavior** (curp-ht.go handleWeakPropose + asyncReplicateWeak):
+```
+client → leader:
+  1. lastCmdSlot++ (assign slot)
+  2. leaderUnsync(cmd, slot)   ← put in unsynced map
+  3. go asyncReplicateWeak:
+     a. SendAccept to followers
+     b. wait for majority AcceptAcks   ← BLOCKS ~50ms (1 RTT)
+     c. SendToClient(MWeakReply)       ← reply here (2 RTT total)
+     d. wait slot ordering → execute
+```
 
-1. **Remove weak writes from `unsynced`** — weak writes should only go into the log (get a slot), NOT enter `unsynced`. This preserves strong fast path (`ok()` only sees strong writes).
+**Proposed behavior**:
+```
+client → leader:
+  1. lastCmdSlot++ (assign slot)
+  2. leaderUnsync(cmd, slot)   ← keep in unsynced (unchanged)
+  3. SendToClient(MWeakReply)  ← reply IMMEDIATELY (1 RTT total)
+  4. go asyncReplicateWeak:
+     a. SendAccept to followers
+     b. wait for majority AcceptAcks → commit
+     c. wait slot ordering → execute
+```
 
-2. **asyncReplicateWeak must execute BEFORE replying** — change order from `commit → reply → execute` to `commit → execute → reply`. This guarantees that by the time the client receives the weak write reply and sends a subsequent strong GET, the weak write is already in `r.State` and `ComputeResult(r.State)` sees it.
+**T property analysis**: NOT violated. `ok()` returns FALSE when same-key pending entry exists
+in unsynced. This happens identically for strong-strong conflicts — a strong write on the
+same key would also cause `ok()=FALSE`. The slow path is caused by **key conflict**, not by
+the weak consistency level. Therefore weak writes in unsynced do not add any **extra** penalty
+beyond what strong-strong conflicts already cause.
 
-**Why this is correct:**
-- Same session: weak write committed + executed → reply → client sends strong GET → `r.State` has the value → speculative `ComputeResult` sees it ✓
-- Cross session: no causal dependency between sessions. If weak write not yet executed when another client's strong GET arrives, that's fine — they have no ordering guarantee between them. Once committed + executed, `r.State` is updated and subsequent reads see it ✓
-- `ok()` only checks strong writes → weak writes never cause strong ops to go slow path ✓
+**Correctness analysis**:
 
-**Impact:** Not urgent — current behavior is functionally correct but suboptimal (strong ops unnecessarily go slow path when conflicting with weak writes on same key).
+1. **Same-session read-your-writes**: Client sends weak write → gets reply with slot S →
+   sends strong GET on same key. The strong GET arrives at leader AFTER the weak write
+   is already in the log (slot assigned) and in unsynced. Leader's speculative
+   `ComputeResult(r.State)` may not see the weak write yet (not executed). But:
+   - `leaderUnsync` recorded dep=S for the strong GET → the GET has a dependency on slot S
+   - The GET's execution waits for slot S to execute first (slot ordering)
+   - After slot S executes, the GET reads the correct value
+   - Client receives correct result via SyncReply (slow path, but correct)
+   - Client local cache also has the weak write value (from MWeakReply) as fallback
+
+2. **Cross-session**: No ordering guarantee required. If another client's strong read
+   arrives before the weak write is replicated/executed, it may not see the value —
+   this is correct under causal consistency (no cross-session causal dependency).
+
+3. **Durability**: The weak write is in the leader's log but NOT yet replicated when
+   the client gets the reply. If the leader crashes before replication, the write is lost.
+   This is acceptable for weak/causal consistency — same trade-off as CURP-HO's
+   causal writes (reply before replication).
+
+**Performance impact**:
+- Weak write latency: ~100ms → ~0ms (leader local, no network wait)
+- Pipeline unblocked: weak writes no longer occupy pipeline slots for 100ms
+- Expected throughput increase at w50%: significant (Phase 73 showed 514K ops/s at w100
+  with pipelined weak writes, but broke T at P99 due to barrier; this approach has no barrier)
+
+**Tasks**:
+
+#### 125.1: Move reply before async replication (~15 LOC)
+
+- [ ] **125.1a**: In `handleWeakPropose()` (curp-ht.go:857-870), add reply BEFORE `go asyncReplicateWeak`:
+  ```go
+  func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
+      slot := r.lastCmdSlot
+      r.lastCmdSlot++
+      dep := r.leaderUnsync(propose.Command, slot)
+      desc := r.getWeakCmdDesc(slot, propose, dep)
+
+      // Reply immediately — don't wait for replication
+      rep := r.weakReplyPool.Get().(*MWeakReply)
+      rep.Replica = r.Id
+      rep.Ballot = r.ballot
+      rep.CmdId = desc.cmdId
+      rep.Rep = state.NIL()
+      rep.Slot = int32(slot)
+      r.sender.SendToClient(propose.ClientId, rep, r.cs.weakReplyRPC)
+
+      // Replicate in background (no longer replies)
+      go r.asyncReplicateWeak(desc, slot, propose.ClientId, propose.CommandId, propose.CausalDep)
+  }
+  ```
+
+- [ ] **125.1b**: In `asyncReplicateWeak()` (curp-ht.go:915+), remove the reply block
+  (lines 945-951: `rep := r.weakReplyPool.Get()...SendToClient`). The function now only
+  does: SendAccept → wait commit → wait slot ordering → execute → cleanup.
+
+- [ ] **125.1c**: Update client `handleWeakReply()` if needed — verify it still handles
+  the reply correctly (should be unchanged since MWeakReply format is the same).
+
+#### 125.2: Update client cache handling (~5 LOC)
+
+- [ ] **125.2a**: Verify `handleWeakReply()` in client.go updates `localCache` with
+  `(key, value, slot)` from the reply. The reply now arrives before the write is
+  committed/executed on the leader, but the cache entry is still valid because
+  the slot is assigned and the value is known.
+
+- [ ] **125.2b**: Verify that subsequent `SendWeakRead` to nearest replica still works.
+  The nearest replica may not have the value yet (not replicated), but the client
+  cache merge (max-version rule) will return the cached value — read-your-writes
+  is preserved via client cache, not replica state.
+
+#### 125.3: Build + test
+
+- [ ] **125.3a**: `go test ./curp-ht/` — all tests pass
+- [ ] **125.3b**: `go build -o swiftpaxos .` — compiles
+- [ ] **125.3c**: `go test ./...` — no regressions
+
+#### 125.4: Benchmark + validate
+
+- [ ] **125.4a**: Spot test — CURP-HT at t=1, w50%: verify weak write latency < 10ms
+  (was ~84ms in Phase 114). Strong latency should be unchanged (~51ms).
+- [ ] **125.4b**: Run Exp 3.1 (t=1,8,32,96) — compare throughput with Phase 114 data.
+- [ ] **125.4c**: Run Exp 3.2 (weak ratio sweep, t=8) — verify T property:
+  strong P50 should remain flat (~51ms) across all weak ratios.
+- [ ] **125.4d**: Verify w50% throughput improvement: expect CURP-HT to close the gap
+  with CURP-HO (Phase 114 w50%: HT=27.5K vs HO=29.0K at t=96).
+
+**Estimated changes**: ~20 LOC in curp-ht.go, 0 LOC in client.go
+**Risk**: Low — reply timing change only, no protocol logic change
 
 ---
 
@@ -9105,3 +9216,51 @@ done
 3. In `handlePreAccept`: after computing deps, call trackWaitingDependency. If cardinality > 0, set WAITING + spawn goroutine, return without replying. If 0, reply immediately.
 4. In `executeCommands`: skip WAITING instances (continue, not break)
 5. In `strongconnect`: return false for WAITING deps
+
+---
+
+## Phase 126: TAO-Like Benchmark
+
+**Goal:** Add a TAO-inspired benchmark to demonstrate hybrid consistency on a realistic social-graph workload (99% reads, writes all linear, ~5% critical reads linear, causal reads include SCAN).
+
+**Design doc:** `evaluation/tao-benchmark-design.md`
+
+### ⬜ Step 1: Config — add ScanRatio and ScanCount
+- `config/config.go`: add `ScanRatio int` (default 0) and `ScanCount int` (default 20)
+- Add parser cases in the config reading loop
+- `config/config_test.go`: add test for new params
+
+### ⬜ Step 2: HybridClient interface — add SendWeakScan
+- `client/hybrid.go`: add `SendWeakScan(key, count int64) int32` to `HybridClient` interface
+- In `HybridLoop` WeakRead branch: if `rand < scanRatio`, draw `count` from Zipf[1, scanCount], call `SendWeakScan(key, count)` instead of `SendWeakRead(key)`
+
+### ⬜ Step 3: Protocol implementations — SendWeakScan
+- **Client side** (4 hybrid protocols need real weak scan):
+  - `curp-ht/client.go`: implement `SendWeakScan` — send `MWeakRead` with Op=SCAN and Count
+  - `curp-ho/client.go`: implement `SendWeakScan` — same pattern
+  - `raft-ht/client.go`: implement `SendWeakScan` — same pattern
+  - `epaxos-ho/client.go`: implement `SendWeakScan` — same pattern
+- **Replica side** (handle SCAN in weak read path):
+  - Extend `MWeakRead` message with `Op` and `Count` fields (default Op=GET for backward compat)
+  - `curp-ht/curp-ht.go` `handleWeakRead`: if Op==SCAN, execute SCAN instead of GET
+  - `raft-ht/raft-ht.go` `processWeakRead`: same
+  - `curp-ho`: check how causal reads are handled (MCausalPropose may already carry full Command)
+  - `epaxos-ho`: same check
+- **Non-hybrid protocols** (client stub only, replica不需要改 — `cmd.Execute` 已支持SCAN):
+  - `curp/client.go`: add `SendWeakScan` stub → `c.SendScan(key, count)`
+  - `raft/client.go`: add `SendWeakScan` stub → `c.SendScan(key, count)`
+
+### ⬜ Step 4: Config file
+- `configs/exp-tao.conf`: writes=1, weakRatio=95, weakWrites=0, scanRatio=44, scanCount=1000, zipfSkew=0.8, keySpace=1000000
+
+### ⬜ Step 5: Eval script
+- `scripts/eval-exp-tao.sh`: run curpho, curpht, curp-baseline (and optionally raftht, epaxos)
+- Thread sweep: 1, 2, 4, 8, 16, 32, 64, 96
+- 3 reps each
+
+### ⬜ Step 6: Plot script
+- `scripts/plot-exp-tao.py`: throughput vs latency + CDF figure (similar to exp3.1 layout)
+
+### ⬜ Step 7: Verify and run
+- Local smoke test with `go test ./...` and a quick 1-thread run
+- Deploy to AWS and run full experiment

@@ -3,7 +3,9 @@ package epaxos
 import (
 	"encoding/binary"
 	"io"
+	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/imdea-software/swiftpaxos/config"
@@ -88,7 +90,7 @@ func New(alias string, id int, peerAddrList []string, exec, beacon, durable bool
 
 	r.Beacon = beacon
 	r.Durable = durable
-	r.Dreply = false
+	r.Dreply = true
 
 	for i := 0; i < r.N; i++ {
 		r.InstanceSpace[i] = make([]*Instance, MAX_INSTANCE)
@@ -314,8 +316,21 @@ func (r *Replica) executeCommands() {
 		timeout[q] = 0
 	}
 
+	lastLog := time.Now()
 	for !r.Shutdown {
 		executed := false
+		if time.Since(lastLog) > 5*time.Second {
+			r.M.Lock()
+			fast := r.Stats.M["fast"]
+			slow := r.Stats.M["slow"]
+			weird := r.Stats.M["weird"]
+			conflicted := r.Stats.M["conflicted"]
+			r.M.Unlock()
+			log.Printf("EXEC: execReply=%d execNoReply=%d fast=%d slow=%d weird=%d conflicted=%d execedUpTo=%v",
+				atomic.LoadInt64(&execReplyCount), atomic.LoadInt64(&execNoReplyCount),
+				fast, slow, weird, conflicted, r.ExecedUpTo)
+			lastLog = time.Now()
+		}
 		for q := int32(0); q < int32(r.N); q++ {
 			for inst := r.ExecedUpTo[q] + 1; inst <= r.crtInstance[q]; inst++ {
 				if r.InstanceSpace[q][inst] != nil && r.InstanceSpace[q][inst].Status == EXECUTED {
@@ -632,7 +647,7 @@ func depsEqual(deps1 []int32, deps2 []int32) bool {
 // Protocol handlers
 
 func (r *Replica) handlePropose(propose *defs.GPropose) {
-	batchSize := len(r.ProposeChan) + 1
+	batchSize := 1 // disable batching for fair comparison
 	r.M.Lock()
 	r.Stats.M["totalBatching"]++
 	r.Stats.M["totalBatchingSize"] += batchSize

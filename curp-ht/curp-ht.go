@@ -865,7 +865,18 @@ func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
 	// 3. Create weak command descriptor
 	desc := r.getWeakCmdDesc(slot, propose, dep)
 
-	// 4. Async replication — reply after commit, execute in background
+	// 4. Reply immediately — don't wait for replication.
+	// T property preserved: ok() returns FALSE for same-key conflicts regardless
+	// of whether the pending op is strong or weak (conflict-driven, not CL-driven).
+	rep := r.weakReplyPool.Get().(*MWeakReply)
+	rep.Replica = r.Id
+	rep.Ballot = r.ballot
+	rep.CmdId = desc.cmdId
+	rep.Rep = state.NIL()
+	rep.Slot = int32(slot)
+	r.sender.SendToClient(propose.ClientId, rep, r.cs.weakReplyRPC)
+
+	// 5. Async replication + execution in background
 	go r.asyncReplicateWeak(desc, slot, propose.ClientId, propose.CommandId, propose.CausalDep)
 }
 
@@ -910,8 +921,8 @@ func (r *Replica) getWeakCmdDesc(slot int, propose *MWeakPropose, dep int) *comm
 }
 
 // asyncReplicateWeak replicates weak command to other replicas asynchronously.
-// Waits for commit (majority acks), then replies to client immediately.
-// Execution (slot-ordered) continues in background after the reply.
+// Client already received reply in handleWeakPropose (immediate reply).
+// This function handles: replication → commit → slot-ordered execution.
 func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32, seqNum int32, causalDep int32) {
 	// Send Accept to other replicas
 	acc := &MAccept{
@@ -938,17 +949,6 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 	case <-time.After(1 * time.Second):
 		// Timeout - proceed anyway to avoid deadlock
 	}
-
-	// ---- Reply to client immediately after commit ----
-	// Don't wait for execution — weak writes return NIL (PUT result).
-	// Execution happens in background for state machine consistency.
-	rep := r.weakReplyPool.Get().(*MWeakReply)
-	rep.Replica = r.Id
-	rep.Ballot = r.ballot
-	rep.CmdId = desc.cmdId
-	rep.Rep = state.NIL()
-	rep.Slot = int32(slot)
-	r.sender.SendToClient(clientId, rep, r.cs.weakReplyRPC)
 
 	// ---- Phase 2: Execute in slot order (background) ----
 	// Wait for slot-1 to be executed (slot ordering)

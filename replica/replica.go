@@ -139,7 +139,7 @@ func (r *Replica) BeTheLeader(args *defs.BeTheLeaderArgs, reply *defs.BeTheLeade
 }
 
 func (r *Replica) FastQuorumSize() int {
-	return r.F + (r.F+1)/2
+	return (3*r.N)/4 + 1
 }
 
 func (r *Replica) SlowQuorumSize() int {

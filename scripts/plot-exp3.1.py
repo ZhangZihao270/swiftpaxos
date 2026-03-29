@@ -36,10 +36,19 @@ RESULT_DIRS = {
     50: ('eval-exp3.1-fix-20260324', 'exp3.1'),
 }
 
+# Per-protocol overrides (e.g. curpht re-run in phase125)
+RESULT_DIRS_OVERRIDE = {
+    'curpht': {
+        5:  ('eval-exp3.1-phase125-20260329', 'exp3.1'),
+        50: ('eval-exp3.1-phase125-20260329', 'exp3.1'),
+    },
+}
+
 
 def load_latencies(base, proto, wg, threads):
     """Load per-request latencies from latencies.json."""
-    dir_name, sub = RESULT_DIRS.get(wg, ('eval-exp3.1-20260321', 'exp3.1'))
+    override = RESULT_DIRS_OVERRIDE.get(proto, {})
+    dir_name, sub = override.get(wg, RESULT_DIRS.get(wg, ('eval-exp3.1-20260321', 'exp3.1')))
     path = os.path.join(base, 'results', dir_name,
                         sub, f'w{wg}', proto,
                         f't{threads}', 'run1', 'latencies.json')
