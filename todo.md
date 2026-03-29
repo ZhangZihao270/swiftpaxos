@@ -9096,9 +9096,9 @@ beyond what strong-strong conflicts already cause.
 
 **Tasks**:
 
-#### 125.1: Move reply before async replication (~15 LOC)
+#### 125.1: Move reply before async replication (~15 LOC) ✅
 
-- [ ] **125.1a**: In `handleWeakPropose()` (curp-ht.go:857-870), add reply BEFORE `go asyncReplicateWeak`:
+- [x] **125.1a**: In `handleWeakPropose()` (curp-ht.go:857-870), add reply BEFORE `go asyncReplicateWeak`:
   ```go
   func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
       slot := r.lastCmdSlot
@@ -9120,40 +9120,40 @@ beyond what strong-strong conflicts already cause.
   }
   ```
 
-- [ ] **125.1b**: In `asyncReplicateWeak()` (curp-ht.go:915+), remove the reply block
+- [x] **125.1b**: In `asyncReplicateWeak()` (curp-ht.go:915+), remove the reply block
   (lines 945-951: `rep := r.weakReplyPool.Get()...SendToClient`). The function now only
   does: SendAccept → wait commit → wait slot ordering → execute → cleanup.
 
-- [ ] **125.1c**: Update client `handleWeakReply()` if needed — verify it still handles
+- [x] **125.1c**: Update client `handleWeakReply()` if needed — verify it still handles
   the reply correctly (should be unchanged since MWeakReply format is the same).
 
-#### 125.2: Update client cache handling (~5 LOC)
+#### 125.2: Update client cache handling (~5 LOC) ✅
 
-- [ ] **125.2a**: Verify `handleWeakReply()` in client.go updates `localCache` with
+- [x] **125.2a**: Verify `handleWeakReply()` in client.go updates `localCache` with
   `(key, value, slot)` from the reply. The reply now arrives before the write is
   committed/executed on the leader, but the cache entry is still valid because
   the slot is assigned and the value is known.
 
-- [ ] **125.2b**: Verify that subsequent `SendWeakRead` to nearest replica still works.
+- [x] **125.2b**: Verify that subsequent `SendWeakRead` to nearest replica still works.
   The nearest replica may not have the value yet (not replicated), but the client
   cache merge (max-version rule) will return the cached value — read-your-writes
   is preserved via client cache, not replica state.
 
-#### 125.3: Build + test
+#### 125.3: Build + test ✅
 
-- [ ] **125.3a**: `go test ./curp-ht/` — all tests pass
-- [ ] **125.3b**: `go build -o swiftpaxos .` — compiles
-- [ ] **125.3c**: `go test ./...` — no regressions
+- [x] **125.3a**: `go test ./curp-ht/` — all tests pass
+- [x] **125.3b**: `go build -o swiftpaxos .` — compiles
+- [x] **125.3c**: `go test ./...` — no regressions
 
-#### 125.4: Benchmark + validate
+#### 125.4: Benchmark + validate ✅
 
-- [ ] **125.4a**: Spot test — CURP-HT at t=1, w50%: verify weak write latency < 10ms
+- [x] **125.4a**: Spot test — CURP-HT at t=1, w50%: verify weak write latency < 10ms
   (was ~84ms in Phase 114). Strong latency should be unchanged (~51ms).
-- [ ] **125.4b**: Run Exp 3.1 (t=1,8,32,96) — compare throughput with Phase 114 data.
-- [ ] **125.4c**: Run Exp 3.2 (weak ratio sweep, t=8) — verify T property:
-  strong P50 should remain flat (~51ms) across all weak ratios.
-- [ ] **125.4d**: Verify w50% throughput improvement: expect CURP-HT to close the gap
-  with CURP-HO (Phase 114 w50%: HT=27.5K vs HO=29.0K at t=96).
+- [x] **125.4b**: Run Exp 3.1 (full thread sweep, 3 reps) — curpht re-evaluated, CSV and plots updated.
+- [x] **125.4c**: Run Exp 3.2 (weak ratio sweep, t=16) — T property verified:
+  strong P50 remains flat (~33-41ms) across all weak ratios.
+- [x] **125.4d**: Verify w50% throughput improvement: CURP-HT now surpasses CURP-HO at w50%
+  (Phase 125: HT=41.3K vs HO=40.9K at t=96; was HT=27.5K vs HO=29.0K in Phase 114).
 
 **Estimated changes**: ~20 LOC in curp-ht.go, 0 LOC in client.go
 **Risk**: Low — reply timing change only, no protocol logic change
@@ -9261,6 +9261,6 @@ beyond what strong-strong conflicts already cause.
 ### ⬜ Step 6: Plot script
 - `scripts/plot-exp-tao.py`: throughput vs latency + CDF figure (similar to exp3.1 layout)
 
-### ⬜ Step 7: Verify and run
+### 🔜 Step 7: Verify and run (later)
 - Local smoke test with `go test ./...` and a quick 1-thread run
 - Deploy to AWS and run full experiment
