@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"sort"
 	"sync"
@@ -104,6 +105,11 @@ type HybridClient interface {
 	// Returns the command sequence number.
 	SendWeakRead(key int64) int32
 
+	// SendWeakScan sends a causally consistent scan (range read) command.
+	// Reads `count` consecutive keys starting from `key`.
+	// Returns the command sequence number.
+	SendWeakScan(key int64, count int64) int32
+
 	// SupportsWeak returns true if the client supports weak consistency commands.
 	SupportsWeak() bool
 
@@ -175,6 +181,8 @@ type HybridBufferClient struct {
 	// Hybrid benchmark configuration
 	weakRatio   int // Percentage of commands that use weak consistency (0-100)
 	weakWrites  int // Percentage of weak commands that are writes (0-100)
+	scanRatio   int // Percentage of weak reads that are SCAN operations (0-100)
+	scanCount   int // Maximum number of keys per SCAN (count drawn from Zipf[1, scanCount])
 
 	// HybridClient implementation (set by protocol-specific client)
 	hybrid HybridClient
@@ -208,6 +216,40 @@ func NewHybridBufferClient(bc *BufferClient, weakRatio, weakWrites, replyTimeout
 		replyTimeout: timeout,
 	}
 	return hbc
+}
+
+// SetScanParams configures the TAO-like SCAN parameters.
+// scanRatio: percentage of weak reads that become SCAN (0-100).
+// scanCount: max keys per SCAN (actual count drawn from Zipf[1, scanCount]).
+func (c *HybridBufferClient) SetScanParams(scanRatio, scanCount int) {
+	c.scanRatio = scanRatio
+	c.scanCount = scanCount
+}
+
+// zipfScanCount draws a scan count from an approximate Zipf distribution over [1, scanCount].
+// Most scans are short (1-10 keys), few are long (up to scanCount).
+// Uses the inverse CDF method: count = ceil(scanCount / u^(1/s)) clamped to [1, scanCount],
+// where u ~ Uniform(1, scanCount) and s = 1.0 (Zipf exponent).
+func (c *HybridBufferClient) zipfScanCount() int64 {
+	if c.scanCount <= 1 {
+		return 1
+	}
+	// Draw from Zipf-like distribution: P(X=k) ~ 1/k
+	// Use inverse transform: generate uniform in (0,1], map to power-law
+	u := c.rand.Float64() // [0, 1)
+	if u == 0 {
+		u = 1e-10
+	}
+	// Map uniform to [1, scanCount] with Zipf skew
+	// x = exp(u * ln(scanCount)) gives a log-uniform distribution (Zipf with s=1)
+	count := int64(math.Ceil(math.Exp(u * math.Log(float64(c.scanCount)))))
+	if count < 1 {
+		count = 1
+	}
+	if count > int64(c.scanCount) {
+		count = int64(c.scanCount)
+	}
+	return count
 }
 
 // SetHybridClient sets the underlying HybridClient implementation.
@@ -368,7 +410,12 @@ func (c *HybridBufferClient) HybridLoop() {
 		case WeakWrite:
 			c.hybrid.SendWeakWrite(key, state.Value(val))
 		case WeakRead:
-			c.hybrid.SendWeakRead(key)
+			if c.scanRatio > 0 && c.scanCount > 0 && c.randomTrue(c.scanRatio) {
+				count := c.zipfScanCount()
+				c.hybrid.SendWeakScan(key, count)
+			} else {
+				c.hybrid.SendWeakRead(key)
+			}
 		}
 
 		// Pipelining window management
@@ -623,7 +670,12 @@ func (c *HybridBufferClient) HybridLoopWithOptions(printResults bool) {
 		case WeakWrite:
 			c.hybrid.SendWeakWrite(key, state.Value(val))
 		case WeakRead:
-			c.hybrid.SendWeakRead(key)
+			if c.scanRatio > 0 && c.scanCount > 0 && c.randomTrue(c.scanRatio) {
+				count := c.zipfScanCount()
+				c.hybrid.SendWeakScan(key, count)
+			} else {
+				c.hybrid.SendWeakRead(key)
+			}
 		}
 
 		if c.window > 0 {

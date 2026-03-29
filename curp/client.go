@@ -283,6 +283,10 @@ func (c *Client) SendWeakRead(key int64) int32 {
 	panic("CURP does not support weak reads")
 }
 
+func (c *Client) SendWeakScan(key int64, count int64) int32 {
+	return c.SendScan(key, count)
+}
+
 func (c *Client) SupportsWeak() bool {
 	return false
 }

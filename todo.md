@@ -9231,9 +9231,13 @@ beyond what strong-strong conflicts already cause.
 - `config/config_test.go`: added 4 tests (explicit, default, with-other-params, edge-cases)
 - Also fixed pre-existing test failures in TestExp32ConfigFile and TestExp22ConfigFile (reqs values)
 
-### ⬜ Step 2: HybridClient interface — add SendWeakScan
-- `client/hybrid.go`: add `SendWeakScan(key, count int64) int32` to `HybridClient` interface
-- In `HybridLoop` WeakRead branch: if `rand < scanRatio`, draw `count` from Zipf[1, scanCount], call `SendWeakScan(key, count)` instead of `SendWeakRead(key)`
+### ✅ Step 2: HybridClient SendWeakScan [26:03:29]
+- `client/hybrid.go`: added `SendWeakScan(key, count int64) int32` to `HybridClient` interface
+- Added `scanRatio`, `scanCount` fields + `SetScanParams()` + `zipfScanCount()` (log-uniform distribution)
+- `HybridLoop` and `HybridLoopWithOptions` WeakRead branch: if `rand < scanRatio`, draw count from Zipf[1,scanCount], call `SendWeakScan`
+- `main.go`: added `hbc.SetScanParams(c.ScanRatio, c.ScanCount)` for all 11 protocol branches
+- Protocol stubs: non-hybrid → `SendScan(key, count)`, hybrid → `SendWeakRead(key)` with TODO for Step 3
+- `client/hybrid_test.go`: 6 new tests (SetScanParams, ZipfScanCount, edge cases, interface compliance, ratio=0/100)
 
 ### ⬜ Step 3: Protocol implementations — SendWeakScan
 - **Client side** (4 hybrid protocols need real weak scan):

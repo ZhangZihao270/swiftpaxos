@@ -372,6 +372,11 @@ func (c *Client) SendWeakRead(key int64) int32 {
 	return seqnum
 }
 
+func (c *Client) SendWeakScan(key int64, count int64) int32 {
+	// TODO: implement proper weak scan in Phase 126 Step 3
+	return c.SendWeakRead(key)
+}
+
 // SendStrongWrite sends a linearizable write command (delegates to base SendWrite).
 // Tracks the key for local cache updates on completion, and the command for resend on failover.
 func (c *Client) SendStrongWrite(key int64, value []byte) int32 {

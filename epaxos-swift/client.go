@@ -112,6 +112,10 @@ func (c *Client) SendWeakRead(key int64) int32 {
 	return c.SendStrongRead(key)
 }
 
+func (c *Client) SendWeakScan(key int64, count int64) int32 {
+	return c.SendScan(key, count)
+}
+
 // SupportsWeak returns false since EPaxos-Swift only provides linearizable consistency.
 func (c *Client) SupportsWeak() bool {
 	return false

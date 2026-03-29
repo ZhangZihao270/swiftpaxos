@@ -295,5 +295,10 @@ func (c *Client) SendWeakRead(key int64) int32 {
 	return seqnum
 }
 
+func (c *Client) SendWeakScan(key int64, count int64) int32 {
+	// TODO: implement proper weak scan in Phase 126 Step 3
+	return c.SendWeakRead(key)
+}
+
 func (c *Client) SupportsWeak() bool { return true }
 func (c *Client) MarkAllSent()       {}

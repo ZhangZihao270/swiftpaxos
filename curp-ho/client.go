@@ -595,6 +595,11 @@ func (c *Client) SendWeakRead(key int64) int32 {
 	return c.SendCausalRead(key)
 }
 
+func (c *Client) SendWeakScan(key int64, count int64) int32 {
+	// TODO: implement proper weak scan in Phase 126 Step 3
+	return c.SendWeakRead(key)
+}
+
 // SendCausalWrite broadcasts a causal write to ALL replicas.
 // All replicas add to their witness pool. The bound replica replies immediately
 // with speculative result (1-RTT). Leader coordinates replication separately.

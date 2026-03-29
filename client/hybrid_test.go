@@ -157,6 +157,10 @@ func (m *mockHybridClient) SendWeakRead(key int64) int32 {
 	return 4
 }
 
+func (m *mockHybridClient) SendWeakScan(key int64, count int64) int32 {
+	return m.SendWeakRead(key)
+}
+
 func (m *mockHybridClient) SupportsWeak() bool {
 	return m.supportsWeak
 }
@@ -478,5 +482,183 @@ func TestReplyTimeout_DefaultAndCustom(t *testing.T) {
 func TestDefaultReplyTimeout_Is10Seconds(t *testing.T) {
 	if defaultReplyTimeout != 10*time.Second {
 		t.Errorf("defaultReplyTimeout = %v, want 10s", defaultReplyTimeout)
+	}
+}
+
+// TestSetScanParams tests that SetScanParams stores the values correctly.
+func TestSetScanParams(t *testing.T) {
+	bc := &BufferClient{reqNum: 10, Reply: make(chan *ReqReply, 11)}
+	hbc := NewHybridBufferClient(bc, 50, 50, 0)
+
+	// Default should be 0
+	if hbc.scanRatio != 0 || hbc.scanCount != 0 {
+		t.Errorf("Default scan params: ratio=%d count=%d, want 0/0", hbc.scanRatio, hbc.scanCount)
+	}
+
+	hbc.SetScanParams(44, 1000)
+	if hbc.scanRatio != 44 {
+		t.Errorf("ScanRatio = %d, want 44", hbc.scanRatio)
+	}
+	if hbc.scanCount != 1000 {
+		t.Errorf("ScanCount = %d, want 1000", hbc.scanCount)
+	}
+}
+
+// TestZipfScanCount tests the zipfScanCount distribution.
+func TestZipfScanCount(t *testing.T) {
+	source := rand.NewSource(42) // deterministic
+	bc := &BufferClient{
+		rand: rand.New(source),
+	}
+	hbc := &HybridBufferClient{
+		BufferClient: bc,
+		scanCount:    1000,
+	}
+
+	// Draw 10000 samples and verify properties
+	samples := make([]int64, 10000)
+	for i := range samples {
+		samples[i] = hbc.zipfScanCount()
+	}
+
+	// All values must be in [1, scanCount]
+	for i, s := range samples {
+		if s < 1 || s > 1000 {
+			t.Errorf("Sample %d out of range: %d", i, s)
+		}
+	}
+
+	// Distribution should be skewed: most values should be small
+	smallCount := 0
+	for _, s := range samples {
+		if s <= 10 {
+			smallCount++
+		}
+	}
+	// With Zipf-like distribution, majority should be <= 10
+	// (log-uniform: P(X<=10) = ln(10)/ln(1000) ≈ 33%)
+	if smallCount < 2000 { // At least 20% should be small
+		t.Errorf("Distribution not skewed enough: only %d/10000 samples <= 10", smallCount)
+	}
+}
+
+// TestZipfScanCountEdgeCases tests edge cases for zipfScanCount.
+func TestZipfScanCountEdgeCases(t *testing.T) {
+	source := rand.NewSource(42)
+	bc := &BufferClient{
+		rand: rand.New(source),
+	}
+
+	// scanCount = 0
+	hbc := &HybridBufferClient{BufferClient: bc, scanCount: 0}
+	if got := hbc.zipfScanCount(); got != 1 {
+		t.Errorf("scanCount=0: got %d, want 1", got)
+	}
+
+	// scanCount = 1
+	hbc.scanCount = 1
+	if got := hbc.zipfScanCount(); got != 1 {
+		t.Errorf("scanCount=1: got %d, want 1", got)
+	}
+
+	// scanCount = 2
+	hbc.scanCount = 2
+	for i := 0; i < 100; i++ {
+		got := hbc.zipfScanCount()
+		if got < 1 || got > 2 {
+			t.Errorf("scanCount=2: got %d, want 1 or 2", got)
+		}
+	}
+}
+
+// scanTrackingMock tracks whether SendWeakScan or SendWeakRead was called.
+type scanTrackingMock struct {
+	mockHybridClient
+	weakScanCalled bool
+	lastScanCount  int64
+}
+
+func (m *scanTrackingMock) SendWeakScan(key int64, count int64) int32 {
+	m.weakScanCalled = true
+	m.lastScanCount = count
+	return 5
+}
+
+func (m *scanTrackingMock) SendWeakRead(key int64) int32 {
+	m.weakReadCalled = true
+	return 4
+}
+
+// TestSendWeakScanInterfaceCompliance verifies the mock satisfies HybridClient.
+func TestSendWeakScanInterfaceCompliance(t *testing.T) {
+	var _ HybridClient = &scanTrackingMock{}
+}
+
+// TestScanRatioZeroNeverCallsScan verifies that with scanRatio=0 no scans happen.
+func TestScanRatioZeroNeverCallsScan(t *testing.T) {
+	source := rand.NewSource(42)
+	bc := &BufferClient{
+		rand: rand.New(source),
+	}
+	mock := &scanTrackingMock{}
+	mock.supportsWeak = true
+
+	hbc := &HybridBufferClient{
+		BufferClient: bc,
+		scanRatio:    0,
+		scanCount:    1000,
+		hybrid:       mock,
+	}
+
+	// Simulate 100 WeakRead dispatches
+	for i := 0; i < 100; i++ {
+		if hbc.scanRatio > 0 && hbc.scanCount > 0 && hbc.randomTrue(hbc.scanRatio) {
+			hbc.hybrid.(*scanTrackingMock).SendWeakScan(1, hbc.zipfScanCount())
+		} else {
+			hbc.hybrid.(*scanTrackingMock).SendWeakRead(1)
+		}
+	}
+
+	if mock.weakScanCalled {
+		t.Error("With scanRatio=0, SendWeakScan should never be called")
+	}
+	if !mock.weakReadCalled {
+		t.Error("SendWeakRead should have been called")
+	}
+}
+
+// TestScanRatio100AlwaysCallsScan verifies that with scanRatio=100 all weak reads become scans.
+func TestScanRatio100AlwaysCallsScan(t *testing.T) {
+	source := rand.NewSource(42)
+	bc := &BufferClient{
+		rand: rand.New(source),
+	}
+	mock := &scanTrackingMock{}
+	mock.supportsWeak = true
+
+	hbc := &HybridBufferClient{
+		BufferClient: bc,
+		scanRatio:    100,
+		scanCount:    1000,
+		hybrid:       mock,
+	}
+
+	scanCount := 0
+	readCount := 0
+	for i := 0; i < 100; i++ {
+		if hbc.scanRatio > 0 && hbc.scanCount > 0 && hbc.randomTrue(hbc.scanRatio) {
+			hbc.hybrid.(*scanTrackingMock).SendWeakScan(1, hbc.zipfScanCount())
+			scanCount++
+		} else {
+			hbc.hybrid.(*scanTrackingMock).SendWeakRead(1)
+			readCount++
+		}
+	}
+
+	if readCount > 0 {
+		t.Errorf("With scanRatio=100, no reads should happen, got %d", readCount)
+	}
+	if scanCount != 100 {
+		t.Errorf("With scanRatio=100, all should be scans, got %d", scanCount)
 	}
 }
