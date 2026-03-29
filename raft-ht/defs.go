@@ -743,6 +743,8 @@ type MWeakRead struct {
 	ClientId  int32
 	Key       state.Key
 	MinIndex  int32 // Minimum log index that must be applied before serving this read (causal tracking)
+	Op        uint8 // 0 or state.GET = single-key read, state.SCAN = range scan
+	Count     int64 // number of keys to scan (only used when Op == SCAN)
 }
 
 func (t *MWeakRead) New() fastrpc.Serializable {
@@ -750,12 +752,12 @@ func (t *MWeakRead) New() fastrpc.Serializable {
 }
 
 func (t *MWeakRead) BinarySize() (nbytes int, sizeKnown bool) {
-	return 20, true // 3 x int32 + Key (int64 = 8 bytes)
+	return 29, true // 3 x int32 + Key (int64) + Op (uint8) + Count (int64)
 }
 
 func (t *MWeakRead) Marshal(wire io.Writer) {
-	var b [20]byte
-	bs := b[:20]
+	var b [29]byte
+	bs := b[:29]
 	tmp32 := t.CommandId
 	bs[0] = byte(tmp32)
 	bs[1] = byte(tmp32 >> 8)
@@ -780,13 +782,23 @@ func (t *MWeakRead) Marshal(wire io.Writer) {
 	bs[17] = byte(tmp32 >> 8)
 	bs[18] = byte(tmp32 >> 16)
 	bs[19] = byte(tmp32 >> 24)
+	bs[20] = byte(t.Op)
+	tmp64 = t.Count
+	bs[21] = byte(tmp64)
+	bs[22] = byte(tmp64 >> 8)
+	bs[23] = byte(tmp64 >> 16)
+	bs[24] = byte(tmp64 >> 24)
+	bs[25] = byte(tmp64 >> 32)
+	bs[26] = byte(tmp64 >> 40)
+	bs[27] = byte(tmp64 >> 48)
+	bs[28] = byte(tmp64 >> 56)
 	wire.Write(bs)
 }
 
 func (t *MWeakRead) Unmarshal(wire io.Reader) error {
-	var b [20]byte
-	bs := b[:20]
-	if _, err := io.ReadAtLeast(wire, bs, 20); err != nil {
+	var b [29]byte
+	bs := b[:29]
+	if _, err := io.ReadAtLeast(wire, bs, 29); err != nil {
 		return err
 	}
 	t.CommandId = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
@@ -794,6 +806,8 @@ func (t *MWeakRead) Unmarshal(wire io.Reader) error {
 	t.Key = state.Key(int64(uint64(bs[8]) | (uint64(bs[9]) << 8) | (uint64(bs[10]) << 16) | (uint64(bs[11]) << 24) |
 		(uint64(bs[12]) << 32) | (uint64(bs[13]) << 40) | (uint64(bs[14]) << 48) | (uint64(bs[15]) << 56)))
 	t.MinIndex = int32((uint32(bs[16]) | (uint32(bs[17]) << 8) | (uint32(bs[18]) << 16) | (uint32(bs[19]) << 24)))
+	t.Op = uint8(bs[20])
+	t.Count = int64(uint64(bs[21]) | (uint64(bs[22]) << 8) | (uint64(bs[23]) << 16) | (uint64(bs[24]) << 24) | (uint64(bs[25]) << 32) | (uint64(bs[26]) << 40) | (uint64(bs[27]) << 48) | (uint64(bs[28]) << 56))
 	return nil
 }
 

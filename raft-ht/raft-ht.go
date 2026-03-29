@@ -1,6 +1,7 @@
 package raftht
 
 import (
+	"encoding/binary"
 	"math/rand"
 	"sync"
 	"time"
@@ -1031,7 +1032,14 @@ func (r *Replica) processWeakRead(msg *MWeakRead) {
 	}
 
 	r.stateMu.RLock()
-	cmd := state.Command{Op: state.GET, K: msg.Key, V: state.NIL()}
+	var cmd state.Command
+	if msg.Op == uint8(state.SCAN) && msg.Count > 0 {
+		v := make([]byte, 8)
+		binary.LittleEndian.PutUint64(v, uint64(msg.Count))
+		cmd = state.Command{Op: state.SCAN, K: msg.Key, V: v}
+	} else {
+		cmd = state.Command{Op: state.GET, K: msg.Key, V: state.NIL()}
+	}
 	value := cmd.Execute(r.State)
 
 	version := int32(0)

@@ -9239,21 +9239,15 @@ beyond what strong-strong conflicts already cause.
 - Protocol stubs: non-hybrid → `SendScan(key, count)`, hybrid → `SendWeakRead(key)` with TODO for Step 3
 - `client/hybrid_test.go`: 6 new tests (SetScanParams, ZipfScanCount, edge cases, interface compliance, ratio=0/100)
 
-### ⬜ Step 3: Protocol implementations — SendWeakScan
-- **Client side** (4 hybrid protocols need real weak scan):
-  - `curp-ht/client.go`: implement `SendWeakScan` — send `MWeakRead` with Op=SCAN and Count
-  - `curp-ho/client.go`: implement `SendWeakScan` — same pattern
-  - `raft-ht/client.go`: implement `SendWeakScan` — same pattern
-  - `epaxos-ho/client.go`: implement `SendWeakScan` — same pattern
-- **Replica side** (handle SCAN in weak read path):
-  - Extend `MWeakRead` message with `Op` and `Count` fields (default Op=GET for backward compat)
-  - `curp-ht/curp-ht.go` `handleWeakRead`: if Op==SCAN, execute SCAN instead of GET
-  - `raft-ht/raft-ht.go` `processWeakRead`: same
-  - `curp-ho`: check how causal reads are handled (MCausalPropose may already carry full Command)
-  - `epaxos-ho`: same check
-- **Non-hybrid protocols** (client stub only, replica不需要改 — `cmd.Execute` 已支持SCAN):
-  - `curp/client.go`: add `SendWeakScan` stub → `c.SendScan(key, count)`
-  - `raft/client.go`: add `SendWeakScan` stub → `c.SendScan(key, count)`
+### ✅ Step 3: Protocol SendWeakScan implementations [26:03:29]
+- Extended `MWeakRead` in curp-ht, curp-ho, raft-ht with `Op uint8` + `Count int64` fields (+9 bytes)
+- Updated Marshal/Unmarshal/BinarySize in all 3 protocol defs.go
+- Client SendWeakScan: curp-ht, curp-ho, raft-ht send MWeakRead with Op=SCAN and Count
+- Client SendWeakScan: epaxos-ho sends Propose with Op=SCAN, CL=CAUSAL, V=count (already has full Command)
+- Replica: curp-ht handleWeakRead, curp-ho handleWeakRead, raft-ht processWeakRead — check Op field, dispatch SCAN or GET
+- EPaxos-HO: no replica change needed (unified Propose path handles full Command)
+- Non-hybrid stubs from Step 2 unchanged (delegate to SendScan)
+- Tests: updated existing BinarySize/Serialization tests (16→25, 20→29), added SCAN round-trip tests
 
 ### ⬜ Step 4: Config file
 - `configs/exp-tao.conf`: writes=1, weakRatio=95, weakWrites=0, scanRatio=44, scanCount=1000, zipfSkew=0.8, keySpace=1000000

@@ -1,6 +1,7 @@
 package epaxosho
 
 import (
+	"encoding/binary"
 	"log"
 	"sync"
 	"time"
@@ -146,8 +147,22 @@ func (c *Client) SendWeakRead(key int64) int32 {
 }
 
 func (c *Client) SendWeakScan(key int64, count int64) int32 {
-	// TODO: implement proper weak scan in Phase 126 Step 3
-	return c.SendWeakRead(key)
+	seqnum := c.GetNextSeqnum()
+	v := make([]byte, 8)
+	binary.LittleEndian.PutUint64(v, uint64(count))
+	p := defs.Propose{
+		CommandId: seqnum,
+		ClientId:  c.ClientId,
+		Command: state.Command{
+			Op: state.SCAN,
+			K:  state.Key(key),
+			V:  v,
+			CL: state.CAUSAL,
+		},
+		Timestamp: 0,
+	}
+	c.SendProposal(p)
+	return seqnum
 }
 
 // SupportsWeak returns true since EPaxos-HO supports weak (causal) consistency.

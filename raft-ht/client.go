@@ -373,8 +373,26 @@ func (c *Client) SendWeakRead(key int64) int32 {
 }
 
 func (c *Client) SendWeakScan(key int64, count int64) int32 {
-	// TODO: implement proper weak scan in Phase 126 Step 3
-	return c.SendWeakRead(key)
+	seqnum := c.BufferClient.GetNextSeqnum()
+
+	c.mu.Lock()
+	c.weakPending[seqnum] = struct{}{}
+	c.weakPendingKeys[seqnum] = key
+	closest := c.ClosestId
+	c.mu.Unlock()
+
+	msg := &MWeakRead{
+		CommandId: seqnum,
+		ClientId:  c.ClientId,
+		Key:       state.Key(key),
+		Op:        uint8(state.SCAN),
+		Count:     count,
+	}
+
+	if closest != -1 {
+		c.SendMsg(int32(closest), c.cs.WeakReadRPC, msg)
+	}
+	return seqnum
 }
 
 // SendStrongWrite sends a linearizable write command (delegates to base SendWrite).

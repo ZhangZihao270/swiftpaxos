@@ -1,6 +1,7 @@
 package curpht
 
 import (
+	"encoding/binary"
 	"log"
 	"strconv"
 	"sync"
@@ -1082,7 +1083,14 @@ func (r *Replica) int32ToString(val int32) string {
 // handleWeakRead handles a weak read request from any client (sent to nearest replica)
 // Returns committed value + version (slot of last write to this key)
 func (r *Replica) handleWeakRead(msg *MWeakRead) {
-	cmd := state.Command{Op: state.GET, K: msg.Key, V: state.NIL()}
+	var cmd state.Command
+	if msg.Op == uint8(state.SCAN) && msg.Count > 0 {
+		v := make([]byte, 8)
+		binary.LittleEndian.PutUint64(v, uint64(msg.Count))
+		cmd = state.Command{Op: state.SCAN, K: msg.Key, V: v}
+	} else {
+		cmd = state.Command{Op: state.GET, K: msg.Key, V: state.NIL()}
+	}
 	value := cmd.ComputeResult(r.State)
 	version := int32(0)
 	keyStr := r.int32ToString(int32(msg.Key))

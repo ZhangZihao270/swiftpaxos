@@ -4241,6 +4241,10 @@ func TestMWeakReadSerialization(t *testing.T) {
 	var buf bytes.Buffer
 	original.Marshal(&buf)
 
+	if buf.Len() != 25 {
+		t.Errorf("MWeakRead should serialize to 25 bytes, got %d", buf.Len())
+	}
+
 	decoded := &MWeakRead{}
 	if err := decoded.Unmarshal(&buf); err != nil {
 		t.Fatalf("Unmarshal error: %v", err)
@@ -4255,13 +4259,44 @@ func TestMWeakReadSerialization(t *testing.T) {
 	if decoded.Key != original.Key {
 		t.Errorf("Key mismatch: got %d, want %d", decoded.Key, original.Key)
 	}
+	if decoded.Op != 0 {
+		t.Errorf("Op should default to 0, got %d", decoded.Op)
+	}
+	if decoded.Count != 0 {
+		t.Errorf("Count should default to 0, got %d", decoded.Count)
+	}
+}
+
+func TestMWeakReadSerializationWithScan(t *testing.T) {
+	original := &MWeakRead{
+		CommandId: 42,
+		ClientId:  7,
+		Key:       state.Key(12345),
+		Op:        uint8(state.SCAN),
+		Count:     1000,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	decoded := &MWeakRead{}
+	if err := decoded.Unmarshal(&buf); err != nil {
+		t.Fatalf("Unmarshal error: %v", err)
+	}
+
+	if decoded.Op != uint8(state.SCAN) {
+		t.Errorf("Op mismatch: got %d, want %d", decoded.Op, state.SCAN)
+	}
+	if decoded.Count != 1000 {
+		t.Errorf("Count mismatch: got %d, want 1000", decoded.Count)
+	}
 }
 
 func TestMWeakReadBinarySize(t *testing.T) {
 	m := &MWeakRead{}
 	size, known := m.BinarySize()
-	if !known || size != 16 {
-		t.Errorf("BinarySize() = (%d, %v), want (16, true)", size, known)
+	if !known || size != 25 {
+		t.Errorf("BinarySize() = (%d, %v), want (25, true)", size, known)
 	}
 }
 
