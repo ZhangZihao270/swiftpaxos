@@ -9225,10 +9225,11 @@ beyond what strong-strong conflicts already cause.
 
 **Design doc:** `evaluation/tao-benchmark-design.md`
 
-### ⬜ Step 1: Config — add ScanRatio and ScanCount
-- `config/config.go`: add `ScanRatio int` (default 0) and `ScanCount int` (default 20)
-- Add parser cases in the config reading loop
-- `config/config_test.go`: add test for new params
+### ✅ Step 1: Config — add ScanRatio and ScanCount [26:03:29]
+- `config/config.go`: added `ScanRatio int` (default 0) and `ScanCount int` (default 0)
+- Added parser cases `scanratio` and `scancount` in the config reading loop
+- `config/config_test.go`: added 4 tests (explicit, default, with-other-params, edge-cases)
+- Also fixed pre-existing test failures in TestExp32ConfigFile and TestExp22ConfigFile (reqs values)
 
 ### ⬜ Step 2: HybridClient interface — add SendWeakScan
 - `client/hybrid.go`: add `SendWeakScan(key, count int64) int32` to `HybridClient` interface

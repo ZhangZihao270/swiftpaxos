@@ -832,8 +832,8 @@ func TestExp32ConfigFile(t *testing.T) {
 	if c.Protocol != "curpht" {
 		t.Errorf("Protocol = %s, want curpht", c.Protocol)
 	}
-	if c.Reqs != 3000 {
-		t.Errorf("Reqs = %d, want 3000", c.Reqs)
+	if c.Reqs != 5000 {
+		t.Errorf("Reqs = %d, want 5000", c.Reqs)
 	}
 	if c.Writes != 50 {
 		t.Errorf("Writes = %d, want 50", c.Writes)
@@ -931,8 +931,8 @@ func TestExp22ConfigFile(t *testing.T) {
 	if c.Protocol != "epaxos" {
 		t.Errorf("Protocol = %s, want epaxos", c.Protocol)
 	}
-	if c.Reqs != 3000 {
-		t.Errorf("Reqs = %d, want 3000", c.Reqs)
+	if c.Reqs != 10000 {
+		t.Errorf("Reqs = %d, want 10000", c.Reqs)
 	}
 	if c.Writes != 50 {
 		t.Errorf("Writes = %d, want 50", c.Writes)
@@ -951,6 +951,191 @@ func TestExp22ConfigFile(t *testing.T) {
 	}
 	if c.ZipfSkew != 0 {
 		t.Errorf("ZipfSkew = %f, want 0", c.ZipfSkew)
+	}
+}
+
+// TestScanRatioConfig tests parsing of scanRatio configuration parameter
+func TestScanRatioConfig(t *testing.T) {
+	content := `
+scanRatio 44
+scanCount 1000
+`
+	f, err := os.CreateTemp("", "test_config_*.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name())
+
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	c, err := Read(f.Name(), "test")
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+
+	if c.ScanRatio != 44 {
+		t.Errorf("ScanRatio = %d, want 44", c.ScanRatio)
+	}
+	if c.ScanCount != 1000 {
+		t.Errorf("ScanCount = %d, want 1000", c.ScanCount)
+	}
+}
+
+// TestScanRatioDefault tests default values of scan parameters (should be 0)
+func TestScanRatioDefault(t *testing.T) {
+	content := `
+writes 100
+`
+	f, err := os.CreateTemp("", "test_config_*.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name())
+
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	c, err := Read(f.Name(), "test")
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+
+	if c.ScanRatio != 0 {
+		t.Errorf("Default ScanRatio = %d, want 0", c.ScanRatio)
+	}
+	if c.ScanCount != 0 {
+		t.Errorf("Default ScanCount = %d, want 0", c.ScanCount)
+	}
+}
+
+// TestScanRatioWithOtherParams tests scan params with other config parameters
+func TestScanRatioWithOtherParams(t *testing.T) {
+	content := `
+protocol curpht
+reqs 1000
+writes 1
+weakRatio 95
+weakWrites 0
+scanRatio 44
+scanCount 1000
+zipfSkew 0.8
+keySpace 1000000
+`
+	f, err := os.CreateTemp("", "test_config_*.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name())
+
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	c, err := Read(f.Name(), "test")
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+
+	if c.Protocol != "curpht" {
+		t.Errorf("Protocol = %s, want curpht", c.Protocol)
+	}
+	if c.Reqs != 1000 {
+		t.Errorf("Reqs = %d, want 1000", c.Reqs)
+	}
+	if c.Writes != 1 {
+		t.Errorf("Writes = %d, want 1", c.Writes)
+	}
+	if c.WeakRatio != 95 {
+		t.Errorf("WeakRatio = %d, want 95", c.WeakRatio)
+	}
+	if c.WeakWrites != 0 {
+		t.Errorf("WeakWrites = %d, want 0", c.WeakWrites)
+	}
+	if c.ScanRatio != 44 {
+		t.Errorf("ScanRatio = %d, want 44", c.ScanRatio)
+	}
+	if c.ScanCount != 1000 {
+		t.Errorf("ScanCount = %d, want 1000", c.ScanCount)
+	}
+	if c.ZipfSkew != 0.8 {
+		t.Errorf("ZipfSkew = %f, want 0.8", c.ZipfSkew)
+	}
+	if c.KeySpace != 1000000 {
+		t.Errorf("KeySpace = %d, want 1000000", c.KeySpace)
+	}
+}
+
+// TestScanRatioEdgeCases tests edge cases for scan parameters
+func TestScanRatioEdgeCases(t *testing.T) {
+	tests := []struct {
+		name      string
+		content   string
+		scanRatio int
+		scanCount int
+	}{
+		{
+			name:      "both zero",
+			content:   "scanRatio 0\nscanCount 0",
+			scanRatio: 0,
+			scanCount: 0,
+		},
+		{
+			name:      "scanRatio 100 percent",
+			content:   "scanRatio 100\nscanCount 500",
+			scanRatio: 100,
+			scanCount: 500,
+		},
+		{
+			name:      "scanCount 1 (single key scan)",
+			content:   "scanRatio 50\nscanCount 1",
+			scanRatio: 50,
+			scanCount: 1,
+		},
+		{
+			name:      "only scanRatio set",
+			content:   "scanRatio 44",
+			scanRatio: 44,
+			scanCount: 0,
+		},
+		{
+			name:      "only scanCount set",
+			content:   "scanCount 1000",
+			scanRatio: 0,
+			scanCount: 1000,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f, err := os.CreateTemp("", "test_config_*.conf")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.Remove(f.Name())
+
+			if _, err := f.WriteString(tc.content); err != nil {
+				t.Fatal(err)
+			}
+			f.Close()
+
+			c, err := Read(f.Name(), "test")
+			if err != nil {
+				t.Fatalf("Read failed: %v", err)
+			}
+
+			if c.ScanRatio != tc.scanRatio {
+				t.Errorf("ScanRatio = %d, want %d", c.ScanRatio, tc.scanRatio)
+			}
+			if c.ScanCount != tc.scanCount {
+				t.Errorf("ScanCount = %d, want %d", c.ScanCount, tc.scanCount)
+			}
+		})
 	}
 }
 

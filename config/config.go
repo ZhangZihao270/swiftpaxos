@@ -137,6 +137,13 @@ type Config struct {
 	// Trade-off: Higher values increase batch sizes (reduce syscalls) but add latency.
 	BatchDelayUs int
 
+	// TAO-like benchmark parameters
+	// Percentage of weak reads that are SCAN operations (0-100), default 0
+	ScanRatio int
+	// Maximum number of keys per SCAN operation, default 0 (disabled)
+	// Actual count per SCAN drawn from Zipf distribution over [1, ScanCount]
+	ScanCount int
+
 	// quorum config file
 	Quorum string
 
@@ -308,6 +315,12 @@ func Read(filename, alias string) (*Config, error) {
 				ok = true
 			case "replytimeout":
 				c.ReplyTimeout, err = expectInt(words)
+				ok = true
+			case "scanratio":
+				c.ScanRatio, err = expectInt(words)
+				ok = true
+			case "scancount":
+				c.ScanCount, err = expectInt(words)
 				ok = true
 			}
 			if ok {
