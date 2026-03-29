@@ -9249,8 +9249,9 @@ beyond what strong-strong conflicts already cause.
 - Non-hybrid stubs from Step 2 unchanged (delegate to SendScan)
 - Tests: updated existing BinarySize/Serialization tests (16→25, 20→29), added SCAN round-trip tests
 
-### ⬜ Step 4: Config file
-- `configs/exp-tao.conf`: writes=1, weakRatio=95, weakWrites=0, scanRatio=44, scanCount=1000, zipfSkew=0.8, keySpace=1000000
+### ✅ Step 4: Config file [26:03:29]
+- `configs/exp-tao.conf`: TAO-like workload — writes=1, weakRatio=95, weakWrites=0, scanRatio=44, scanCount=1000, zipfSkew=0.8, keySpace=1M
+- `config/config_test.go`: added TestExpTaoConfigFile to verify parsing
 
 ### ⬜ Step 5: Eval script
 - `scripts/eval-exp-tao.sh`: run curpho, curpht, curp-baseline (and optionally raftht, epaxos)

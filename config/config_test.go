@@ -1172,3 +1172,41 @@ func TestReplyTimeoutConfig(t *testing.T) {
 		})
 	}
 }
+
+// TestExpTaoConfigFile tests that configs/exp-tao.conf parses correctly
+func TestExpTaoConfigFile(t *testing.T) {
+	c, err := Read("../configs/exp-tao.conf", "test")
+	if err != nil {
+		t.Fatalf("Failed to parse exp-tao.conf: %v", err)
+	}
+	if c.Protocol != "curpho" {
+		t.Errorf("Protocol = %s, want curpho", c.Protocol)
+	}
+	if c.Writes != 1 {
+		t.Errorf("Writes = %d, want 1", c.Writes)
+	}
+	if c.WeakRatio != 95 {
+		t.Errorf("WeakRatio = %d, want 95", c.WeakRatio)
+	}
+	if c.WeakWrites != 0 {
+		t.Errorf("WeakWrites = %d, want 0", c.WeakWrites)
+	}
+	if c.ScanRatio != 44 {
+		t.Errorf("ScanRatio = %d, want 44", c.ScanRatio)
+	}
+	if c.ScanCount != 1000 {
+		t.Errorf("ScanCount = %d, want 1000", c.ScanCount)
+	}
+	if c.KeySpace != 1000000 {
+		t.Errorf("KeySpace = %d, want 1000000", c.KeySpace)
+	}
+	if c.ZipfSkew != 0.8 {
+		t.Errorf("ZipfSkew = %f, want 0.8", c.ZipfSkew)
+	}
+	if c.Reqs != 5000 {
+		t.Errorf("Reqs = %d, want 5000", c.Reqs)
+	}
+	if c.Pendings != 15 {
+		t.Errorf("Pendings = %d, want 15", c.Pendings)
+	}
+}
