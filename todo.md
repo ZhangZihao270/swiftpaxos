@@ -9258,8 +9258,9 @@ beyond what strong-strong conflicts already cause.
 - Thread sweep: 1, 2, 4, 8, 16, 32, 64, 96, 3 reps each
 - Baseline disables scanRatio (all ops strong); generates summary CSV
 
-### ⬜ Step 6: Plot script
-- `scripts/plot-exp-tao.py`: throughput vs latency + CDF figure (similar to exp3.1 layout)
+### ✅ Step 6: Plot script [26:03:29]
+- `scripts/plot-exp-tao.py`: 1×2 figure — throughput vs weighted avg latency + latency CDF
+- Uses plot_style.py shared utilities, auto-discovers result directories
 
 ### 🔜 Step 7: Verify and run (later)
 - Local smoke test with `go test ./...` and a quick 1-thread run
