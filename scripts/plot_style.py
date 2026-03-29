@@ -30,13 +30,13 @@ PROTOCOL_COLORS = {
     'curpho':        WONG['blue'],
     'curpht':        WONG['green'],
     'curp-baseline': WONG['purple'],
-    'epaxos':        WONG['cyan'],
+    'epaxos':        '#2D5F8A',   # deep teal blue
     # Exp 1.1 extra protocols (don't appear in the same figure as curp/epaxos)
     'mongotunable':  WONG['black'],
     'pileus':        WONG['purple'],
     'pileusht':      WONG['cyan'],
     # Exp 2.1
-    'epaxosho':      WONG['blue'],
+    'epaxosho':      '#C44E52',   # muted crimson
 }
 
 PROTOCOL_MARKERS = {
@@ -74,12 +74,12 @@ def load_csv_optional(path):
 def setup_style():
     plt.rcParams.update({
         'font.family': 'serif',
-        'font.size': 11,
-        'axes.labelsize': 13,
-        'axes.titlesize': 13,
-        'legend.fontsize': 9,
-        'xtick.labelsize': 10,
-        'ytick.labelsize': 10,
+        'font.size': 15,
+        'axes.labelsize': 17,
+        'axes.titlesize': 17,
+        'legend.fontsize': 13,
+        'xtick.labelsize': 15,
+        'ytick.labelsize': 15,
         'figure.dpi': 300,
         'savefig.dpi': 300,
         'savefig.bbox': 'tight',

@@ -20,7 +20,6 @@ const TRUE = uint8(1)
 const FALSE = uint8(0)
 
 const COMMIT_GRACE_PERIOD = 10 * 1e9 // 10 seconds
-const WAIT_SLEEP_TIME = 1 * time.Millisecond
 const ADAPT_TIME_SEC = 10
 
 const HT_INIT_SIZE = 11000
@@ -107,23 +106,6 @@ type Replica struct {
 
 	// Batching
 	batchWait int
-
-	// Diagnostic counters for 123.7a (follower) and 123.7e (leader)
-	// Follower-side: handlePreAccept
-	diagPARecv       int64 // PreAccepts received
-	diagPAReplySent  int64 // PreAcceptReply sent (slow path reply)
-	diagPAOKSent     int64 // PreAcceptOK sent (fast path reply)
-	diagPAWaiting    int64 // WAITING triggered
-	diagPAEarlyReply int64 // early returns (already committed/executed)
-	diagPANack       int64 // NACK sent (lower ballot)
-	// Leader-side: handlePreAcceptReply/OK
-	diagPAReplyRecv  int64 // PreAcceptReply received
-	diagPAOKRecv     int64 // PreAcceptOK received
-	diagFastCommit   int64 // fast path commits
-	diagSlowCommit   int64 // slow path → Accept phase
-	diagAcceptCommit int64 // commits via Accept phase
-	diagReplyDropped int64 // replies dropped (status != PREACCEPTED)
-	diagBallotDrop   int64 // replies dropped (ballot mismatch)
 }
 
 type instanceId struct {
@@ -266,16 +248,6 @@ func New(alias string, id int, peerAddrList []string, exec, beacon, durable bool
 type Exec struct {
 	r           *Replica
 	skippedDeps int64 // count of causal deps skipped during execute (atomic)
-
-	// SCC diagnostics (per-call, reset in findSCC)
-	sccVisited  int
-	sccMaxDepth int
-	sccDepth    int
-
-	// SCC diagnostics (cumulative, for periodic logging)
-	totalSCCCalls   int64
-	totalSCCVisited int64
-	maxDepthSeen    int
 }
 
 // recordInstanceMetadata appends instance metadata to stable storage.
@@ -480,12 +452,6 @@ func (r *Replica) run() {
 					r.SendBeacon(q)
 				}
 			}
-			// Diagnostic counters (123.7a/e)
-			r.Printf("DIAG follower: paRecv=%d replySent=%d okSent=%d waiting=%d early=%d nack=%d",
-				r.diagPARecv, r.diagPAReplySent, r.diagPAOKSent, r.diagPAWaiting, r.diagPAEarlyReply, r.diagPANack)
-			r.Printf("DIAG leader: replyRecv=%d okRecv=%d fast=%d slow=%d acceptCommit=%d dropped=%d ballotDrop=%d",
-				r.diagPAReplyRecv, r.diagPAOKRecv, r.diagFastCommit, r.diagSlowCommit, r.diagAcceptCommit, r.diagReplyDropped, r.diagBallotDrop)
-
 			// Retry stuck PREACCEPTED/ACCEPTED instances (leader-side liveness)
 			if r.outstandingStrong > 0 && time.Since(r.lastStuckRetry) > 1*time.Second {
 				r.retryStuckInstances()
@@ -979,81 +945,7 @@ func (r *Replica) handlePrepare(prepare *Prepare) {
 // handlePreAccept processes a PreAccept message from the leader (follower side).
 // It updates attributes with local conflict information and replies with either
 // a PreAcceptOK (fast path, no changes) or PreAcceptReply (with updated attributes).
-// trackWaitingDependency checks if any causal dependencies are missing (nil) or
-// still in WAITING state. Returns the count of such deps. If cardinality > 0,
-// the follower should set the instance to WAITING and spawn waitPreAcceptHandle.
-func (r *Replica) trackWaitingDependency(replica int32, instance int32, deps []int32, cl []int32, timeout uint64) (int32, uint64) {
-	cardinality := int32(0)
-	for i := 0; i < len(deps); i++ {
-		if deps[i] == -1 {
-			continue
-		}
-		if r.InstanceSpace[i][deps[i]] == nil {
-			// Nil dep with causal CL — not yet received
-			if len(cl) > 0 && cl[i] == int32(state.CAUSAL) {
-				cardinality++
-				break
-			}
-		} else if r.InstanceSpace[i][deps[i]].Cmds != nil {
-			// Dep exists but is WAITING and causal — still blocked
-			if r.InstanceSpace[i][deps[i]].State == WAITING && r.InstanceSpace[i][deps[i]].Cmds[0].CL == state.CAUSAL {
-				cardinality++
-				break
-			}
-		} else {
-			// Dep exists but Cmds is nil — treat as missing if causal
-			if len(cl) > 0 && cl[i] == int32(state.CAUSAL) {
-				cardinality++
-				break
-			}
-		}
-		if timeout >= COMMIT_GRACE_PERIOD {
-			r.instancesToRecover <- &instanceId{int32(i), deps[i]}
-			timeout = 0
-		}
-	}
-	return cardinality, timeout
-}
-
-// waitPreAcceptHandle is spawned as a goroutine when a follower's PreAccept has
-// unresolved causal deps. It polls until all deps arrive, then sends the reply.
-func (r *Replica) waitPreAcceptHandle(command []state.Command, changed bool, uncommittedDeps bool, replicaId int32, leaderId int32, instance int32, ballot int32, seq int32, deps []int32, cl []int32) {
-	var timeout uint64 = 0
-	for {
-		cardinality, t := r.trackWaitingDependency(replicaId, instance, r.InstanceSpace[replicaId][instance].Deps, r.InstanceSpace[replicaId][instance].CL, timeout)
-		timeout = t
-		if cardinality == 0 {
-			r.InstanceSpace[replicaId][instance].State = READY
-			break
-		}
-		timeout += EXEC_SLEEP_TIME_NS
-		time.Sleep(WAIT_SLEEP_TIME)
-	}
-
-	if len(command) == 0 {
-		r.latestCPReplica = replicaId
-		r.latestCPInstance = instance
-		r.clearHashtables()
-	}
-
-	if changed || uncommittedDeps || replicaId != leaderId || !isInitialBallot(ballot) {
-		r.replyPreAccept(leaderId, &PreAcceptReply{
-			Replica:       replicaId,
-			Instance:      instance,
-			OK:            TRUE,
-			Ballot:        ballot,
-			Seq:           seq,
-			Deps:          deps,
-			CL:            cl,
-			CommittedDeps: r.CommittedUpTo,
-		})
-	} else {
-		r.SendMsg(leaderId, r.preAcceptOKRPC, &PreAcceptOK{Instance: instance})
-	}
-}
-
 func (r *Replica) handlePreAccept(preAccept *PreAccept) {
-	r.diagPARecv++
 	inst := r.InstanceSpace[preAccept.Replica][preAccept.Instance]
 
 	if preAccept.Seq >= r.maxSeq {
@@ -1066,8 +958,6 @@ func (r *Replica) handlePreAccept(preAccept *PreAccept) {
 
 	// Already executed or discarded — send PreAcceptOK so leader can complete quorum
 	if inst != nil && (inst.Status == EXECUTED || inst.Status == DISCARDED) {
-		r.diagPAEarlyReply++
-		r.diagPAOKSent++
 		r.SendMsg(preAccept.LeaderId, r.preAcceptOKRPC, &PreAcceptOK{Instance: preAccept.Instance})
 		return
 	}
@@ -1081,8 +971,6 @@ func (r *Replica) handlePreAccept(preAccept *PreAccept) {
 		}
 		r.recordCommands(preAccept.Command)
 		r.sync()
-		r.diagPAEarlyReply++
-		r.diagPAOKSent++
 		r.SendMsg(preAccept.LeaderId, r.preAcceptOKRPC, &PreAcceptOK{Instance: preAccept.Instance})
 		return
 	}
@@ -1107,7 +995,6 @@ func (r *Replica) handlePreAccept(preAccept *PreAccept) {
 	// Ballot check and instance update
 	if inst != nil {
 		if preAccept.Ballot < inst.bal {
-			r.diagPANack++
 			r.replyPreAccept(preAccept.LeaderId, &PreAcceptReply{
 				Replica:       preAccept.Replica,
 				Instance:      preAccept.Instance,
@@ -1148,16 +1035,6 @@ func (r *Replica) handlePreAccept(preAccept *PreAccept) {
 	r.recordCommands(preAccept.Command)
 	r.sync()
 
-	// Check for missing causal dependencies (WAITING mechanism from Orca)
-	cardinality, _ := r.trackWaitingDependency(preAccept.Replica, preAccept.Instance, deps, cl, 0)
-	if cardinality > 0 {
-		// Set instance to WAITING and spawn goroutine to poll for deps
-		r.diagPAWaiting++
-		r.InstanceSpace[preAccept.Replica][preAccept.Instance].State = WAITING
-		go r.waitPreAcceptHandle(preAccept.Command, changed, uncommittedDeps, preAccept.Replica, preAccept.LeaderId, preAccept.Instance, preAccept.Ballot, seq, deps, cl)
-		return
-	}
-
 	if len(preAccept.Command) == 0 {
 		// Checkpoint
 		r.latestCPReplica = preAccept.Replica
@@ -1167,7 +1044,6 @@ func (r *Replica) handlePreAccept(preAccept *PreAccept) {
 
 	if changed || uncommittedDeps || preAccept.Replica != preAccept.LeaderId || !isInitialBallot(preAccept.Ballot) {
 		// Slow path reply — include updated attributes
-		r.diagPAReplySent++
 		r.replyPreAccept(preAccept.LeaderId, &PreAcceptReply{
 			Replica:       preAccept.Replica,
 			Instance:      preAccept.Instance,
@@ -1180,7 +1056,6 @@ func (r *Replica) handlePreAccept(preAccept *PreAccept) {
 		})
 	} else {
 		// Fast path reply — attributes unchanged
-		r.diagPAOKSent++
 		r.SendMsg(preAccept.LeaderId, r.preAcceptOKRPC, &PreAcceptOK{Instance: preAccept.Instance})
 	}
 }
@@ -1947,12 +1822,10 @@ func (r *Replica) handlePrepareReply(preply *PrepareReply) {
 // Merges attributes and determines whether to commit on the fast path or
 // fall through to the slow path (Accept phase).
 func (r *Replica) handlePreAcceptReply(pareply *PreAcceptReply) {
-	r.diagPAReplyRecv++
 	inst := r.InstanceSpace[pareply.Replica][pareply.Instance]
 
 	if inst.Status != PREACCEPTED {
 		// Already moved past PreAccept phase — delayed reply
-		r.diagReplyDropped++
 		return
 	}
 
@@ -1970,7 +1843,6 @@ func (r *Replica) handlePreAcceptReply(pareply *PreAcceptReply) {
 	}
 
 	if inst.bal != pareply.Ballot {
-		r.diagBallotDrop++
 		return
 	}
 
@@ -2002,28 +1874,25 @@ func (r *Replica) handlePreAcceptReply(pareply *PreAcceptReply) {
 	// Fast path: all peers agreed on same attributes, all deps committed, initial ballot
 	if inst.lb.preAcceptOKs >= r.FastQuorumSize()-1 && inst.lb.allEqual && allCommitted && isInitialBallot(inst.bal) {
 		r.Stats.M["fast"]++
-		r.diagFastCommit++
 
 		r.InstanceSpace[pareply.Replica][pareply.Instance].Status = STRONGLY_COMMITTED
 		r.updateCommitted(pareply.Replica)
 		r.updateStrongSessionConflict(inst.Cmds, pareply.Replica, pareply.Instance)
 
-		if inst.lb.clientProposals != nil {
+		if inst.lb.clientProposals != nil && !r.Dreply {
 			r.outstandingStrong -= int64(len(inst.lb.clientProposals))
-			if !r.Dreply {
-				for i := 0; i < len(inst.lb.clientProposals); i++ {
-					prop := inst.lb.clientProposals[i]
-					r.clientReplyCount++
-					r.ReplyProposeTS(
-						&defs.ProposeReplyTS{
-							OK:        TRUE,
-							CommandId: prop.CommandId,
-							Value:     state.NIL(),
-							Timestamp: prop.Timestamp,
-						},
-						prop.Reply,
-						prop.Mutex)
-				}
+			for i := 0; i < len(inst.lb.clientProposals); i++ {
+				prop := inst.lb.clientProposals[i]
+				r.clientReplyCount++
+				r.ReplyProposeTS(
+					&defs.ProposeReplyTS{
+						OK:        TRUE,
+						CommandId: prop.CommandId,
+						Value:     state.NIL(),
+						Timestamp: prop.Timestamp,
+					},
+					prop.Reply,
+					prop.Mutex)
 			}
 		}
 
@@ -2036,7 +1905,6 @@ func (r *Replica) handlePreAcceptReply(pareply *PreAcceptReply) {
 	} else if inst.lb.preAcceptOKs >= r.N/2 && (!inst.lb.allEqual || !allCommitted || !isInitialBallot(inst.bal)) {
 		// Slow path: move to Accept phase (only when fast path is provably impossible)
 		r.Stats.M["slow"]++
-		r.diagSlowCommit++
 		if !allCommitted {
 			r.Stats.M["weird"]++
 		}
@@ -2050,16 +1918,13 @@ func (r *Replica) handlePreAcceptReply(pareply *PreAcceptReply) {
 // handlePreAcceptOK processes a fast-path PreAcceptOK from a follower (leader side).
 // PreAcceptOK indicates the follower's attributes matched exactly — no merge needed.
 func (r *Replica) handlePreAcceptOK(pareply *PreAcceptOK) {
-	r.diagPAOKRecv++
 	inst := r.InstanceSpace[r.Id][pareply.Instance]
 
 	if inst.Status != PREACCEPTED {
-		r.diagReplyDropped++
 		return
 	}
 
 	if !isInitialBallot(inst.bal) {
-		r.diagBallotDrop++
 		return
 	}
 
@@ -2081,28 +1946,25 @@ func (r *Replica) handlePreAcceptOK(pareply *PreAcceptOK) {
 	// Fast path commit check
 	if inst.lb.preAcceptOKs >= r.FastQuorumSize()-1 && inst.lb.allEqual && allCommitted && isInitialBallot(inst.bal) {
 		r.Stats.M["fast"]++
-		r.diagFastCommit++
 
 		r.InstanceSpace[r.Id][pareply.Instance].Status = STRONGLY_COMMITTED
 		r.updateCommitted(r.Id)
 		r.updateStrongSessionConflict(inst.Cmds, r.Id, pareply.Instance)
 
-		if inst.lb.clientProposals != nil {
+		if inst.lb.clientProposals != nil && !r.Dreply {
 			r.outstandingStrong -= int64(len(inst.lb.clientProposals))
-			if !r.Dreply {
-				for i := 0; i < len(inst.lb.clientProposals); i++ {
-					prop := inst.lb.clientProposals[i]
-					r.clientReplyCount++
-					r.ReplyProposeTS(
-						&defs.ProposeReplyTS{
-							OK:        TRUE,
-							CommandId: prop.CommandId,
-							Value:     state.NIL(),
-							Timestamp: prop.Timestamp,
-						},
-						prop.Reply,
-						prop.Mutex)
-				}
+			for i := 0; i < len(inst.lb.clientProposals); i++ {
+				prop := inst.lb.clientProposals[i]
+				r.clientReplyCount++
+				r.ReplyProposeTS(
+					&defs.ProposeReplyTS{
+						OK:        TRUE,
+						CommandId: prop.CommandId,
+						Value:     state.NIL(),
+						Timestamp: prop.Timestamp,
+					},
+					prop.Reply,
+					prop.Mutex)
 			}
 		}
 
@@ -2114,7 +1976,6 @@ func (r *Replica) handlePreAcceptOK(pareply *PreAcceptOK) {
 	} else if inst.lb.preAcceptOKs >= r.N/2 && (!inst.lb.allEqual || !allCommitted || !isInitialBallot(inst.bal)) {
 		// Slow path (only when fast path is provably impossible)
 		r.Stats.M["slow"]++
-		r.diagSlowCommit++
 		inst.Status = ACCEPTED
 		r.bcastAccept(r.Id, pareply.Instance, inst.bal, int32(len(inst.Cmds)), inst.Seq, inst.Deps, inst.CL)
 	}
@@ -2145,28 +2006,25 @@ func (r *Replica) handleAcceptReply(areply *AcceptReply) {
 	inst.lb.acceptOKs++
 
 	if inst.lb.acceptOKs+1 > r.N/2 {
-		r.diagAcceptCommit++
 		r.InstanceSpace[areply.Replica][areply.Instance].Status = STRONGLY_COMMITTED
 
 		r.updateCommitted(areply.Replica)
 		r.updateStrongSessionConflict(inst.Cmds, areply.Replica, areply.Instance)
 
-		if inst.lb.clientProposals != nil {
+		if inst.lb.clientProposals != nil && !r.Dreply {
 			r.outstandingStrong -= int64(len(inst.lb.clientProposals))
-			if !r.Dreply {
-				for i := 0; i < len(inst.lb.clientProposals); i++ {
-					prop := inst.lb.clientProposals[i]
-					r.clientReplyCount++
-					r.ReplyProposeTS(
-						&defs.ProposeReplyTS{
-							OK:        TRUE,
-							CommandId: prop.CommandId,
-							Value:     state.NIL(),
-							Timestamp: prop.Timestamp,
-						},
-						prop.Reply,
-						prop.Mutex)
-				}
+			for i := 0; i < len(inst.lb.clientProposals); i++ {
+				prop := inst.lb.clientProposals[i]
+				r.clientReplyCount++
+				r.ReplyProposeTS(
+					&defs.ProposeReplyTS{
+						OK:        TRUE,
+						CommandId: prop.CommandId,
+						Value:     state.NIL(),
+						Timestamp: prop.Timestamp,
+					},
+					prop.Reply,
+					prop.Mutex)
 			}
 		}
 

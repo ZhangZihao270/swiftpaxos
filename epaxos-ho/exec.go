@@ -10,8 +10,7 @@ import (
 	"github.com/imdea-software/swiftpaxos/state"
 )
 
-const EXEC_SLEEP_TIME_NS = 1000    // 1 microsecond (for timeout counter)
-const EXEC_BACKOFF = time.Millisecond // sleep when no progress
+const EXEC_SLEEP_TIME_NS = 1000 // 1 microsecond
 
 var execVAL state.Value // default zero value returned for discarded writes
 
@@ -41,18 +40,7 @@ func (r *Replica) executeCommands() {
 					continue
 				}
 
-				// Advance ExecedUpTo past CAUSALLY_COMMITTED instances.
-				// Causal instances don't participate in strong SCC ordering,
-				// so keeping ExecedUpTo behind them bloats strongconnect's
-				// scan range (ExecedUpTo+1 to deps[q]) causing O(N*range) overhead.
-				if r.InstanceSpace[q][inst] != nil &&
-					r.InstanceSpace[q][inst].Status == CAUSALLY_COMMITTED &&
-					inst == r.ExecedUpTo[q]+1 {
-					r.ExecedUpTo[q] = inst
-				}
-
 				if r.InstanceSpace[q][inst] == nil ||
-					r.InstanceSpace[q][inst].State == WAITING ||
 					(r.InstanceSpace[q][inst].Status != STRONGLY_COMMITTED && r.InstanceSpace[q][inst].Status != CAUSALLY_COMMITTED) {
 					if inst == problemInstance[q] {
 						timeout[q] += EXEC_SLEEP_TIME_NS
@@ -67,10 +55,7 @@ func (r *Replica) executeCommands() {
 					if r.InstanceSpace[q][inst] == nil {
 						continue
 					}
-					// Continue past non-nil uncommitted instances instead of breaking.
-					// Prevents stuck strong instances from blocking executable
-					// causal instances further in the sequence.
-					continue
+					break
 				}
 
 				if ok := r.exec.executeCommand(int32(q), inst); ok {
@@ -85,19 +70,11 @@ func (r *Replica) executeCommands() {
 			}
 		}
 		if !executed {
-			time.Sleep(EXEC_BACKOFF)
+			time.Sleep(EXEC_SLEEP_TIME_NS)
 		}
 		if time.Since(lastLog) > 5*time.Second {
 			skipped := atomic.LoadInt64(&r.exec.skippedDeps)
-			log.Printf("EXEC: executed=%d skippedCausalDeps=%d sccCalls=%d avgVisited=%.1f maxDepth=%d execedUpTo=%v",
-				execCount, skipped, r.exec.totalSCCCalls,
-				func() float64 {
-					if r.exec.totalSCCCalls == 0 {
-						return 0
-					}
-					return float64(r.exec.totalSCCVisited) / float64(r.exec.totalSCCCalls)
-				}(),
-				r.exec.maxDepthSeen, r.ExecedUpTo)
+			log.Printf("EXEC: executed=%d skippedCausalDeps=%d execedUpTo=%v", execCount, skipped, r.ExecedUpTo)
 			lastLog = time.Now()
 		}
 	}
@@ -111,9 +88,6 @@ func (e *Exec) executeCommand(replica int32, instance int32) bool {
 	inst := e.r.InstanceSpace[replica][instance]
 	if inst.Status == EXECUTED || inst.Status == DISCARDED {
 		return true
-	}
-	if inst.State == WAITING {
-		return false
 	}
 	if inst.Status != STRONGLY_COMMITTED && inst.Status != CAUSALLY_COMMITTED {
 		return false
@@ -226,26 +200,10 @@ var sccStack []*Instance = make([]*Instance, 0, 100)
 func (e *Exec) findSCC(root *Instance) bool {
 	index := 1
 	sccStack = sccStack[0:0]
-	e.sccVisited = 0
-	e.sccMaxDepth = 0
-	e.sccDepth = 0
-	result := e.strongconnect(root, &index)
-	e.totalSCCCalls++
-	e.totalSCCVisited += int64(e.sccVisited)
-	if e.sccMaxDepth > e.maxDepthSeen {
-		e.maxDepthSeen = e.sccMaxDepth
-	}
-	return result
+	return e.strongconnect(root, &index)
 }
 
 func (e *Exec) strongconnect(v *Instance, index *int) bool {
-	e.sccVisited++
-	e.sccDepth++
-	if e.sccDepth > e.sccMaxDepth {
-		e.sccMaxDepth = e.sccDepth
-	}
-	defer func() { e.sccDepth-- }()
-
 	v.Index = *index
 	v.Lowlink = *index
 	*index++
@@ -280,8 +238,8 @@ func (e *Exec) strongconnect(v *Instance, index *int) bool {
 			if e.r.InstanceSpace[q][i].Status == EXECUTED || e.r.InstanceSpace[q][i].Status == DISCARDED {
 				continue
 			}
-			if (e.r.InstanceSpace[q][i].Status != STRONGLY_COMMITTED && e.r.InstanceSpace[q][i].Status != CAUSALLY_COMMITTED) || e.r.InstanceSpace[q][i].State == WAITING {
-				// Not committed yet or still WAITING — skip if causal, block if strong
+			if e.r.InstanceSpace[q][i].Status != STRONGLY_COMMITTED && e.r.InstanceSpace[q][i].Status != CAUSALLY_COMMITTED {
+				// Not committed yet — skip if causal, block if strong
 				if e.r.InstanceSpace[q][i].Cmds != nil && e.r.InstanceSpace[q][i].Cmds[0].CL == state.CAUSAL {
 					atomic.AddInt64(&e.skippedDeps, 1)
 					continue

@@ -28,8 +28,8 @@ PROTOCOLS = ['raft', 'raftht', 'mongotunable', 'pileus', 'pileusht']
 HYBRID_PROTOS = {'raftht', 'mongotunable', 'pileus', 'pileusht'}
 
 WRITE_GROUPS = [
-    (5,  'w=5%'),
-    (50, 'w=50%'),
+    (5,  'Write Ratio 5%'),
+    (50, 'Write Ratio 50%'),
 ]
 
 # Thread count for CDF subplot
@@ -48,11 +48,11 @@ PROTO_DIR = {
 # TODO: after re-running with merged script, all will be in the same dir.
 # For now, pileusht was run separately.
 RESULT_DIRS = {
-    'raft':         'eval-exp1.1-4proto-20260315',
-    'raftht':       'eval-exp1.1-4proto-20260315',
-    'mongotunable': 'eval-exp1.1-4proto-20260315',
-    'pileus':       'eval-exp1.1-4proto-20260315',
-    'pileusht':     'eval-exp1.1-pileusht-v2-20260316',
+    'raft':         'eval-exp1.1-20260321',
+    'raftht':       'eval-exp1.1-20260321',
+    'mongotunable': 'eval-exp1.1-20260321',
+    'pileus':       'eval-exp1.1-20260321',
+    'pileusht':     'eval-exp1.1-20260321',
 }
 
 
@@ -70,35 +70,30 @@ def load_latencies(base, proto, wg, threads):
 
 
 def plot_tput_lat(ax, rows, wg, wg_label):
-    """Left subplot: throughput vs average latency (combined strong+weak)."""
+    """Left subplot: throughput vs weighted avg latency."""
     for proto in PROTOCOLS:
-        data = extract_tput_latency_wg(rows, proto, wg)
-        if not data['throughput']:
+        filtered = [r for r in rows
+                    if r['protocol'] == proto
+                    and int(r['write_group']) == wg]
+        filtered.sort(key=lambda r: int(r['threads']))
+        if not filtered:
             continue
         color  = PROTOCOL_COLORS[proto]
         marker = PROTOCOL_MARKERS[proto]
         label  = PROTOCOL_LABELS[proto]
 
-        # Compute combined avg latency: weighted mean of strong and weak p50.
-        # For non-hybrid (Raft): weak p50 is N/A, just use strong.
-        avg_lat = []
-        for s, w in zip(data['s_p50'], data['w_p50']):
-            if s is None:
-                avg_lat.append(None)
-            elif w is None or proto not in HYBRID_PROTOS:
-                avg_lat.append(s)
-            else:
-                avg_lat.append((s + w) / 2.0)
+        throughput = [float(r['avg_throughput']) for r in filtered]
+        avg_lat = [float(r['avg_lat']) for r in filtered]
 
-        x, y = clean_pairs(data['throughput'], avg_lat)
-        # x, y = pareto_frontier(x, y)
+        x, y = clean_pairs(throughput, avg_lat)
         if x:
-            ax.plot(x, y, color=color, marker=marker, label=label, zorder=3)
+            zo = 10 if proto == 'raftht' else 3
+            ax.plot(x, y, color=color, marker=marker, markersize=8, linewidth=2.5, label=label, zorder=zo)
 
     ax.set_xlabel('Throughput (Kops/sec)')
-    ax.set_ylabel('Avg P50 Latency (ms)')
-    ax.set_title(f'Throughput vs Latency ({wg_label})', fontsize=11)
-    ax.legend(loc='upper left', fontsize=8, ncol=1)
+    ax.set_ylabel('Avg Latency (ms)')
+    ax.set_title(f'Throughput vs Latency ({wg_label})', fontsize=13)
+    ax.legend(loc='upper left', fontsize=10, ncol=1)
     ax.set_xlim(left=0)
     ax.set_ylim(bottom=0)
     ax.xaxis.set_major_formatter(ticker.FuncFormatter(kops_formatter))
@@ -106,6 +101,8 @@ def plot_tput_lat(ax, rows, wg, wg_label):
 
 def plot_cdf(ax, base, wg, wg_label):
     """Right subplot: combined latency CDF at fixed thread count."""
+    # Draw raftht last (highest zorder) so it appears on top when overlapping
+    CDF_ZORDER = {'raftht': 10, 'pileusht': 7, 'mongotunable': 6, 'pileus': 5, 'raft': 4}
     for proto in PROTOCOLS:
         lats = load_latencies(base, proto, wg, CDF_THREADS)
         if lats is None:
@@ -122,21 +119,17 @@ def plot_cdf(ax, base, wg, wg_label):
         if all_lats:
             sorted_lats = np.sort(all_lats)
             cdf = np.arange(1, len(sorted_lats) + 1) / len(sorted_lats)
-            ax.plot(sorted_lats, cdf, color=color, linewidth=1.8,
-                    label=label, zorder=3)
+            lw = 3.0 if proto == 'raftht' else 2.5
+            ax.plot(sorted_lats, cdf, color=color, linewidth=lw,
+                    label=label, zorder=CDF_ZORDER.get(proto, 3))
 
     ax.set_xlabel('Latency (ms)')
     ax.set_ylabel('CDF')
-    ax.set_title(f'Latency CDF at t={CDF_THREADS} ({wg_label})', fontsize=11)
-    ax.legend(loc='lower right', fontsize=8, ncol=1)
+    ax.set_title(f'Latency CDF, 96 clients ({wg_label})', fontsize=13)
+    ax.legend(loc='lower right', fontsize=10, ncol=1)
     ax.set_ylim(0, 1.02)
-    # Power scale (x^0.4): compresses low end, stretches high end
-    ax.set_xscale('function', functions=(
-        lambda x: np.power(np.clip(x, 1e-3, None), 0.4),
-        lambda x: np.power(np.clip(x, 1e-3, None), 1/0.4)))
-    ax.set_xlim(left=0.1, right=300)
-    ax.set_xticks([0.1, 1, 10, 50, 100, 200])
-    ax.get_xaxis().set_major_formatter(ticker.ScalarFormatter())
+    ax.set_xlim(left=0, right=300)
+    ax.set_xticks([0, 50, 100, 150, 200, 250, 300])
 
 
 def main():
@@ -148,13 +141,19 @@ def main():
     setup_style()
     rows = load_csv(csv_path)
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 9))
+    fig, axes = plt.subplots(1, 4, figsize=(24, 4))
 
-    for row_idx, (wg, wg_label) in enumerate(WRITE_GROUPS):
-        plot_tput_lat(axes[row_idx, 0], rows, wg, wg_label)
-        plot_cdf(axes[row_idx, 1], base, wg, wg_label)
+    labels = ['(a)', '(b)', '(c)', '(d)']
+    for col_idx, (wg, wg_label) in enumerate(WRITE_GROUPS):
+        plot_tput_lat(axes[col_idx * 2], rows, wg, wg_label)
+        plot_cdf(axes[col_idx * 2 + 1], base, wg, wg_label)
 
-    plt.tight_layout(h_pad=3, w_pad=3)
+    for i, ax in enumerate(axes):
+        ax.text(0.5, -0.28, labels[i], transform=ax.transAxes,
+                fontsize=14, fontweight='bold', ha='center')
+
+    plt.tight_layout(w_pad=1.5)
+    plt.subplots_adjust(bottom=0.18)
     save_figure(fig, out_dir, 'exp1.1-throughput-latency')
 
 

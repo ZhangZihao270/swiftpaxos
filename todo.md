@@ -7,12 +7,16 @@ This document tracks the implementation of multiple hybrid consistency protocols
 ---
 
 ## ⬜ Next TODOs:
+- **Phase 124**: TAO-like benchmark — add SCAN workload to client, run evaluation (see `evaluation/tao-benchmark-design.md`)
+
+## ✅ Completed:
 - **Phase 100**: Re-run Exp 1.1 (Raft vs Raft-HT, writes=5%/50%, all optimizations applied) — **DONE**
 - **Phase 101**: Exp 2.3 — Raft-HT Failure Recovery — **DONE** (no recovery: client lacks failover)
 - **Phase 102**: Client Leader Failover — **DONE** (failover works but election too slow)
 - **Phase 103**: Fix election blocking + kill logic + client timeout — **DONE** (recovery in ~2s, aggregate barely dips)
 - **Phase 104**: EPaxos Benchmark (Exp 1.1 baseline) — **DONE** (w5%: 55.8K, w50%: 49.5K peak at t=96)
 - **Phase 105**: EPaxos-HO Benchmark — **DONE** (w5%: 36.7K, w50%: 37.1K peak; weak p50=0.2ms)
+- **Phase 123**: EPaxos-HO super quorum + Dreply fixes — **PARTIALLY DONE, remaining tasks DISCARDED** (PreAcceptReply loss issue not resolved; EPaxos-HO Dreply=true still broken)
 
 ## Table of Contents
 
@@ -8792,7 +8796,7 @@ CURP already uses the correct formula via `replica.NewThreeQuartersOf(N) = (3*N)
 
 **Remaining issue**: Even after skipping causal deps, strong ops on remote replicas (3,4) are slow to commit (geo latency + super quorum = 4/5), causing execute to stall waiting for strong deps. This is a fundamental EPaxos architectural issue — commit and execute are decoupled, and the Tarjan SCC execution requires ALL deps to be committed before any instance in the SCC can execute.
 
-**Status**: 🔄 IN PROGRESS — EPaxos `Dreply=true` works, EPaxos-HO `Dreply=true` still too slow (~148 ops/sec). See Phase 123.4.
+**Status**: ❌ **DISCARDED** — EPaxos `Dreply=true` works. EPaxos-HO `Dreply=true` blocked by PreAcceptReply loss (Phase 123.7). Remaining tasks (123.6c/d, 123.7a+e) discarded.
 
 #### Phase 123.4: Investigate EPaxos-HO Execute Deadlock (Dreply=true)
 
@@ -8932,9 +8936,9 @@ per executed instance and the ~260 executions/sec rate.
   - Shrinks strongconnect scan range (ExecedUpTo+1 to deps[q]), reducing O(N*range) overhead
   - 1 new test verifies advancement past contiguous causal slots
 
-- [ ] 123.6c: Build and spot test (t=32)
+- [~] 123.6c: DISCARDED — EPaxos-HO Dreply=true still broken (1050ms latency from PreAcceptReply loss)
 
-- [ ] 123.6d: Full experiment run — Exp 2.1 and Exp 2.2
+- [~] 123.6d: DISCARDED — blocked by 123.6c
 
 **Spot test results history (t=32, w=5%, weakRatio=50)**:
 
@@ -8986,9 +8990,7 @@ that causes the first PreAcceptReply/PreAcceptOK to be lost or never sent. Possi
   replicas, codes match (code 13 = PreAcceptOK → preAcceptOKChan). Confirmed no bug.
 
 **Next steps**:
-- [ ] 123.7a+e: Add diagnostic counters to EPaxos-HO for runtime debugging.
-  Follower: count PreAccepts received, replies sent (Reply vs OK), WAITING triggered, early returns.
-  Leader: count replies received (Reply vs OK), fast/slow commits, dropped replies (status!=PREACCEPTED).
+- [~] 123.7a+e: DISCARDED — diagnostic counters not needed; root cause identified (PreAcceptReply loss) but fix deferred.
 
 **How to run on AWS**:
 
@@ -9025,3 +9027,81 @@ done
 - `[x]` - Done task with timestamp [yy:mm:dd, hh:mm]
 - Priority: HIGH > MEDIUM > LOW
 - Each task should be small enough (<500 LOC)
+
+---
+
+### Pending: CURP-HT T Property Fix
+
+**Problem:** Weak writes currently call `leaderUnsync` (curp-ht.go:863), entering the `unsynced` map. This causes same-key strong ops to fail `ok()` and fall to slow path — violating the T property (weak ops affecting strong performance).
+
+**Fix (two changes):**
+
+1. **Remove weak writes from `unsynced`** — weak writes should only go into the log (get a slot), NOT enter `unsynced`. This preserves strong fast path (`ok()` only sees strong writes).
+
+2. **asyncReplicateWeak must execute BEFORE replying** — change order from `commit → reply → execute` to `commit → execute → reply`. This guarantees that by the time the client receives the weak write reply and sends a subsequent strong GET, the weak write is already in `r.State` and `ComputeResult(r.State)` sees it.
+
+**Why this is correct:**
+- Same session: weak write committed + executed → reply → client sends strong GET → `r.State` has the value → speculative `ComputeResult` sees it ✓
+- Cross session: no causal dependency between sessions. If weak write not yet executed when another client's strong GET arrives, that's fine — they have no ordering guarantee between them. Once committed + executed, `r.State` is updated and subsequent reads see it ✓
+- `ok()` only checks strong writes → weak writes never cause strong ops to go slow path ✓
+
+**Impact:** Not urgent — current behavior is functionally correct but suboptimal (strong ops unnecessarily go slow path when conflicting with weak writes on same key).
+
+---
+
+### TLA+ Model Checking Results: 5 Replicas (2026-03-27)
+
+**Goal**: Run TLC with 5 replicas (up from 3) to verify hybrid consistency properties at larger scale.
+
+**Configuration**: 5 replicas, 2 clients, 1 key, 2 values, MaxOps=2, 64-core server, ~27 hours runtime.
+
+| Protocol | Config | States Generated | Distinct States | Depth | Time | Result |
+|----------|--------|-----------------|----------------|-------|------|--------|
+| Raft-HT | 5r/2c/1k/2v/MaxOps=2 | 6.49B | 1.75B | 24 | ~27 hr | **NO ERRORS (partial)** |
+| CURP-HT | 5r/2c/1k/2v/MaxOps=2 | 7.86B | 1.06B | 26 | ~27 hr | **NO ERRORS (partial)** |
+
+**Comparison with 3-replica runs**:
+
+| Protocol | 3r States | 3r Time | 5r States | 5r Time | Scale Factor |
+|----------|----------|---------|-----------|---------|-------------|
+| Raft-HT  | 1.53B (2c/2v/MaxOps=2) | 2 hr | 6.49B | 27 hr | 4.2x states |
+| CURP-HT  | 3.05B (2c/2v/MaxOps=1) | 2 hr | 7.86B | 27 hr | 2.6x states |
+
+**Invariants checked (no violations)**:
+- MCTypeInv (type correctness)
+- SafetyInv (LinearizabilityInv + CausalConsistencyInv + HybridCompatibilityInv)
+
+**Note**: Both runs are partial (not exhaustive) — state space with 5 replicas is too large to fully explore. However, billions of states explored with zero violations provides strong confidence in correctness.
+
+---
+
+### ❌ DISCARDED: EPaxos-HO WAITING Mechanism
+
+**Status**: DISCARDED — blocked by Phase 123.7 (PreAcceptReply loss). The WAITING mechanism was partially ported in Phase 123.5 but doesn't help because the underlying PreAcceptReply delivery issue makes Dreply=true non-functional.
+
+**Problem:** Our EPaxos-HO `handlePreAccept` (follower side) lacks the WAITING mechanism from Orca. Without it, when a strong PreAccept arrives with causal deps that haven't reached the follower yet, the follower computes different deps than the leader → `allEqual=false` → always slow path (2 RTT).
+
+**How Orca handles it:**
+1. Follower receives strong PreAccept, computes deps
+2. Calls `trackWaitingDependency`: checks if any causal dep is nil (not arrived) or State==WAITING
+3. If cardinality > 0: sets instance State=WAITING, spawns `waitPreAcceptHandle` goroutine
+4. Goroutine polls until causal dep arrives (not nil, not WAITING) — **does NOT wait for commit, only arrival**
+5. Recomputes deps (updateStrongAttributes2), sets State=READY, sends PreAcceptReply
+6. Timeout after COMMIT_GRACE_PERIOD: gives up waiting, sends reply with current deps (slow path fallback)
+
+**Key design points:**
+- WAITING only checks one level (direct causal dep arrived), NOT transitive deps
+- Causal instances arrive via `bcastCausalCommit` as CAUSALLY_COMMITTED + State=READY — never WAITING on follower
+- Transitive dep correctness is ensured at execution time by SCC algorithm, not at PreAccept time
+- If a causal instance is permanently lost, EPaxos recovery mechanism handles it (commit no-op)
+
+**Correctness without WAITING:** Still correct — slow path handles mismatched deps. WAITING is a performance optimization for fast path.
+
+**Previous attempt:** Phase 123.5 added WAITING but was broken by slow path guard bug (1050ms latency). Slow path guard is now fixed. WAITING can be re-added.
+
+**Fix plan:**
+1. Add `trackWaitingDependency(replica, instance, deps, cl)` — check if causal deps arrived
+2. Add `waitPreAcceptHandle(...)` — goroutine that polls until causal deps arrive, then sends PreAcceptReply
+3. In `handlePreAccept`: after computing deps, call trackWaitingDependency. If cardinality > 0, set WAITING + spawn goroutine, return without replying. If 0, reply immediately.
+4. In `executeCommands`: skip WAITING instances (continue, not break)
+5. In `strongconnect`: return false for WAITING deps

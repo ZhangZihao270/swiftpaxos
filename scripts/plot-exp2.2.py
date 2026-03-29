@@ -23,14 +23,14 @@ from plot_style import *
 PROTOCOLS     = ['epaxos', 'epaxosho']
 HYBRID_PROTOS = {'epaxosho'}
 
-SKEWS = [0, 0.25, 0.5, 0.75, 0.99, 1.2, 1.5, 2.0]
+SKEWS = [0, 0.25, 0.5, 0.75, 0.99]
 
-RESULT_DIR = 'eval-exp2.2-20260314'
+RESULT_DIR = 'eval-exp2.2-fix-20260324'
 
 
 def extract_skew_series(rows, protocol):
     """Extract data sorted by zipf_skew for a given protocol."""
-    filtered = [r for r in rows if r['protocol'] == protocol]
+    filtered = [r for r in rows if r['protocol'] == protocol and float(r['zipf_skew']) in SKEWS]
     filtered.sort(key=lambda r: float(r['zipf_skew']))
     return {
         'skew':       [float(r['zipf_skew']) for r in filtered],
@@ -38,47 +38,20 @@ def extract_skew_series(rows, protocol):
     }
 
 
-def load_latency_percentiles(base, proto, skew):
-    """Compute p50 and p99 from raw latencies.json."""
-    skew_dir = f'z{skew}' if skew != int(skew) else f'z{int(skew)}'
-    # Try both formats
-    for sd in [f'z{skew}', f'z{int(skew)}' if skew == int(skew) else None]:
-        if sd is None:
-            continue
-        path = os.path.join(base, 'results', RESULT_DIR,
-                            'exp2.2', proto, sd,
-                            'run1', 'latencies.json')
-        if os.path.exists(path):
-            with open(path) as f:
-                d = json.load(f)
-            s_lats = np.array(d.get('strong_write', []) + d.get('strong_read', []))
-            w_lats = np.array(d.get('weak_write', []) + d.get('weak_read', []))
-            result = {}
-            if len(s_lats):
-                result['s_p50'] = np.median(s_lats)
-                result['s_p99'] = np.percentile(s_lats, 99)
-            if len(w_lats):
-                result['w_p50'] = np.median(w_lats)
-                result['w_p99'] = np.percentile(w_lats, 99)
-            return result
-    return None
-
-
-def collect_latencies(base):
-    """Collect p50/p99 for all protocols and skews."""
+def collect_latencies(rows):
+    """Collect p50/p99 for all protocols and skews from CSV."""
     data = {}
     for proto in PROTOCOLS:
         data[proto] = {'skew': [], 's_p50': [], 's_p99': [],
                        'w_p50': [], 'w_p99': []}
-        for skew in SKEWS:
-            percs = load_latency_percentiles(base, proto, skew)
-            if percs is None:
-                continue
-            data[proto]['skew'].append(skew)
-            data[proto]['s_p50'].append(percs.get('s_p50'))
-            data[proto]['s_p99'].append(percs.get('s_p99'))
-            data[proto]['w_p50'].append(percs.get('w_p50'))
-            data[proto]['w_p99'].append(percs.get('w_p99'))
+        filtered = [r for r in rows if r['protocol'] == proto and float(r['zipf_skew']) in SKEWS]
+        filtered.sort(key=lambda r: float(r['zipf_skew']))
+        for r in filtered:
+            data[proto]['skew'].append(float(r['zipf_skew']))
+            data[proto]['s_p50'].append(float(r['avg_s_p50']) if float(r['avg_s_p50']) > 0 else None)
+            data[proto]['s_p99'].append(float(r['avg_s_p99']) if float(r['avg_s_p99']) > 0 else None)
+            data[proto]['w_p50'].append(float(r['avg_w_p50']) if float(r['avg_w_p50']) > 0 else None)
+            data[proto]['w_p99'].append(float(r['avg_w_p99']) if float(r['avg_w_p99']) > 0 else None)
     return data
 
 
@@ -94,10 +67,11 @@ def plot_throughput(ax, rows):
                 color=color, marker=marker, label=label, zorder=3)
 
     ax.set_xlabel('Zipf Skew')
-    ax.set_ylabel('Throughput (Kops/sec)')
-    ax.set_title('Throughput vs Conflict Rate', fontsize=11)
-    ax.legend(loc='upper right', fontsize=8)
-    ax.set_xlim(-0.1, 2.1)
+    ax.set_ylabel('Throughput\n(Kops/sec)')
+    
+    ax.legend(loc='lower left', fontsize=10)
+    ax.set_xlim(-0.05, 1.04)
+    ax.set_xticks([0, 0.25, 0.5, 0.75, 0.99])
     ax.set_ylim(bottom=0)
 
 
@@ -107,7 +81,7 @@ def plot_latency_broken(fig, gs_slot, lat_data):
     ax_top = fig.add_subplot(inner[0])
     ax_bot = fig.add_subplot(inner[1])
 
-    # --- Top: strong p50 (50-130ms range) ---
+    # --- Top: strong p50 + p99 ---
     for proto in PROTOCOLS:
         d = lat_data[proto]
         color  = PROTOCOL_COLORS[proto]
@@ -115,16 +89,30 @@ def plot_latency_broken(fig, gs_slot, lat_data):
         label  = PROTOCOL_LABELS[proto]
 
         ax_top.plot(d['skew'], d['s_p50'], color=color, marker=marker,
-                    label=f'{label} (strong)', zorder=3)
+                    label=f'{label} linear (p50)', zorder=3)
+        ax_top.plot(d['skew'], d['s_p99'], color=color, marker=marker,
+                    markersize=5, linestyle='--', alpha=0.7,
+                    label=f'{label} linear (p99)', zorder=2)
 
-    ax_top.set_ylabel('Strong P50 Latency (ms)')
-    ax_top.set_title('P50 Latency vs Conflict Rate', fontsize=11)
-    ax_top.legend(loc='upper left', fontsize=8)
-    ax_top.set_xlim(-0.1, 2.1)
-    ax_top.set_ylim(50, 130)
+    ax_top.set_ylabel('Latency (ms)', y=0.3)
+    
+    ax_top.legend(loc='upper left', fontsize=9, ncol=2)
+    ax_top.set_xlim(-0.05, 1.04)
+    ax_top.set_xticks([0, 0.25, 0.5, 0.75, 0.99])
+    # Auto-scale based on data range
+    all_s = [v for proto in PROTOCOLS
+             for v in lat_data[proto]['s_p50'] + lat_data[proto]['s_p99']
+             if v is not None]
+    all_s = [v for proto in PROTOCOLS
+             for v in lat_data[proto]['s_p50'] + lat_data[proto]['s_p99']
+             if v is not None]
+    if all_s:
+        ymin = max(0, min(all_s) - 10)
+        ax_top.set_ylim(ymin, 250)
+    ax_top.set_yticks([50, 100, 150, 200, 250])
     ax_top.tick_params(labelbottom=False)
 
-    # --- Bottom: weak p50 (0-1.5ms range) ---
+    # --- Bottom: weak p50 + p99 ---
     for proto in PROTOCOLS:
         d = lat_data[proto]
         color  = PROTOCOL_COLORS[proto]
@@ -133,13 +121,21 @@ def plot_latency_broken(fig, gs_slot, lat_data):
 
         if proto in HYBRID_PROTOS and d['w_p50'][0] is not None:
             ax_bot.plot(d['skew'], d['w_p50'], color=color, marker=marker,
-                        label=f'{label} (weak)', zorder=3)
+                        label=f'{label} causal (p50)', zorder=3)
+            ax_bot.plot(d['skew'], d['w_p99'], color=color, marker=marker,
+                        markersize=5, linestyle='--', alpha=0.7,
+                        label=f'{label} causal (p99)', zorder=2)
 
     ax_bot.set_xlabel('Zipf Skew')
-    ax_bot.set_ylabel('Weak P50 (ms)')
-    ax_bot.legend(loc='upper left', fontsize=8)
-    ax_bot.set_xlim(-0.1, 2.1)
-    ax_bot.set_ylim(0, 1.5)
+    ax_bot.set_ylabel('')
+    ax_bot.legend_.remove() if hasattr(ax_bot, 'legend_') and ax_bot.legend_ else None
+    ax_bot.legend(loc='upper center', fontsize=9, ncol=2, bbox_to_anchor=(0.5, 1.3))
+    ax_bot.set_xlim(-0.05, 1.04)
+    ax_bot.set_xticks([0, 0.25, 0.5, 0.75, 0.99])
+    all_w = [v for proto in PROTOCOLS
+             for v in lat_data[proto]['w_p99']
+             if v is not None]
+    ax_bot.set_ylim(0, max(all_w) + 5 if all_w else 1.5)
 
     # Break markers
     d_size = 0.015
@@ -161,11 +157,11 @@ def main():
 
     setup_style()
     rows = load_csv(csv_path)
-    lat_data = collect_latencies(base)
+    lat_data = collect_latencies(rows)
 
     import matplotlib.gridspec as gridspec
-    fig = plt.figure(figsize=(12, 5))
-    gs = gridspec.GridSpec(1, 2, figure=fig, wspace=0.3)
+    fig = plt.figure(figsize=(12, 3))
+    gs = gridspec.GridSpec(1, 2, figure=fig, wspace=0.2)
 
     # Left: throughput
     ax_tput = fig.add_subplot(gs[0])
@@ -174,6 +170,11 @@ def main():
     # Right: broken y-axis latency
     plot_latency_broken(fig, gs[1], lat_data)
 
+    ax_tput.text(0.5, -0.38, '(a)', transform=ax_tput.transAxes,
+                 fontsize=14, fontweight='bold', ha='center')
+    fig.text(0.73, -0.03, '(b)', fontsize=14, fontweight='bold', ha='center')
+
+    plt.subplots_adjust(bottom=0.22)
     save_figure(fig, out_dir, 'exp2.2-conflict-sweep')
 
 
