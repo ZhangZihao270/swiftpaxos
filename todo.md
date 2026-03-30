@@ -9316,13 +9316,19 @@ beyond what strong-strong conflicts already cause.
 - [x] Integrated all into event loop select (election timer, heartbeat tick, 3 message channels)
 - [x] 22 new tests: serialization (3), binary size (3), cache (1), election logic (7), vote handling (5), heartbeat (4), constants/channels (2)
 
-#### ⬜ Step 4: Log recovery on new leader
-- New leader broadcasts `MLogSync` to all replicas requesting committed entries
-- Each replica replies with `MLogSyncReply` containing committed entries from their log
-- New leader merges responses: for each slot, if majority has a committed entry → adopt it
-- Set `lastCmdSlot` = max committed slot + 1
-- Replay committed entries to rebuild state machine (execute in slot order)
-- Set `status = NORMAL`, start accepting new proposals
+#### ✅ Step 4: Log recovery on new leader [26:03:30]
+- [x] Added `LogEntry` struct (Slot, CmdId, Cmd) for recovery data transfer
+- [x] Added `MLogSync` (8 bytes: Replica + Term) and `MLogSyncReply` (variable: header + entries) with full serialization + caches
+- [x] Added `logSyncChan`/`logSyncReplyChan` channels + RPC registration in CommunicationSupply
+- [x] Added `cmdId` field to `commandStaticDesc` so followers can return CmdId during recovery
+- [x] `startLogRecovery()`: sets status=RECOVERING, broadcasts MLogSync to all peers
+- [x] `handleLogSync()`: follower scans history for COMMIT-phase entries, sends MLogSyncReply
+- [x] `handleLogSyncReply()`: collects replies, triggers merge when N/2 peer replies received
+- [x] `mergeAndRecoverLog()`: merges own history + peer entries, replays in slot order (Execute), rebuilds executed/committed/delivered/values/slots/keyVersions, sets status=NORMAL
+- [x] Election win (`handleRequestVoteReply`) now calls `startLogRecovery()` after `becomeLeader()`
+- [x] `lastCommitted` updated during normal commit (handleCommit)
+- [x] Event loop: added logSyncChan and logSyncReplyChan cases
+- [x] 26 new tests: serialization (4), binary size (2), cache (2), channel registration (1), handleLogSync (3), handleLogSyncReply (3), mergeAndRecoverLog (5), startLogRecovery (1), full flow (1), keyVersions (1), lastCommitted (1), types (2)
 
 #### ⬜ Step 5: Client leader discovery
 - Client tracks `currentTerm` from replies

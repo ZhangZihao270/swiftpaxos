@@ -87,6 +87,10 @@ type Replica struct {
 	heartbeatTimer *time.Ticker  // Leader sends periodic heartbeats
 	votesReceived  int           // Votes received in current election
 	lastCommitted  int32         // Highest committed slot (for log comparison in votes)
+
+	// Log recovery state (Phase 128 Step 4)
+	logSyncReplies  []MLogSyncReply // Collected log sync replies during recovery
+	logSyncExpected int             // Number of replies expected (N-1)
 }
 
 type commandDesc struct {
@@ -127,6 +131,7 @@ type commandStaticDesc struct {
 	cmdSlot int
 	phase   int
 	cmd     state.Command
+	cmdId   CommandId
 }
 
 func New(alias string, rid int, addrs []string, exec bool, pl, f int,
@@ -264,6 +269,8 @@ func (r *Replica) becomeCandidate() {
 }
 
 // becomeLeader transitions to LEADER role. Called after winning an election.
+// If this is an election win (not initial startup), enters RECOVERING state
+// and triggers log recovery from peers.
 func (r *Replica) becomeLeader() {
 	r.role = LEADER
 }
@@ -397,6 +404,7 @@ func (r *Replica) handleRequestVoteReply(msg *MRequestVoteReply) {
 			r.stopElectionTimer()
 			r.startHeartbeat()
 			r.sendHeartbeat() // Immediately announce leadership
+			r.startLogRecovery()
 		}
 	}
 }
@@ -416,6 +424,171 @@ func (r *Replica) handleHeartbeat(msg *MHeartbeat) {
 	}
 
 	r.resetElectionTimer()
+}
+
+// startLogRecovery begins log recovery after winning an election.
+// Sets status to RECOVERING and broadcasts MLogSync to all peers.
+func (r *Replica) startLogRecovery() {
+	r.status = RECOVERING
+	r.logSyncReplies = make([]MLogSyncReply, 0, r.N-1)
+	r.logSyncExpected = r.N - 1
+
+	r.Printf("Starting log recovery for term %d (lastCommitted=%d)\n",
+		r.currentTerm, r.lastCommitted)
+
+	msg := &MLogSync{
+		Replica: r.Id,
+		Term:    r.currentTerm,
+	}
+	r.sender.SendToAll(msg, r.cs.logSyncRPC)
+}
+
+// handleLogSync processes a log sync request from a new leader.
+// Responds with all committed entries from our history.
+func (r *Replica) handleLogSync(msg *MLogSync) {
+	if msg.Term < r.currentTerm {
+		// Stale leader — ignore
+		return
+	}
+
+	if msg.Term > r.currentTerm {
+		r.becomeFollower(msg.Term)
+		r.stopHeartbeat()
+	}
+
+	// Collect committed entries from history
+	var entries []LogEntry
+	for i := 0; i < HISTORY_SIZE; i++ {
+		if r.history[i].phase == COMMIT {
+			entries = append(entries, LogEntry{
+				Slot:  int32(r.history[i].cmdSlot),
+				CmdId: r.history[i].cmdId,
+				Cmd:   r.history[i].cmd,
+			})
+		}
+	}
+
+	reply := &MLogSyncReply{
+		Replica:    r.Id,
+		Term:       r.currentTerm,
+		NumEntries: int32(len(entries)),
+		Entries:    entries,
+	}
+	r.sender.SendTo(msg.Replica, reply, r.cs.logSyncReplyRPC)
+}
+
+// handleLogSyncReply processes a log sync reply from a peer during recovery.
+// Collects replies and merges when majority is reached.
+func (r *Replica) handleLogSyncReply(msg *MLogSyncReply) {
+	if msg.Term > r.currentTerm {
+		r.becomeFollower(msg.Term)
+		r.stopHeartbeat()
+		return
+	}
+
+	// Only process if we're the leader in RECOVERING state
+	if r.role != LEADER || r.status != RECOVERING {
+		return
+	}
+
+	if msg.Term != r.currentTerm {
+		return
+	}
+
+	r.logSyncReplies = append(r.logSyncReplies, *msg)
+
+	// Check if we have enough replies (majority = (N-1)/2 peers + self = N/2+1 total)
+	// We need (N/2) peer replies since we already count ourselves
+	if len(r.logSyncReplies) >= r.N/2 {
+		r.mergeAndRecoverLog()
+	}
+}
+
+// mergeAndRecoverLog merges log sync replies and rebuilds state.
+// For each slot, if any peer has a committed entry → adopt it.
+// (All committed entries are safe — they were committed by a majority in a previous term.)
+func (r *Replica) mergeAndRecoverLog() {
+	r.Printf("Merging log from %d replies\n", len(r.logSyncReplies))
+
+	// Collect all entries by slot. For committed entries, any copy is valid
+	// (committed = majority agreed, so all copies are identical).
+	slotEntries := make(map[int32]LogEntry)
+	maxSlot := int32(-1)
+
+	// Include our own history
+	for i := 0; i < HISTORY_SIZE; i++ {
+		if r.history[i].phase == COMMIT {
+			slot := int32(r.history[i].cmdSlot)
+			slotEntries[slot] = LogEntry{
+				Slot:  slot,
+				CmdId: r.history[i].cmdId,
+				Cmd:   r.history[i].cmd,
+			}
+			if slot > maxSlot {
+				maxSlot = slot
+			}
+		}
+	}
+
+	// Merge peer entries
+	for _, reply := range r.logSyncReplies {
+		for _, entry := range reply.Entries {
+			if _, exists := slotEntries[entry.Slot]; !exists {
+				slotEntries[entry.Slot] = entry
+			}
+			if entry.Slot > maxSlot {
+				maxSlot = entry.Slot
+			}
+		}
+	}
+
+	// Replay committed entries in slot order to rebuild state machine
+	for slot := int32(0); slot <= maxSlot; slot++ {
+		entry, exists := slotEntries[slot]
+		if !exists {
+			continue
+		}
+
+		slotStr := strconv.Itoa(int(slot))
+
+		// Skip already executed slots
+		if r.executed.Has(slotStr) {
+			continue
+		}
+
+		// Execute command and update state
+		val := entry.Cmd.Execute(r.State)
+		r.executed.Set(slotStr, struct{}{})
+		r.committed.Set(slotStr, struct{}{})
+		r.delivered.Set(slotStr, struct{}{})
+		r.values.Set(entry.CmdId.String(), val)
+		r.slots[entry.CmdId] = int(slot)
+
+		// Update history
+		r.history[slot].cmdSlot = int(slot)
+		r.history[slot].phase = COMMIT
+		r.history[slot].cmd = entry.Cmd
+		r.history[slot].cmdId = entry.CmdId
+
+		// Track per-key version for weak read responses
+		if entry.Cmd.Op == state.PUT {
+			keyStr := r.int32ToString(int32(entry.Cmd.K))
+			r.keyVersions.Set(keyStr, int(slot))
+		}
+	}
+
+	// Set lastCmdSlot to max committed slot + 1
+	if maxSlot >= 0 {
+		r.lastCmdSlot = int(maxSlot) + 1
+	}
+	r.lastCommitted = maxSlot
+
+	r.Printf("Log recovery complete: %d entries recovered, lastCmdSlot=%d\n",
+		len(slotEntries), r.lastCmdSlot)
+
+	// Clear recovery state
+	r.logSyncReplies = nil
+	r.status = NORMAL
 }
 
 func (r *Replica) run() {
@@ -561,6 +734,14 @@ func (r *Replica) run() {
 		case m := <-r.cs.heartbeatChan:
 			hb := m.(*MHeartbeat)
 			r.handleHeartbeat(hb)
+
+		case m := <-r.cs.logSyncChan:
+			ls := m.(*MLogSync)
+			r.handleLogSync(ls)
+
+		case m := <-r.cs.logSyncReplyChan:
+			lsr := m.(*MLogSyncReply)
+			r.handleLogSyncReply(lsr)
 
 		case <-heartbeatCh:
 			if r.IsLeader() {
@@ -721,6 +902,9 @@ func (r *Replica) handleCommit(msg *MCommit, desc *commandDesc) {
 		desc.phase = COMMIT
 		if r.IsLeader() {
 			r.committed.Set(strconv.Itoa(desc.cmdSlot), struct{}{})
+			if int32(desc.cmdSlot) > r.lastCommitted {
+				r.lastCommitted = int32(desc.cmdSlot)
+			}
 			r.notifyCommit(desc.cmdSlot) // Notify waiters that slot is committed
 		}
 
@@ -1078,6 +1262,7 @@ func (r *Replica) handleMsg(m interface{}, desc *commandDesc, slot int, dep int)
 		r.history[msg].cmdSlot = slot
 		r.history[msg].phase = desc.phase
 		r.history[msg].cmd = desc.cmd
+		r.history[msg].cmdId = desc.cmdId
 		desc.active = false
 		slotStr := strconv.Itoa(slot)
 		r.values.Set(desc.cmdId.String(), desc.val)

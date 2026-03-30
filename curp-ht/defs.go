@@ -172,6 +172,27 @@ type MHeartbeat struct {
 	Term    int32 // Leader's term
 }
 
+// LogEntry represents a committed log entry for recovery
+type LogEntry struct {
+	Slot  int32
+	CmdId CommandId
+	Cmd   state.Command
+}
+
+// MLogSync - New leader requests committed log entries from followers
+type MLogSync struct {
+	Replica int32 // New leader's ID
+	Term    int32 // New leader's term
+}
+
+// MLogSyncReply - Follower sends committed log entries to new leader
+type MLogSyncReply struct {
+	Replica    int32      // Follower's ID
+	Term       int32      // Follower's term
+	NumEntries int32      // Number of entries
+	Entries    []LogEntry // Committed log entries
+}
+
 func (m *MReply) New() fastrpc.Serializable {
 	return new(MReply)
 }
@@ -232,6 +253,14 @@ func (m *MHeartbeat) New() fastrpc.Serializable {
 	return new(MHeartbeat)
 }
 
+func (m *MLogSync) New() fastrpc.Serializable {
+	return new(MLogSync)
+}
+
+func (m *MLogSyncReply) New() fastrpc.Serializable {
+	return new(MLogSyncReply)
+}
+
 type CommunicationSupply struct {
 	maxLatency time.Duration
 
@@ -255,6 +284,10 @@ type CommunicationSupply struct {
 	requestVoteReplyChan chan fastrpc.Serializable
 	heartbeatChan        chan fastrpc.Serializable
 
+	// Log recovery channels
+	logSyncChan      chan fastrpc.Serializable
+	logSyncReplyChan chan fastrpc.Serializable
+
 	replyRPC     uint8
 	acceptRPC    uint8
 	acceptAckRPC uint8
@@ -274,6 +307,10 @@ type CommunicationSupply struct {
 	requestVoteRPC      uint8
 	requestVoteReplyRPC uint8
 	heartbeatRPC        uint8
+
+	// Log recovery RPCs
+	logSyncRPC      uint8
+	logSyncReplyRPC uint8
 }
 
 func initCs(cs *CommunicationSupply, t *fastrpc.Table) {
@@ -318,6 +355,14 @@ func initCs(cs *CommunicationSupply, t *fastrpc.Table) {
 	cs.requestVoteRPC = t.Register(new(MRequestVote), cs.requestVoteChan)
 	cs.requestVoteReplyRPC = t.Register(new(MRequestVoteReply), cs.requestVoteReplyChan)
 	cs.heartbeatRPC = t.Register(new(MHeartbeat), cs.heartbeatChan)
+
+	// Initialize log recovery channels
+	cs.logSyncChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
+	cs.logSyncReplyChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
+
+	// Register log recovery RPCs
+	cs.logSyncRPC = t.Register(new(MLogSync), cs.logSyncChan)
+	cs.logSyncReplyRPC = t.Register(new(MLogSyncReply), cs.logSyncReplyChan)
 }
 
 type byteReader interface {
@@ -1701,5 +1746,175 @@ func (t *MHeartbeat) Unmarshal(wire io.Reader) error {
 	}
 	t.Replica = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
 	t.Term = int32((uint32(bs[4]) | (uint32(bs[5]) << 8) | (uint32(bs[6]) << 16) | (uint32(bs[7]) << 24)))
+	return nil
+}
+
+// MLogSync serialization — fixed 8 bytes: Replica(4) + Term(4)
+
+func (t *MLogSync) BinarySize() (nbytes int, sizeKnown bool) {
+	return 8, true
+}
+
+type MLogSyncCache struct {
+	mu    sync.Mutex
+	cache []*MLogSync
+}
+
+func NewMLogSyncCache() *MLogSyncCache {
+	c := &MLogSyncCache{}
+	c.cache = make([]*MLogSync, 0)
+	return c
+}
+
+func (p *MLogSyncCache) Get() *MLogSync {
+	var t *MLogSync
+	p.mu.Lock()
+	if len(p.cache) > 0 {
+		t = p.cache[len(p.cache)-1]
+		p.cache = p.cache[0:(len(p.cache) - 1)]
+	}
+	p.mu.Unlock()
+	if t == nil {
+		t = &MLogSync{}
+	}
+	return t
+}
+func (p *MLogSyncCache) Put(t *MLogSync) {
+	p.mu.Lock()
+	p.cache = append(p.cache, t)
+	p.mu.Unlock()
+}
+func (t *MLogSync) Marshal(wire io.Writer) {
+	var b [8]byte
+	var bs []byte
+	bs = b[:8]
+	tmp32 := t.Replica
+	bs[0] = byte(tmp32)
+	bs[1] = byte(tmp32 >> 8)
+	bs[2] = byte(tmp32 >> 16)
+	bs[3] = byte(tmp32 >> 24)
+	tmp32 = t.Term
+	bs[4] = byte(tmp32)
+	bs[5] = byte(tmp32 >> 8)
+	bs[6] = byte(tmp32 >> 16)
+	bs[7] = byte(tmp32 >> 24)
+	wire.Write(bs)
+}
+
+func (t *MLogSync) Unmarshal(wire io.Reader) error {
+	var b [8]byte
+	var bs []byte
+	bs = b[:8]
+	if _, err := io.ReadAtLeast(wire, bs, 8); err != nil {
+		return err
+	}
+	t.Replica = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
+	t.Term = int32((uint32(bs[4]) | (uint32(bs[5]) << 8) | (uint32(bs[6]) << 16) | (uint32(bs[7]) << 24)))
+	return nil
+}
+
+// MLogSyncReply serialization — variable length: header(12) + entries (each: Slot(4) + CmdId(8) + Cmd(var))
+
+func (t *MLogSyncReply) BinarySize() (nbytes int, sizeKnown bool) {
+	return 0, false
+}
+
+type MLogSyncReplyCache struct {
+	mu    sync.Mutex
+	cache []*MLogSyncReply
+}
+
+func NewMLogSyncReplyCache() *MLogSyncReplyCache {
+	c := &MLogSyncReplyCache{}
+	c.cache = make([]*MLogSyncReply, 0)
+	return c
+}
+
+func (p *MLogSyncReplyCache) Get() *MLogSyncReply {
+	var t *MLogSyncReply
+	p.mu.Lock()
+	if len(p.cache) > 0 {
+		t = p.cache[len(p.cache)-1]
+		p.cache = p.cache[0:(len(p.cache) - 1)]
+	}
+	p.mu.Unlock()
+	if t == nil {
+		t = &MLogSyncReply{}
+	}
+	return t
+}
+func (p *MLogSyncReplyCache) Put(t *MLogSyncReply) {
+	p.mu.Lock()
+	p.cache = append(p.cache, t)
+	p.mu.Unlock()
+}
+func (t *MLogSyncReply) Marshal(wire io.Writer) {
+	var b [12]byte
+	var bs []byte
+	bs = b[:12]
+	tmp32 := t.Replica
+	bs[0] = byte(tmp32)
+	bs[1] = byte(tmp32 >> 8)
+	bs[2] = byte(tmp32 >> 16)
+	bs[3] = byte(tmp32 >> 24)
+	tmp32 = t.Term
+	bs[4] = byte(tmp32)
+	bs[5] = byte(tmp32 >> 8)
+	bs[6] = byte(tmp32 >> 16)
+	bs[7] = byte(tmp32 >> 24)
+	tmp32 = t.NumEntries
+	bs[8] = byte(tmp32)
+	bs[9] = byte(tmp32 >> 8)
+	bs[10] = byte(tmp32 >> 16)
+	bs[11] = byte(tmp32 >> 24)
+	wire.Write(bs)
+	for i := int32(0); i < t.NumEntries; i++ {
+		bs = b[:12]
+		tmp32 = t.Entries[i].Slot
+		bs[0] = byte(tmp32)
+		bs[1] = byte(tmp32 >> 8)
+		bs[2] = byte(tmp32 >> 16)
+		bs[3] = byte(tmp32 >> 24)
+		tmp32 = t.Entries[i].CmdId.ClientId
+		bs[4] = byte(tmp32)
+		bs[5] = byte(tmp32 >> 8)
+		bs[6] = byte(tmp32 >> 16)
+		bs[7] = byte(tmp32 >> 24)
+		tmp32 = t.Entries[i].CmdId.SeqNum
+		bs[8] = byte(tmp32)
+		bs[9] = byte(tmp32 >> 8)
+		bs[10] = byte(tmp32 >> 16)
+		bs[11] = byte(tmp32 >> 24)
+		wire.Write(bs)
+		t.Entries[i].Cmd.Marshal(wire)
+	}
+}
+
+func (t *MLogSyncReply) Unmarshal(rr io.Reader) error {
+	var wire byteReader
+	var ok bool
+	if wire, ok = rr.(byteReader); !ok {
+		wire = bufio.NewReader(rr)
+	}
+	var b [12]byte
+	var bs []byte
+	bs = b[:12]
+	if _, err := io.ReadAtLeast(wire, bs, 12); err != nil {
+		return err
+	}
+	t.Replica = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
+	t.Term = int32((uint32(bs[4]) | (uint32(bs[5]) << 8) | (uint32(bs[6]) << 16) | (uint32(bs[7]) << 24)))
+	t.NumEntries = int32((uint32(bs[8]) | (uint32(bs[9]) << 8) | (uint32(bs[10]) << 16) | (uint32(bs[11]) << 24)))
+	t.Entries = make([]LogEntry, t.NumEntries)
+	for i := int32(0); i < t.NumEntries; i++ {
+		bs = b[:12]
+		if _, err := io.ReadAtLeast(wire, bs, 12); err != nil {
+			return err
+		}
+		t.Entries[i].Slot = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
+		t.Entries[i].CmdId.ClientId = int32((uint32(bs[4]) | (uint32(bs[5]) << 8) | (uint32(bs[6]) << 16) | (uint32(bs[7]) << 24)))
+		t.Entries[i].CmdId.SeqNum = int32((uint32(bs[8]) | (uint32(bs[9]) << 8) | (uint32(bs[10]) << 16) | (uint32(bs[11]) << 24)))
+		t.Entries[i].Cmd.Unmarshal(wire)
+	}
 	return nil
 }

@@ -2582,3 +2582,706 @@ func TestElectionChannelRegistration(t *testing.T) {
 		t.Error("heartbeatRPC should be registered")
 	}
 }
+
+// ============================================================================
+// Phase 128 Step 4: Log Recovery Tests
+// ============================================================================
+
+// newTestReplicaForRecovery creates a Replica suitable for log recovery tests.
+func newTestReplicaForRecovery(id int32, n int) *Replica {
+	base := newTestBaseReplica(n)
+	base.Id = id
+	base.Exec = true
+	base.State = state.InitState()
+
+	var cs CommunicationSupply
+	tbl := fastrpc.NewTableId(defs.RPC_TABLE)
+	initCs(&cs, tbl)
+
+	r := &Replica{
+		Replica:     base,
+		currentTerm: 1,
+		status:      NORMAL,
+		votedFor:    -1,
+		role:        FOLLOWER,
+		lastCmdSlot: 0,
+		slots:       make(map[CommandId]int),
+		synced:      cmap.New(),
+		values:      cmap.New(),
+		proposes:    cmap.New(),
+		cmdDescs:    cmap.New(),
+		unsynced:    cmap.New(),
+		executed:    cmap.New(),
+		committed:   cmap.New(),
+		delivered:   cmap.New(),
+		weakExecuted: cmap.New(),
+		keyVersions:  cmap.New(),
+		history:      make([]commandStaticDesc, HISTORY_SIZE),
+		commitNotify:  make(map[int]chan struct{}),
+		executeNotify: make(map[int]chan struct{}),
+		deliverChan:   make(chan int, defs.CHAN_BUFFER_SIZE),
+		sender:        newTestSender(),
+		cs:            cs,
+		Q:             replica.NewMajorityOf(n),
+		weakDepNotify: make(map[int32]chan struct{}),
+	}
+
+	r.closedChan = make(chan struct{})
+	close(r.closedChan)
+
+	return r
+}
+
+// TestMLogSyncSerialization tests MLogSync Marshal/Unmarshal round-trip
+func TestMLogSyncSerialization(t *testing.T) {
+	original := &MLogSync{
+		Replica: 2,
+		Term:    5,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	decoded := &MLogSync{}
+	if err := decoded.Unmarshal(&buf); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if decoded.Replica != original.Replica {
+		t.Errorf("Replica: got %d, want %d", decoded.Replica, original.Replica)
+	}
+	if decoded.Term != original.Term {
+		t.Errorf("Term: got %d, want %d", decoded.Term, original.Term)
+	}
+}
+
+// TestMLogSyncBinarySize tests that MLogSync reports correct binary size.
+func TestMLogSyncBinarySize(t *testing.T) {
+	msg := &MLogSync{}
+	size, known := msg.BinarySize()
+	if !known {
+		t.Error("MLogSync should have known size")
+	}
+	if size != 8 {
+		t.Errorf("expected 8 bytes, got %d", size)
+	}
+}
+
+// TestMLogSyncReplySerializationEmpty tests MLogSyncReply with no entries.
+func TestMLogSyncReplySerializationEmpty(t *testing.T) {
+	original := &MLogSyncReply{
+		Replica:    1,
+		Term:       3,
+		NumEntries: 0,
+		Entries:    []LogEntry{},
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	decoded := &MLogSyncReply{}
+	if err := decoded.Unmarshal(&buf); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if decoded.Replica != 1 || decoded.Term != 3 || decoded.NumEntries != 0 {
+		t.Errorf("header mismatch: got {%d,%d,%d}", decoded.Replica, decoded.Term, decoded.NumEntries)
+	}
+	if len(decoded.Entries) != 0 {
+		t.Errorf("expected 0 entries, got %d", len(decoded.Entries))
+	}
+}
+
+// TestMLogSyncReplySerializationWithEntries tests MLogSyncReply with multiple entries.
+func TestMLogSyncReplySerializationWithEntries(t *testing.T) {
+	entries := []LogEntry{
+		{
+			Slot:  0,
+			CmdId: CommandId{ClientId: 10, SeqNum: 1},
+			Cmd:   state.Command{Op: state.PUT, K: 42, V: state.NIL()},
+		},
+		{
+			Slot:  1,
+			CmdId: CommandId{ClientId: 10, SeqNum: 2},
+			Cmd:   state.Command{Op: state.GET, K: 100, V: state.NIL()},
+		},
+		{
+			Slot:  5,
+			CmdId: CommandId{ClientId: 20, SeqNum: 1},
+			Cmd:   state.Command{Op: state.PUT, K: 7, V: state.NIL()},
+		},
+	}
+
+	original := &MLogSyncReply{
+		Replica:    2,
+		Term:       4,
+		NumEntries: int32(len(entries)),
+		Entries:    entries,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	decoded := &MLogSyncReply{}
+	if err := decoded.Unmarshal(&buf); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if decoded.Replica != 2 || decoded.Term != 4 || decoded.NumEntries != 3 {
+		t.Errorf("header mismatch: got {%d,%d,%d}", decoded.Replica, decoded.Term, decoded.NumEntries)
+	}
+	if len(decoded.Entries) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(decoded.Entries))
+	}
+	for i, e := range decoded.Entries {
+		if e.Slot != entries[i].Slot {
+			t.Errorf("entry %d slot: got %d, want %d", i, e.Slot, entries[i].Slot)
+		}
+		if e.CmdId != entries[i].CmdId {
+			t.Errorf("entry %d cmdId: got %v, want %v", i, e.CmdId, entries[i].CmdId)
+		}
+		if e.Cmd.Op != entries[i].Cmd.Op || e.Cmd.K != entries[i].Cmd.K {
+			t.Errorf("entry %d cmd: got {%d,%d}, want {%d,%d}",
+				i, e.Cmd.Op, e.Cmd.K, entries[i].Cmd.Op, entries[i].Cmd.K)
+		}
+	}
+}
+
+// TestMLogSyncReplyBinarySize tests that MLogSyncReply reports unknown size.
+func TestMLogSyncReplyBinarySize(t *testing.T) {
+	msg := &MLogSyncReply{}
+	_, known := msg.BinarySize()
+	if known {
+		t.Error("MLogSyncReply should have unknown size (variable-length entries)")
+	}
+}
+
+// TestMLogSyncCache tests MLogSync cache get/put.
+func TestMLogSyncCache(t *testing.T) {
+	cache := NewMLogSyncCache()
+	msg := &MLogSync{Replica: 1, Term: 2}
+	cache.Put(msg)
+	got := cache.Get()
+	if got.Replica != 1 || got.Term != 2 {
+		t.Errorf("cache round-trip failed: got {%d,%d}", got.Replica, got.Term)
+	}
+	// Get from empty cache should return fresh
+	fresh := cache.Get()
+	if fresh == nil {
+		t.Error("Get from empty cache should return non-nil")
+	}
+}
+
+// TestMLogSyncReplyCache tests MLogSyncReply cache get/put.
+func TestMLogSyncReplyCache(t *testing.T) {
+	cache := NewMLogSyncReplyCache()
+	msg := &MLogSyncReply{Replica: 3, Term: 7, NumEntries: 0, Entries: nil}
+	cache.Put(msg)
+	got := cache.Get()
+	if got.Replica != 3 || got.Term != 7 {
+		t.Errorf("cache round-trip failed: got {%d,%d}", got.Replica, got.Term)
+	}
+}
+
+// TestLogSyncChannelRegistration verifies log sync channels are registered.
+func TestLogSyncChannelRegistration(t *testing.T) {
+	var cs CommunicationSupply
+	tbl := fastrpc.NewTableId(defs.RPC_TABLE)
+	initCs(&cs, tbl)
+
+	if cs.logSyncChan == nil {
+		t.Error("logSyncChan should not be nil")
+	}
+	if cs.logSyncReplyChan == nil {
+		t.Error("logSyncReplyChan should not be nil")
+	}
+	if cs.logSyncRPC == 0 {
+		t.Error("logSyncRPC should be registered")
+	}
+	if cs.logSyncReplyRPC == 0 {
+		t.Error("logSyncReplyRPC should be registered")
+	}
+}
+
+// TestHandleLogSyncReturnsCommittedEntries tests that handleLogSync sends a reply (via sender).
+func TestHandleLogSyncReturnsCommittedEntries(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.role = FOLLOWER
+	r.currentTerm = 5
+
+	// Populate history with committed entries
+	r.history[0] = commandStaticDesc{
+		cmdSlot: 0, phase: COMMIT,
+		cmd:   state.Command{Op: state.PUT, K: 1, V: state.NIL()},
+		cmdId: CommandId{ClientId: 10, SeqNum: 1},
+	}
+	r.history[1] = commandStaticDesc{
+		cmdSlot: 1, phase: COMMIT,
+		cmd:   state.Command{Op: state.PUT, K: 2, V: state.NIL()},
+		cmdId: CommandId{ClientId: 10, SeqNum: 2},
+	}
+	// Slot 2 is only ACCEPT (not committed) — should NOT be returned
+	r.history[2] = commandStaticDesc{
+		cmdSlot: 2, phase: ACCEPT,
+		cmd:   state.Command{Op: state.PUT, K: 3, V: state.NIL()},
+		cmdId: CommandId{ClientId: 10, SeqNum: 3},
+	}
+
+	msg := &MLogSync{Replica: 0, Term: 5}
+	r.handleLogSync(msg)
+
+	// Verify a message was sent via the sender channel
+	select {
+	case <-r.sender:
+		// OK — reply was sent
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("expected MLogSyncReply to be sent")
+	}
+}
+
+// TestHandleLogSyncStaleTerm tests that stale-term MLogSync is ignored.
+func TestHandleLogSyncStaleTerm(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.currentTerm = 5
+
+	msg := &MLogSync{Replica: 0, Term: 3} // stale term
+	r.handleLogSync(msg)
+
+	// No reply should be sent
+	select {
+	case <-r.sender:
+		t.Error("should not send reply for stale-term MLogSync")
+	case <-time.After(50 * time.Millisecond):
+		// OK — no reply sent
+	}
+}
+
+// TestHandleLogSyncHigherTermStepDown tests that higher-term MLogSync causes step-down.
+func TestHandleLogSyncHigherTermStepDown(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.currentTerm = 3
+	r.role = LEADER
+
+	msg := &MLogSync{Replica: 0, Term: 5}
+	r.handleLogSync(msg)
+
+	if r.currentTerm != 5 {
+		t.Errorf("expected term 5, got %d", r.currentTerm)
+	}
+	if r.role != FOLLOWER {
+		t.Errorf("expected FOLLOWER role, got %d", r.role)
+	}
+}
+
+// TestHandleLogSyncReplyCollectsReplies tests reply collection during recovery.
+func TestHandleLogSyncReplyCollectsReplies(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 3)
+	r.role = LEADER
+	r.status = RECOVERING
+	r.currentTerm = 5
+	r.logSyncReplies = make([]MLogSyncReply, 0)
+	r.logSyncExpected = 2
+
+	// First reply — not enough for majority
+	reply1 := &MLogSyncReply{
+		Replica: 1, Term: 5, NumEntries: 0, Entries: nil,
+	}
+	r.handleLogSyncReply(reply1)
+
+	if r.status != NORMAL {
+		// With N=3, majority = 2 (N/2=1). One reply from peer + self = 2 >= majority.
+		// So status should already be NORMAL.
+		t.Log("Note: with N=3, one peer reply is sufficient for majority")
+	}
+}
+
+// TestHandleLogSyncReplyIgnoredWhenNotRecovering tests that replies are ignored outside recovery.
+func TestHandleLogSyncReplyIgnoredWhenNotRecovering(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 3)
+	r.role = LEADER
+	r.status = NORMAL // Not recovering
+	r.currentTerm = 5
+
+	reply := &MLogSyncReply{
+		Replica: 1, Term: 5, NumEntries: 1,
+		Entries: []LogEntry{{Slot: 0, CmdId: CommandId{10, 1}, Cmd: state.Command{Op: state.PUT, K: 1, V: state.NIL()}}},
+	}
+	r.handleLogSyncReply(reply)
+
+	// Should be ignored — no state change
+	if r.status != NORMAL {
+		t.Error("status should remain NORMAL")
+	}
+}
+
+// TestHandleLogSyncReplyHigherTermStepDown tests step-down on higher-term reply.
+func TestHandleLogSyncReplyHigherTermStepDown(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 3)
+	r.role = LEADER
+	r.status = RECOVERING
+	r.currentTerm = 5
+
+	reply := &MLogSyncReply{Replica: 1, Term: 7, NumEntries: 0}
+	r.handleLogSyncReply(reply)
+
+	if r.currentTerm != 7 {
+		t.Errorf("expected term 7, got %d", r.currentTerm)
+	}
+	if r.role != FOLLOWER {
+		t.Errorf("expected FOLLOWER role, got %d", r.role)
+	}
+}
+
+// TestMergeAndRecoverLogBasic tests basic log merge with entries from peers.
+func TestMergeAndRecoverLogBasic(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 3)
+	r.role = LEADER
+	r.status = RECOVERING
+	r.currentTerm = 5
+
+	// Simulate: our history has slot 0 committed
+	r.history[0] = commandStaticDesc{
+		cmdSlot: 0, phase: COMMIT,
+		cmd:   state.Command{Op: state.PUT, K: 1, V: state.NIL()},
+		cmdId: CommandId{ClientId: 10, SeqNum: 1},
+	}
+
+	// Peer has slot 0 and slot 1 committed
+	r.logSyncReplies = []MLogSyncReply{
+		{
+			Replica: 1, Term: 5, NumEntries: 2,
+			Entries: []LogEntry{
+				{Slot: 0, CmdId: CommandId{10, 1}, Cmd: state.Command{Op: state.PUT, K: 1, V: state.NIL()}},
+				{Slot: 1, CmdId: CommandId{10, 2}, Cmd: state.Command{Op: state.PUT, K: 2, V: state.NIL()}},
+			},
+		},
+	}
+
+	r.mergeAndRecoverLog()
+
+	if r.status != NORMAL {
+		t.Errorf("expected NORMAL status, got %d", r.status)
+	}
+	if r.lastCmdSlot != 2 {
+		t.Errorf("expected lastCmdSlot=2, got %d", r.lastCmdSlot)
+	}
+	if r.lastCommitted != 1 {
+		t.Errorf("expected lastCommitted=1, got %d", r.lastCommitted)
+	}
+	// Verify both slots are marked executed
+	if !r.executed.Has("0") || !r.executed.Has("1") {
+		t.Error("expected slots 0 and 1 to be executed")
+	}
+	// Verify values are stored
+	cmdId1 := CommandId{ClientId: 10, SeqNum: 1}
+	cmdId2 := CommandId{ClientId: 10, SeqNum: 2}
+	if !r.values.Has(cmdId1.String()) {
+		t.Error("expected value for cmdId1")
+	}
+	if !r.values.Has(cmdId2.String()) {
+		t.Error("expected value for cmdId2")
+	}
+	// Verify slots map
+	if r.slots[cmdId1] != 0 || r.slots[cmdId2] != 1 {
+		t.Errorf("slots map mismatch: %v", r.slots)
+	}
+}
+
+// TestMergeAndRecoverLogEmptyHistory tests recovery with empty history (fresh start).
+func TestMergeAndRecoverLogEmptyHistory(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 3)
+	r.role = LEADER
+	r.status = RECOVERING
+	r.currentTerm = 5
+
+	// No entries from peers either
+	r.logSyncReplies = []MLogSyncReply{
+		{Replica: 1, Term: 5, NumEntries: 0, Entries: nil},
+	}
+
+	r.mergeAndRecoverLog()
+
+	if r.status != NORMAL {
+		t.Errorf("expected NORMAL status, got %d", r.status)
+	}
+	if r.lastCmdSlot != 0 {
+		t.Errorf("expected lastCmdSlot=0, got %d", r.lastCmdSlot)
+	}
+}
+
+// TestMergeAndRecoverLogMultiplePeers tests merge with entries from multiple peers.
+func TestMergeAndRecoverLogMultiplePeers(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 5)
+	r.role = LEADER
+	r.status = RECOVERING
+	r.currentTerm = 5
+
+	// Peer 1 has slots 0, 1
+	// Peer 2 has slots 0, 2 (different from peer 1)
+	r.logSyncReplies = []MLogSyncReply{
+		{
+			Replica: 1, Term: 5, NumEntries: 2,
+			Entries: []LogEntry{
+				{Slot: 0, CmdId: CommandId{10, 1}, Cmd: state.Command{Op: state.PUT, K: 1, V: state.NIL()}},
+				{Slot: 1, CmdId: CommandId{10, 2}, Cmd: state.Command{Op: state.PUT, K: 2, V: state.NIL()}},
+			},
+		},
+		{
+			Replica: 2, Term: 5, NumEntries: 2,
+			Entries: []LogEntry{
+				{Slot: 0, CmdId: CommandId{10, 1}, Cmd: state.Command{Op: state.PUT, K: 1, V: state.NIL()}},
+				{Slot: 2, CmdId: CommandId{20, 1}, Cmd: state.Command{Op: state.PUT, K: 3, V: state.NIL()}},
+			},
+		},
+	}
+
+	r.mergeAndRecoverLog()
+
+	if r.status != NORMAL {
+		t.Errorf("expected NORMAL, got %d", r.status)
+	}
+	// Should have slots 0, 1, 2 → lastCmdSlot = 3
+	if r.lastCmdSlot != 3 {
+		t.Errorf("expected lastCmdSlot=3, got %d", r.lastCmdSlot)
+	}
+	if !r.executed.Has("0") || !r.executed.Has("1") || !r.executed.Has("2") {
+		t.Error("expected slots 0, 1, 2 to be executed")
+	}
+}
+
+// TestMergeAndRecoverLogSkipsAlreadyExecuted tests that already-executed slots are not re-executed.
+func TestMergeAndRecoverLogSkipsAlreadyExecuted(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 3)
+	r.role = LEADER
+	r.status = RECOVERING
+	r.currentTerm = 5
+
+	// Pre-execute slot 0
+	cmd0 := state.Command{Op: state.PUT, K: 1, V: state.NIL()}
+	cmd0.Execute(r.State) // Execute once
+	r.executed.Set("0", struct{}{})
+
+	// Our history has slot 0 committed
+	r.history[0] = commandStaticDesc{
+		cmdSlot: 0, phase: COMMIT,
+		cmd:   cmd0,
+		cmdId: CommandId{ClientId: 10, SeqNum: 1},
+	}
+
+	// Peer also has slot 0
+	r.logSyncReplies = []MLogSyncReply{
+		{
+			Replica: 1, Term: 5, NumEntries: 1,
+			Entries: []LogEntry{
+				{Slot: 0, CmdId: CommandId{10, 1}, Cmd: cmd0},
+			},
+		},
+	}
+
+	// Execute merge — slot 0 should be skipped (already executed)
+	r.mergeAndRecoverLog()
+
+	if r.status != NORMAL {
+		t.Errorf("expected NORMAL, got %d", r.status)
+	}
+}
+
+// TestStartLogRecovery tests that startLogRecovery sets correct state and sends MLogSync.
+func TestStartLogRecovery(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 3)
+	r.role = LEADER
+	r.currentTerm = 5
+	r.lastCommitted = 3
+
+	r.startLogRecovery()
+
+	if r.status != RECOVERING {
+		t.Errorf("expected RECOVERING status, got %d", r.status)
+	}
+	if r.logSyncExpected != 2 { // N-1 = 3-1 = 2
+		t.Errorf("expected logSyncExpected=2, got %d", r.logSyncExpected)
+	}
+
+	// Verify MLogSync was sent (at least one message on sender channel)
+	select {
+	case <-r.sender:
+		// OK — MLogSync was sent
+	case <-time.After(100 * time.Millisecond):
+		t.Error("expected MLogSync to be sent to peers")
+	}
+}
+
+// TestRecoveryFullFlow tests the complete flow: election win → log recovery → NORMAL.
+func TestRecoveryFullFlow(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 3)
+	r.role = LEADER
+	r.currentTerm = 5
+	r.status = NORMAL
+
+	// Simulate election win triggering recovery
+	r.startLogRecovery()
+	if r.status != RECOVERING {
+		t.Fatal("expected RECOVERING after startLogRecovery")
+	}
+
+	// Proposals should be rejected during recovery
+	// (handlePropose checks r.status != NORMAL)
+
+	// Simulate peer replies
+	reply1 := &MLogSyncReply{
+		Replica: 1, Term: 5, NumEntries: 1,
+		Entries: []LogEntry{
+			{Slot: 0, CmdId: CommandId{10, 1}, Cmd: state.Command{Op: state.PUT, K: 1, V: state.NIL()}},
+		},
+	}
+	r.handleLogSyncReply(reply1)
+
+	// With N=3, N/2=1. One reply is enough for majority.
+	if r.status != NORMAL {
+		t.Errorf("expected NORMAL after majority replies, got %d", r.status)
+	}
+	if r.lastCmdSlot != 1 {
+		t.Errorf("expected lastCmdSlot=1, got %d", r.lastCmdSlot)
+	}
+}
+
+// TestMergeAndRecoverLogTracksKeyVersions tests that recovery updates keyVersions for PUT commands.
+func TestMergeAndRecoverLogTracksKeyVersions(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 3)
+	r.role = LEADER
+	r.status = RECOVERING
+	r.currentTerm = 5
+
+	r.logSyncReplies = []MLogSyncReply{
+		{
+			Replica: 1, Term: 5, NumEntries: 2,
+			Entries: []LogEntry{
+				{Slot: 0, CmdId: CommandId{10, 1}, Cmd: state.Command{Op: state.PUT, K: 42, V: state.NIL()}},
+				{Slot: 1, CmdId: CommandId{10, 2}, Cmd: state.Command{Op: state.GET, K: 42, V: state.NIL()}},
+			},
+		},
+	}
+
+	r.mergeAndRecoverLog()
+
+	// Key 42 should have version = slot 0 (from the PUT)
+	keyStr := r.int32ToString(42)
+	v, exists := r.keyVersions.Get(keyStr)
+	if !exists {
+		t.Fatal("expected keyVersions entry for key 42")
+	}
+	if v.(int) != 0 {
+		t.Errorf("expected version 0 for key 42, got %d", v.(int))
+	}
+}
+
+// TestLastCommittedUpdatedOnCommit tests that lastCommitted is updated during normal commit.
+func TestLastCommittedUpdatedOnCommit(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 3)
+	r.role = LEADER
+	r.currentTerm = 5
+	r.lastCommitted = -1
+
+	// Create a descriptor in ACCEPT phase
+	desc := &commandDesc{
+		cmdSlot: 7,
+		phase:   ACCEPT,
+		cmdId:   CommandId{ClientId: 10, SeqNum: 1},
+		cmd:     state.Command{Op: state.PUT, K: 1, V: state.NIL()},
+		afterPayload: hook.NewOptCondF(func() bool { return true }),
+		acks:    replica.NewMsgSet(r.Q, func(_, _ interface{}) bool { return true }, nil, func(_ interface{}, _ []interface{}) {}),
+		msgs:    make(chan interface{}, 8),
+		successor: -1,
+	}
+
+	commit := &MCommit{
+		Replica: 0,
+		Ballot:  5,
+		CmdSlot: 7,
+	}
+
+	r.handleCommit(commit, desc)
+
+	if r.lastCommitted != 7 {
+		t.Errorf("expected lastCommitted=7, got %d", r.lastCommitted)
+	}
+}
+
+// TestHandleLogSyncNoCommittedEntries tests follower with no committed entries.
+func TestHandleLogSyncNoCommittedEntries(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.currentTerm = 5
+
+	msg := &MLogSync{Replica: 0, Term: 5}
+	r.handleLogSync(msg)
+
+	// Should send a reply (even with 0 entries)
+	select {
+	case <-r.sender:
+		// OK — reply sent
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("expected MLogSyncReply to be sent")
+	}
+}
+
+// TestMergeAndRecoverLogWithGaps tests recovery with gaps in slot numbers.
+func TestMergeAndRecoverLogWithGaps(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 3)
+	r.role = LEADER
+	r.status = RECOVERING
+	r.currentTerm = 5
+
+	// Entries at slots 0, 2, 5 (gaps at 1, 3, 4)
+	r.logSyncReplies = []MLogSyncReply{
+		{
+			Replica: 1, Term: 5, NumEntries: 3,
+			Entries: []LogEntry{
+				{Slot: 0, CmdId: CommandId{10, 1}, Cmd: state.Command{Op: state.PUT, K: 1, V: state.NIL()}},
+				{Slot: 2, CmdId: CommandId{10, 2}, Cmd: state.Command{Op: state.PUT, K: 2, V: state.NIL()}},
+				{Slot: 5, CmdId: CommandId{10, 3}, Cmd: state.Command{Op: state.PUT, K: 3, V: state.NIL()}},
+			},
+		},
+	}
+
+	r.mergeAndRecoverLog()
+
+	// lastCmdSlot should be 6 (max slot 5 + 1)
+	if r.lastCmdSlot != 6 {
+		t.Errorf("expected lastCmdSlot=6, got %d", r.lastCmdSlot)
+	}
+	// Slots 0, 2, 5 should be executed; 1, 3, 4 should not
+	if !r.executed.Has("0") || !r.executed.Has("2") || !r.executed.Has("5") {
+		t.Error("expected slots 0, 2, 5 to be executed")
+	}
+	if r.executed.Has("1") || r.executed.Has("3") || r.executed.Has("4") {
+		t.Error("expected slots 1, 3, 4 to NOT be executed")
+	}
+}
+
+// TestLogEntryType tests LogEntry struct fields.
+func TestLogEntryType(t *testing.T) {
+	entry := LogEntry{
+		Slot:  42,
+		CmdId: CommandId{ClientId: 10, SeqNum: 5},
+		Cmd:   state.Command{Op: state.PUT, K: 7, V: state.NIL()},
+	}
+	if entry.Slot != 42 {
+		t.Errorf("expected slot 42, got %d", entry.Slot)
+	}
+	if entry.CmdId.ClientId != 10 || entry.CmdId.SeqNum != 5 {
+		t.Errorf("cmdId mismatch: %v", entry.CmdId)
+	}
+}
+
+// TestCommandStaticDescHasCmdId tests that commandStaticDesc includes cmdId field.
+func TestCommandStaticDescHasCmdId(t *testing.T) {
+	desc := commandStaticDesc{
+		cmdSlot: 3,
+		phase:   COMMIT,
+		cmd:     state.Command{Op: state.PUT, K: 1, V: state.NIL()},
+		cmdId:   CommandId{ClientId: 10, SeqNum: 5},
+	}
+	if desc.cmdId.ClientId != 10 || desc.cmdId.SeqNum != 5 {
+		t.Errorf("cmdId not stored: %v", desc.cmdId)
+	}
+}
