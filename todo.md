@@ -9449,7 +9449,8 @@ grep "TPUT" results/exp2.3-test/client*.log | tail -20
 - ✅ New leader accepts proposals after recovery (status=NORMAL, lastCmdSlot correct)
 - ✅ Client pipeline flush works (128.7) — flush triggered, pipeline unblocked
 - ✅ Sender head-of-line blocking fixed (128.8) — fire-and-forget per-peer sends, no more wg.Wait()
-- ✅ **Throughput still 0 after recovery** — fixed in Phase 128.9: buffer proposals during RECOVERING, replay after recovery
+- ✅ Proposals buffered during RECOVERING (128.9) — buffer + replay after recovery
+- ⬜ **Throughput still 0 in lab test**: debug shows forwarding works during normal operation (97K forwards), heartbeat arrives at followers, election + slot sync succeeds. But after kill, followers forward to **leader 0 (dead)** because `currentLeader` hasn't been updated yet (heartbeat from new leader hasn't arrived). Then `sendProposeSafe` may block on dead writer before `deadReplicas` is set. Race condition between `handleReaderDead` (sets deadReplicas) and HybridLoop threads (call sendProposeSafe). Need: (a) set write deadline on peer connections, or (b) nil out `writers[deadId]` in `handleReaderDead`.
 
 ### Phase 128.9: Fix — Proposals Dropped During RECOVERING State ✅
 
