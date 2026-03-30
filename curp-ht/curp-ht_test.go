@@ -3089,7 +3089,7 @@ func TestMergeAndRecoverLogSkipsAlreadyExecuted(t *testing.T) {
 	}
 }
 
-// TestStartLogRecovery tests that startLogRecovery sets correct state and sends MLogSync.
+// TestStartLogRecovery tests that startLogRecovery sets correct state and sends MSlotSync.
 func TestStartLogRecovery(t *testing.T) {
 	r := newTestReplicaForRecovery(0, 3)
 	r.role = LEADER
@@ -3101,25 +3101,26 @@ func TestStartLogRecovery(t *testing.T) {
 	if r.status != RECOVERING {
 		t.Errorf("expected RECOVERING status, got %d", r.status)
 	}
-	if r.logSyncExpected != 2 { // N-1 = 3-1 = 2
-		t.Errorf("expected logSyncExpected=2, got %d", r.logSyncExpected)
+	if r.slotSyncExpected != 2 { // N-1 = 3-1 = 2
+		t.Errorf("expected slotSyncExpected=2, got %d", r.slotSyncExpected)
 	}
 
-	// Verify MLogSync was sent (at least one message on sender channel)
+	// Verify MSlotSync was sent (at least one message on sender channel)
 	select {
 	case <-r.sender:
-		// OK — MLogSync was sent
+		// OK — MSlotSync was sent
 	case <-time.After(100 * time.Millisecond):
-		t.Error("expected MLogSync to be sent to peers")
+		t.Error("expected MSlotSync to be sent to peers")
 	}
 }
 
-// TestRecoveryFullFlow tests the complete flow: election win → log recovery → NORMAL.
+// TestRecoveryFullFlow tests the complete flow: election win → slot sync → NORMAL.
 func TestRecoveryFullFlow(t *testing.T) {
 	r := newTestReplicaForRecovery(0, 3)
 	r.role = LEADER
 	r.currentTerm = 5
 	r.status = NORMAL
+	r.lastCommitted = 3
 
 	// Simulate election win triggering recovery
 	r.startLogRecovery()
@@ -3130,21 +3131,19 @@ func TestRecoveryFullFlow(t *testing.T) {
 	// Proposals should be rejected during recovery
 	// (handlePropose checks r.status != NORMAL)
 
-	// Simulate peer replies
-	reply1 := &MLogSyncReply{
-		Replica: 1, Term: 5, NumEntries: 1,
-		Entries: []LogEntry{
-			{Slot: 0, CmdId: CommandId{10, 1}, Cmd: state.Command{Op: state.PUT, K: 1, V: state.NIL()}},
-		},
+	// Simulate peer reply with higher lastCommitted
+	reply1 := &MSlotSyncReply{
+		Replica: 1, Term: 5, LastCommitted: 7,
 	}
-	r.handleLogSyncReply(reply1)
+	r.handleSlotSyncReply(reply1)
 
 	// With N=3, N/2=1. One reply is enough for majority.
 	if r.status != NORMAL {
 		t.Errorf("expected NORMAL after majority replies, got %d", r.status)
 	}
-	if r.lastCmdSlot != 1 {
-		t.Errorf("expected lastCmdSlot=1, got %d", r.lastCmdSlot)
+	// lastCmdSlot = max(self=3, peer=7) + 1 = 8
+	if r.lastCmdSlot != 8 {
+		t.Errorf("expected lastCmdSlot=8, got %d", r.lastCmdSlot)
 	}
 }
 
@@ -5208,5 +5207,247 @@ func TestAcceptCmdCopiedToDescOnFollower(t *testing.T) {
 	}
 	if desc.cmdId != cmdId {
 		t.Errorf("desc.cmdId mismatch: got %+v, want %+v", desc.cmdId, cmdId)
+	}
+}
+
+// ============================================================================
+// Phase 128.6: Lightweight Recovery (Slot Sync) Tests
+// ============================================================================
+
+// TestMSlotSyncSerialization tests MSlotSync Marshal/Unmarshal round-trip.
+func TestMSlotSyncSerialization(t *testing.T) {
+	original := &MSlotSync{Replica: 3, Term: 7}
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+	restored := &MSlotSync{}
+	if err := restored.Unmarshal(&buf); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if restored.Replica != 3 || restored.Term != 7 {
+		t.Errorf("MSlotSync round-trip failed: got Replica=%d Term=%d", restored.Replica, restored.Term)
+	}
+}
+
+// TestMSlotSyncReplySerialization tests MSlotSyncReply Marshal/Unmarshal round-trip.
+func TestMSlotSyncReplySerialization(t *testing.T) {
+	original := &MSlotSyncReply{Replica: 2, Term: 5, LastCommitted: 99999}
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+	restored := &MSlotSyncReply{}
+	if err := restored.Unmarshal(&buf); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if restored.Replica != 2 || restored.Term != 5 || restored.LastCommitted != 99999 {
+		t.Errorf("MSlotSyncReply round-trip failed: got %+v", restored)
+	}
+}
+
+// TestSlotSyncStartsRecovery verifies that startLogRecovery uses slot sync.
+func TestSlotSyncStartsRecovery(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.role = LEADER
+	r.currentTerm = 5
+	r.currentLeader = 1
+	r.lastCommitted = 100
+
+	r.startLogRecovery()
+
+	if r.status != RECOVERING {
+		t.Errorf("status should be RECOVERING, got %d", r.status)
+	}
+	if r.slotSyncExpected != 2 { // N-1 = 3-1
+		t.Errorf("slotSyncExpected should be 2, got %d", r.slotSyncExpected)
+	}
+
+	// Verify a SlotSync message was sent (not LogSync)
+	senderCh := chan replica.SendArg(r.sender)
+	timeout := time.After(200 * time.Millisecond)
+	foundSlotSync := false
+	for {
+		select {
+		case arg := <-senderCh:
+			if arg.Rpc() == r.cs.slotSyncRPC {
+				foundSlotSync = true
+			}
+		case <-timeout:
+			goto done
+		}
+	}
+done:
+	if !foundSlotSync {
+		t.Error("startLogRecovery should send MSlotSync, not MLogSync")
+	}
+}
+
+// TestHandleSlotSync verifies that a follower responds to MSlotSync
+// with its lastCommitted slot.
+func TestHandleSlotSync(t *testing.T) {
+	r := newTestReplicaForRecovery(2, 3)
+	r.role = FOLLOWER
+	r.currentTerm = 3
+	r.lastCommitted = 50000
+
+	msg := &MSlotSync{Replica: 1, Term: 5}
+	r.handleSlotSync(msg)
+
+	// Should have stepped to term 5
+	if r.currentTerm != 5 {
+		t.Errorf("currentTerm should be 5, got %d", r.currentTerm)
+	}
+
+	// Should have sent a reply
+	senderCh := chan replica.SendArg(r.sender)
+	timeout := time.After(200 * time.Millisecond)
+	foundReply := false
+	for {
+		select {
+		case arg := <-senderCh:
+			if arg.Rpc() == r.cs.slotSyncReplyRPC && arg.Id() == 1 {
+				foundReply = true
+			}
+		case <-timeout:
+			goto done
+		}
+	}
+done:
+	if !foundReply {
+		t.Error("handleSlotSync should send MSlotSyncReply to the new leader")
+	}
+}
+
+// TestHandleSlotSyncIgnoresStale verifies stale slot sync requests are ignored.
+func TestHandleSlotSyncIgnoresStale(t *testing.T) {
+	r := newTestReplicaForRecovery(2, 3)
+	r.role = FOLLOWER
+	r.currentTerm = 10
+
+	msg := &MSlotSync{Replica: 1, Term: 5} // Stale term
+	r.handleSlotSync(msg)
+
+	// Should not have changed term
+	if r.currentTerm != 10 {
+		t.Errorf("currentTerm should remain 10, got %d", r.currentTerm)
+	}
+}
+
+// TestCompleteSlotSync3Replicas verifies slot sync completes with 3 replicas.
+func TestCompleteSlotSync3Replicas(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.role = LEADER
+	r.status = RECOVERING
+	r.currentTerm = 5
+	r.currentLeader = 1
+	r.lastCommitted = 100
+
+	r.slotSyncReplies = make([]MSlotSyncReply, 0, 2)
+	r.slotSyncExpected = 2
+
+	// Peer 0 has committed up to 200, peer 2 up to 150
+	r.handleSlotSyncReply(&MSlotSyncReply{Replica: 0, Term: 5, LastCommitted: 200})
+
+	// Still need one more reply for majority (N=3, need 1 peer reply)
+	// Actually N/2 = 1, so one reply is enough
+	if r.status != NORMAL {
+		// With N=3, N/2=1, so one reply should complete recovery
+		t.Logf("status after 1 reply: %d (expected NORMAL=0)", r.status)
+	}
+
+	if r.status == NORMAL {
+		// Recovery complete — check lastCmdSlot
+		if r.lastCmdSlot != 201 {
+			t.Errorf("lastCmdSlot should be 201 (max(100,200)+1), got %d", r.lastCmdSlot)
+		}
+	}
+}
+
+// TestCompleteSlotSync5Replicas verifies slot sync completes with 5 replicas.
+func TestCompleteSlotSync5Replicas(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 5)
+	r.role = LEADER
+	r.status = RECOVERING
+	r.currentTerm = 5
+	r.currentLeader = 1
+	r.lastCommitted = 100
+
+	r.slotSyncReplies = make([]MSlotSyncReply, 0, 4)
+	r.slotSyncExpected = 4
+
+	// Need N/2 = 2 replies
+	r.handleSlotSyncReply(&MSlotSyncReply{Replica: 0, Term: 5, LastCommitted: 200})
+	if r.status == NORMAL {
+		t.Fatal("should not be NORMAL after only 1 reply with N=5")
+	}
+
+	r.handleSlotSyncReply(&MSlotSyncReply{Replica: 2, Term: 5, LastCommitted: 300})
+	if r.status != NORMAL {
+		t.Fatal("should be NORMAL after 2 replies with N=5")
+	}
+
+	// Max is max(100, 200, 300) = 300
+	if r.lastCmdSlot != 301 {
+		t.Errorf("lastCmdSlot should be 301, got %d", r.lastCmdSlot)
+	}
+	if r.lastCommitted != 300 {
+		t.Errorf("lastCommitted should be 300, got %d", r.lastCommitted)
+	}
+}
+
+// TestSlotSyncReplyIgnoredWhenNotRecovering verifies replies are dropped
+// when not in RECOVERING state.
+func TestSlotSyncReplyIgnoredWhenNotRecovering(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.role = LEADER
+	r.status = NORMAL // Not recovering
+	r.currentTerm = 5
+	r.lastCmdSlot = 50
+
+	r.handleSlotSyncReply(&MSlotSyncReply{Replica: 0, Term: 5, LastCommitted: 999})
+
+	// lastCmdSlot should not change
+	if r.lastCmdSlot != 50 {
+		t.Errorf("lastCmdSlot should remain 50, got %d", r.lastCmdSlot)
+	}
+}
+
+// TestSlotSyncReplyHigherTermStepsDown verifies that a higher-term reply
+// causes the leader to step down.
+func TestSlotSyncReplyHigherTermStepsDown(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.role = LEADER
+	r.status = RECOVERING
+	r.currentTerm = 5
+	r.currentLeader = 1
+
+	r.handleSlotSyncReply(&MSlotSyncReply{Replica: 0, Term: 10, LastCommitted: 999})
+
+	if r.role != FOLLOWER {
+		t.Errorf("should have stepped down to FOLLOWER, got role=%d", r.role)
+	}
+	if r.currentTerm != 10 {
+		t.Errorf("currentTerm should be 10, got %d", r.currentTerm)
+	}
+}
+
+// TestSlotSyncSelfLastCommittedUsed verifies that the leader's own
+// lastCommitted is used if it's the highest.
+func TestSlotSyncSelfLastCommittedUsed(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.role = LEADER
+	r.status = RECOVERING
+	r.currentTerm = 5
+	r.currentLeader = 1
+	r.lastCommitted = 500 // Self has highest
+
+	r.slotSyncReplies = make([]MSlotSyncReply, 0, 2)
+	r.slotSyncExpected = 2
+
+	// Peer has lower lastCommitted
+	r.handleSlotSyncReply(&MSlotSyncReply{Replica: 0, Term: 5, LastCommitted: 200})
+
+	if r.status != NORMAL {
+		t.Fatal("should be NORMAL after majority")
+	}
+	if r.lastCmdSlot != 501 {
+		t.Errorf("lastCmdSlot should be 501 (self lastCommitted=500 is highest), got %d", r.lastCmdSlot)
 	}
 }

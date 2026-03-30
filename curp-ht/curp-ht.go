@@ -88,9 +88,13 @@ type Replica struct {
 	votesReceived  int           // Votes received in current election
 	lastCommitted  int32         // Highest committed slot (for log comparison in votes)
 
-	// Log recovery state (Phase 128 Step 4)
+	// Log recovery state (Phase 128 Step 4 — legacy, kept for handleLogSync compat)
 	logSyncReplies  []MLogSyncReply // Collected log sync replies during recovery
 	logSyncExpected int             // Number of replies expected (N-1)
+
+	// Slot sync state (Phase 128.6 — lightweight recovery)
+	slotSyncReplies  []MSlotSyncReply // Collected slot sync replies during recovery
+	slotSyncExpected int              // Number of replies expected (N-1)
 
 	// Leader tracking for proposal forwarding (Phase 128.4)
 	currentLeader int32 // Replica ID of the current leader (set from heartbeats)
@@ -461,21 +465,23 @@ func (r *Replica) handleHeartbeat(msg *MHeartbeat) {
 	r.resetElectionTimer()
 }
 
-// startLogRecovery begins log recovery after winning an election.
-// Sets status to RECOVERING and broadcasts MLogSync to all peers.
+// startLogRecovery begins lightweight recovery after winning an election.
+// The new leader was a follower that already executed all committed commands —
+// it only needs to discover the highest committed slot across the cluster
+// to set lastCmdSlot correctly. No log entries are transferred.
 func (r *Replica) startLogRecovery() {
 	r.status = RECOVERING
-	r.logSyncReplies = make([]MLogSyncReply, 0, r.N-1)
-	r.logSyncExpected = r.N - 1
+	r.slotSyncReplies = make([]MSlotSyncReply, 0, r.N-1)
+	r.slotSyncExpected = r.N - 1
 
-	r.Printf("Starting log recovery for term %d (lastCommitted=%d)\n",
+	r.Printf("Starting slot sync for term %d (lastCommitted=%d)\n",
 		r.currentTerm, r.lastCommitted)
 
-	msg := &MLogSync{
+	msg := &MSlotSync{
 		Replica: r.Id,
 		Term:    r.currentTerm,
 	}
-	r.sender.SendToAll(msg, r.cs.logSyncRPC)
+	r.sender.SendToAll(msg, r.cs.slotSyncRPC)
 }
 
 // handleLogSync processes a log sync request from a new leader.
@@ -656,6 +662,75 @@ func (r *Replica) mergeAndRecoverLog() {
 	r.status = NORMAL
 }
 
+// handleSlotSync processes a slot sync request from a new leader.
+// Responds with our lastCommitted slot — no log entries transferred.
+func (r *Replica) handleSlotSync(msg *MSlotSync) {
+	if msg.Term < r.currentTerm {
+		return // Stale leader
+	}
+
+	if msg.Term > r.currentTerm {
+		r.becomeFollower(msg.Term)
+		r.stopHeartbeat()
+	}
+
+	reply := &MSlotSyncReply{
+		Replica:       r.Id,
+		Term:          r.currentTerm,
+		LastCommitted: r.lastCommitted,
+	}
+	r.sender.SendTo(msg.Replica, reply, r.cs.slotSyncReplyRPC)
+}
+
+// handleSlotSyncReply processes a slot sync reply during lightweight recovery.
+// When majority is received, sets lastCmdSlot and transitions to NORMAL.
+func (r *Replica) handleSlotSyncReply(msg *MSlotSyncReply) {
+	if msg.Term > r.currentTerm {
+		r.becomeFollower(msg.Term)
+		r.stopHeartbeat()
+		return
+	}
+
+	if r.role != LEADER || r.status != RECOVERING {
+		return
+	}
+
+	if msg.Term != r.currentTerm {
+		return
+	}
+
+	r.slotSyncReplies = append(r.slotSyncReplies, *msg)
+
+	// Need majority of peers: (N/2) replies (self already counted)
+	if len(r.slotSyncReplies) >= r.N/2 {
+		r.completeSlotSync()
+	}
+}
+
+// completeSlotSync finishes lightweight recovery by computing lastCmdSlot
+// from the max lastCommitted across self and all peers.
+func (r *Replica) completeSlotSync() {
+	maxCommitted := r.lastCommitted
+
+	for _, reply := range r.slotSyncReplies {
+		if reply.LastCommitted > maxCommitted {
+			maxCommitted = reply.LastCommitted
+		}
+	}
+
+	if maxCommitted >= 0 {
+		r.lastCmdSlot = int(maxCommitted) + 1
+	}
+	r.lastCommitted = maxCommitted
+
+	r.Printf("Slot sync complete: lastCmdSlot=%d (maxCommitted=%d, %d replies)\n",
+		r.lastCmdSlot, maxCommitted, len(r.slotSyncReplies))
+
+	// Clear recovery state
+	r.slotSyncReplies = nil
+	r.status = NORMAL
+}
+
 func (r *Replica) run() {
 	r.ConnectToPeers()
 	latencies := r.ComputeClosestPeers()
@@ -832,6 +907,14 @@ func (r *Replica) run() {
 		case m := <-r.cs.forwardProposeChan:
 			fwd := m.(*MForwardPropose)
 			r.handleForwardPropose(fwd)
+
+		case m := <-r.cs.slotSyncChan:
+			ss := m.(*MSlotSync)
+			r.handleSlotSync(ss)
+
+		case m := <-r.cs.slotSyncReplyChan:
+			ssr := m.(*MSlotSyncReply)
+			r.handleSlotSyncReply(ssr)
 
 		case <-heartbeatCh:
 			if r.IsLeader() {

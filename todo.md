@@ -9456,20 +9456,22 @@ grep "TPUT" results/exp2.3-test/client*.log | tail -20
 
 **Plan**: Replace full log transfer with lightweight slot sync:
 
-#### ⬜ Step 1: New message `MSlotSync` / `MSlotSyncReply`
+#### ✅ Step 1: New message `MSlotSync` / `MSlotSyncReply`
 - `MSlotSync {Replica, Term}` — new leader asks peers for their lastCommitted
 - `MSlotSyncReply {Replica, Term, LastCommitted}` — peer replies with its lastCommitted
 - Tiny messages (~12 bytes), no entry data
+- Full Marshal/Unmarshal/BinarySize/Cache implementations
 
-#### ⬜ Step 2: Simplify `startLogRecovery`
+#### ✅ Step 2: Simplify `startLogRecovery`
 - Broadcast `MSlotSync` instead of `MLogSync`
 - `handleSlotSync`: reply with `r.lastCommitted` (no history scan)
 - `handleSlotSyncReply`: collect replies, when majority received → take max lastCommitted across self + peers → set `lastCmdSlot = max + 1`, set `status = NORMAL`
 - No `mergeAndRecoverLog`, no replay, no Execute
 
-#### ⬜ Step 3: Test and verify
-- Unit test: slot sync with 3/5 replicas
-- Kill-leader test on lab: expect recovery in <1s (election ~1s + slot sync ~1 RTT)
-- Throughput should recover within 2-3s of kill
+#### ✅ Step 3: Test and verify
+- 10 unit tests: serialization, slot sync start, handler, stale term, 3/5 replicas, higher term step-down, self lastCommitted
+- Updated old TestStartLogRecovery and TestRecoveryFullFlow to use slot sync
+- ⬜ Kill-leader test on lab: expect recovery in <1s (election ~1s + slot sync ~1 RTT)
+- ⬜ Throughput should recover within 2-3s of kill
 
 **Expected timeline**: kill → 1-1.5s election → 0.1s slot sync → NORMAL → throughput resumes

@@ -193,6 +193,20 @@ type MLogSyncReply struct {
 	Entries    []LogEntry // Committed log entries
 }
 
+// MSlotSync - New leader asks peers for their lastCommitted slot.
+// Lightweight recovery: no log entries transferred, just the slot number.
+type MSlotSync struct {
+	Replica int32 // New leader's ID
+	Term    int32 // New leader's term
+}
+
+// MSlotSyncReply - Peer replies with its lastCommitted slot.
+type MSlotSyncReply struct {
+	Replica       int32 // Peer's ID
+	Term          int32 // Peer's term
+	LastCommitted int32 // Peer's highest committed slot
+}
+
 // MForwardPropose - Follower forwards a client proposal to the actual leader.
 // Used when a client sends a Propose to a non-leader replica (e.g., after failover
 // when the client doesn't know who the real leader is).
@@ -272,6 +286,14 @@ func (m *MLogSyncReply) New() fastrpc.Serializable {
 	return new(MLogSyncReply)
 }
 
+func (m *MSlotSync) New() fastrpc.Serializable {
+	return new(MSlotSync)
+}
+
+func (m *MSlotSyncReply) New() fastrpc.Serializable {
+	return new(MSlotSyncReply)
+}
+
 func (m *MForwardPropose) New() fastrpc.Serializable {
 	return new(MForwardPropose)
 }
@@ -303,6 +325,10 @@ type CommunicationSupply struct {
 	logSyncChan      chan fastrpc.Serializable
 	logSyncReplyChan chan fastrpc.Serializable
 
+	// Slot sync channels (lightweight recovery)
+	slotSyncChan      chan fastrpc.Serializable
+	slotSyncReplyChan chan fastrpc.Serializable
+
 	// Proposal forwarding channel
 	forwardProposeChan chan fastrpc.Serializable
 
@@ -329,6 +355,10 @@ type CommunicationSupply struct {
 	// Log recovery RPCs
 	logSyncRPC      uint8
 	logSyncReplyRPC uint8
+
+	// Slot sync RPCs (lightweight recovery)
+	slotSyncRPC      uint8
+	slotSyncReplyRPC uint8
 
 	// Proposal forwarding RPC
 	forwardProposeRPC uint8
@@ -384,6 +414,12 @@ func initCs(cs *CommunicationSupply, t *fastrpc.Table) {
 	// Register log recovery RPCs
 	cs.logSyncRPC = t.Register(new(MLogSync), cs.logSyncChan)
 	cs.logSyncReplyRPC = t.Register(new(MLogSyncReply), cs.logSyncReplyChan)
+
+	// Initialize and register slot sync (lightweight recovery)
+	cs.slotSyncChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
+	cs.slotSyncReplyChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
+	cs.slotSyncRPC = t.Register(new(MSlotSync), cs.slotSyncChan)
+	cs.slotSyncReplyRPC = t.Register(new(MSlotSyncReply), cs.slotSyncReplyChan)
 
 	// Initialize and register proposal forwarding
 	cs.forwardProposeChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
@@ -2031,5 +2067,143 @@ func (t *MForwardPropose) Unmarshal(wire io.Reader) error {
 		return err
 	}
 	t.Timestamp = int64((uint64(bs[0]) | (uint64(bs[1]) << 8) | (uint64(bs[2]) << 16) | (uint64(bs[3]) << 24) | (uint64(bs[4]) << 32) | (uint64(bs[5]) << 40) | (uint64(bs[6]) << 48) | (uint64(bs[7]) << 56)))
+	return nil
+}
+
+// MSlotSync serialization — fixed 8 bytes: Replica(4) + Term(4)
+
+func (t *MSlotSync) BinarySize() (nbytes int, sizeKnown bool) {
+	return 8, true
+}
+
+type MSlotSyncCache struct {
+	mu    sync.Mutex
+	cache []*MSlotSync
+}
+
+func NewMSlotSyncCache() *MSlotSyncCache {
+	c := &MSlotSyncCache{}
+	c.cache = make([]*MSlotSync, 0)
+	return c
+}
+
+func (p *MSlotSyncCache) Get() *MSlotSync {
+	var t *MSlotSync
+	p.mu.Lock()
+	if len(p.cache) > 0 {
+		t = p.cache[len(p.cache)-1]
+		p.cache = p.cache[0:(len(p.cache) - 1)]
+	}
+	p.mu.Unlock()
+	if t == nil {
+		t = &MSlotSync{}
+	}
+	return t
+}
+
+func (p *MSlotSyncCache) Put(t *MSlotSync) {
+	p.mu.Lock()
+	p.cache = append(p.cache, t)
+	p.mu.Unlock()
+}
+
+func (t *MSlotSync) Marshal(wire io.Writer) {
+	var b [8]byte
+	var bs []byte
+	bs = b[:8]
+	tmp32 := t.Replica
+	bs[0] = byte(tmp32)
+	bs[1] = byte(tmp32 >> 8)
+	bs[2] = byte(tmp32 >> 16)
+	bs[3] = byte(tmp32 >> 24)
+	tmp32 = t.Term
+	bs[4] = byte(tmp32)
+	bs[5] = byte(tmp32 >> 8)
+	bs[6] = byte(tmp32 >> 16)
+	bs[7] = byte(tmp32 >> 24)
+	wire.Write(bs)
+}
+
+func (t *MSlotSync) Unmarshal(wire io.Reader) error {
+	var b [8]byte
+	var bs []byte
+	bs = b[:8]
+	if _, err := io.ReadAtLeast(wire, bs, 8); err != nil {
+		return err
+	}
+	t.Replica = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
+	t.Term = int32((uint32(bs[4]) | (uint32(bs[5]) << 8) | (uint32(bs[6]) << 16) | (uint32(bs[7]) << 24)))
+	return nil
+}
+
+// MSlotSyncReply serialization — fixed 12 bytes: Replica(4) + Term(4) + LastCommitted(4)
+
+func (t *MSlotSyncReply) BinarySize() (nbytes int, sizeKnown bool) {
+	return 12, true
+}
+
+type MSlotSyncReplyCache struct {
+	mu    sync.Mutex
+	cache []*MSlotSyncReply
+}
+
+func NewMSlotSyncReplyCache() *MSlotSyncReplyCache {
+	c := &MSlotSyncReplyCache{}
+	c.cache = make([]*MSlotSyncReply, 0)
+	return c
+}
+
+func (p *MSlotSyncReplyCache) Get() *MSlotSyncReply {
+	var t *MSlotSyncReply
+	p.mu.Lock()
+	if len(p.cache) > 0 {
+		t = p.cache[len(p.cache)-1]
+		p.cache = p.cache[0:(len(p.cache) - 1)]
+	}
+	p.mu.Unlock()
+	if t == nil {
+		t = &MSlotSyncReply{}
+	}
+	return t
+}
+
+func (p *MSlotSyncReplyCache) Put(t *MSlotSyncReply) {
+	p.mu.Lock()
+	p.cache = append(p.cache, t)
+	p.mu.Unlock()
+}
+
+func (t *MSlotSyncReply) Marshal(wire io.Writer) {
+	var b [12]byte
+	var bs []byte
+	bs = b[:12]
+	tmp32 := t.Replica
+	bs[0] = byte(tmp32)
+	bs[1] = byte(tmp32 >> 8)
+	bs[2] = byte(tmp32 >> 16)
+	bs[3] = byte(tmp32 >> 24)
+	tmp32 = t.Term
+	bs[4] = byte(tmp32)
+	bs[5] = byte(tmp32 >> 8)
+	bs[6] = byte(tmp32 >> 16)
+	bs[7] = byte(tmp32 >> 24)
+	tmp32 = t.LastCommitted
+	bs[8] = byte(tmp32)
+	bs[9] = byte(tmp32 >> 8)
+	bs[10] = byte(tmp32 >> 16)
+	bs[11] = byte(tmp32 >> 24)
+	wire.Write(bs)
+}
+
+func (t *MSlotSyncReply) Unmarshal(wire io.Reader) error {
+	var b [12]byte
+	var bs []byte
+	bs = b[:12]
+	if _, err := io.ReadAtLeast(wire, bs, 12); err != nil {
+		return err
+	}
+	t.Replica = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
+	t.Term = int32((uint32(bs[4]) | (uint32(bs[5]) << 8) | (uint32(bs[6]) << 16) | (uint32(bs[7]) << 24)))
+	t.LastCommitted = int32((uint32(bs[8]) | (uint32(bs[9]) << 8) | (uint32(bs[10]) << 16) | (uint32(bs[11]) << 24)))
 	return nil
 }
