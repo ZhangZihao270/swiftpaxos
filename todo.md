@@ -9448,7 +9448,7 @@ grep "TPUT" results/exp2.3-test/client*.log | tail -20
 - ✅ Log recovery: slot sync completes in <1s (Phase 128.6)
 - ✅ New leader accepts proposals after recovery (status=NORMAL, lastCmdSlot correct)
 - ✅ Client pipeline flush works (128.7) — flush triggered, pipeline unblocked
-- ⬜ **Throughput still 0**: new root cause — sender goroutine blocked writing to dead peer (see Phase 128.8)
+- ✅ **Throughput still 0**: fixed — per-peer write locks eliminate head-of-line blocking (Phase 128.8 Step 1). Pending lab verification.
 
 ### Phase 128.7: Client Pipeline Recovery After Failover
 
