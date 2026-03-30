@@ -9402,18 +9402,47 @@ beyond what strong-strong conflicts already cause.
 
 **Remaining issues (throughput still 0 after recovery):**
 
-1. **Log recovery only recovers 316 entries** (should be ~300K)
-   - `handleLogSync` scans up to `lastCommitted`, but follower's `lastCommitted` may not match actual committed slot count
-   - Follower's history[] may not have `phase=COMMIT` set for entries committed via Accept+Commit path (only leader sets phase in history?)
-   - Need to verify: does follower update `history[slot].phase = COMMIT` when processing MCommit?
+#### ⬜ Issue 1: Log recovery only recovers 316 entries (should be ~300K)
+- `handleLogSync` scans `history[]` up to `lastCommitted`, but follower's `history[slot].phase` may not be set to `COMMIT`
+- Follower processes MCommit in `deliver()` which sets `desc.phase = COMMIT`, but this is on the `commandDesc` (in-memory descriptor), not on `history[]`
+- Need to verify: does follower write `history[slot].phase = COMMIT` anywhere? If not, `handleLogSync` finds nothing in history.
+- **Fix direction**: either (a) follower writes to `history[]` when handling MCommit, or (b) `handleLogSync` scans `executed` map instead of `history[]`
 
-2. **Client sends to new leader but gets no reply**
-   - `sendProposeSafe()` broadcasts to all alive replicas, so new leader should receive proposals
-   - New leader completes recovery (status=NORMAL), but may not process proposals correctly
-   - Possible: `lastCmdSlot=316` after recovery, but actual committed slots are ~300K → new proposals get slot 316 which conflicts with already-executed slots
-   - Need to check: does deliver() work correctly when recovered lastCmdSlot << actual executed slots?
+#### ⬜ Issue 2: Client sends to new leader but gets no reply
+- `sendProposeSafe()` broadcasts to all alive replicas, so new leader should receive proposals
+- New leader completes recovery (status=NORMAL), but may not process proposals correctly
+- Possible: `lastCmdSlot=316` after recovery, but actual executed slots are ~300K → new proposals get slot 316 which conflicts with already-executed slots → deliver() blocks forever waiting for slot 315 to be executed
+- **Fix direction**: after recovery, `lastCmdSlot` must be set to `max(recovered slots, already executed slots) + 1`
 
-3. **Client0 on dead machine (.101) permanently lost**
-   - Client0 is co-located with killed replica0, cannot recover
-   - This reduces throughput by 1/3 even if recovery succeeds
-   - Not a bug — expected behavior when client machine dies
+#### ⬜ Issue 3: Client0 on dead machine (.101) permanently lost
+- Client0 is co-located with killed replica0, cannot recover
+- This reduces throughput by 1/3 even if recovery succeeds
+- Not a bug — expected behavior when client machine dies
+- For experiments: use a config where clients are NOT co-located with the killed replica, or only measure client1+client2 throughput
+
+### How to reproduce and verify
+
+**Lab cluster**: 130.245.173.{101,103,104,125,126} (5 replicas), clients on {101,103,104}
+
+**Config**: `benchmark.conf` with protocol=curpht, weakRatio=50, writes=50, networkDelay=25, reqs=100000, t=16
+
+**Run experiment**:
+```bash
+# Build and deploy
+go build -o swiftpaxos-dist . && for host in 130.245.173.{101,103,104,125,126}; do scp swiftpaxos-dist $host:~/swiftpaxos/; done
+
+# Start benchmark
+REMOTE_WORK_DIR=~/swiftpaxos timeout 300 ./run-multi-client.sh -d -c benchmark.conf -t 16 -o results/exp2.3-test &
+
+# Wait 60s for steady state, then kill leader
+sleep 60 && ssh 130.245.173.101 "pkill -9 -f 'swiftpaxos-dist.*server'"
+
+# Check results
+grep "Won election" results/exp2.3-test/replica*.log
+grep "Log recovery complete" results/exp2.3-test/replica*.log
+grep "TPUT" results/exp2.3-test/client*.log | tail -20
+```
+
+**Expected (when fixed)**: throughput drops to 0 for 1-3s after kill, then recovers to ~70% of pre-kill level (client0 lost)
+
+**Current**: election succeeds (1-2s), recovery completes but only 316 entries, throughput stays 0
