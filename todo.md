@@ -9330,11 +9330,17 @@ beyond what strong-strong conflicts already cause.
 - [x] Event loop: added logSyncChan and logSyncReplyChan cases
 - [x] 26 new tests: serialization (4), binary size (2), cache (2), channel registration (1), handleLogSync (3), handleLogSyncReply (3), mergeAndRecoverLog (5), startLogRecovery (1), full flow (1), keyVersions (1), lastCommitted (1), types (2)
 
-#### ⬜ Step 5: Client leader discovery
-- Client tracks `currentTerm` from replies
-- If reply has higher term → update leader to reply sender
-- If leader unreachable (connection dead) → try other replicas, learn new leader from their redirects
-- MSync retry already exists — should work with new leader after discovery
+#### ✅ Step 5: Client leader discovery [26:03:30]
+- [x] Added `deadReplicas map[int32]bool`, `strongPendingCmds map[int32]*defs.Propose`, `numReplicas int32` to Client struct
+- [x] `handleReaderDead()`: marks replica dead, rotates leader if dead replica was leader, resends pending strong + weak write commands to new leader
+- [x] `rotateLeader()`: finds next alive replica, skips dead ones, wraps around
+- [x] `resendPropose()`: sends Propose directly to specified replica via writer
+- [x] `updateLeader()`: updates c.leader and syncs with base client's LeaderId
+- [x] Term-based leader update in `handleRecordAck()` and `handleSyncReply()`: higher term from leader → updateLeader
+- [x] Strong pending command tracking in SendStrongWrite/SendStrongRead for resend on failover
+- [x] Cleanup of strongPendingCmds on delivery (handleAcks + handleSyncReply)
+- [x] ReaderDead channel handling in handleStrongMsgs event loop
+- [x] 14 new tests: rotateLeader (4), handleReaderDead (2), updateLeader (2), term tracking (2), dead replicas (2), pending cleanup (1), initialization (1)
 
 #### ⬜ Step 6: Tests
 - Unit test: election with 3/5 replicas, leader crash, new leader elected

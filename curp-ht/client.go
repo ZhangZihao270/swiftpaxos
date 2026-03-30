@@ -1,6 +1,7 @@
 package curpht
 
 import (
+	"log"
 	"sync"
 	"time"
 
@@ -56,6 +57,13 @@ type Client struct {
 	// Slot from last leader MReply (for strong fast-path cache update)
 	lastReplySlot int32
 
+	// Strong command tracking for resend on leader failover
+	strongPendingCmds map[int32]*defs.Propose // seqnum → original Propose
+	numReplicas       int32
+
+	// Dead replica tracking: replicas whose reader goroutine has exited (EOF/error).
+	deadReplicas map[int32]bool
+
 	// Per-replica writer mutexes for thread-safe SendMsg
 	// (needed because timer MSync and benchmark Send may race on the same writer)
 	writerMu []sync.Mutex
@@ -103,6 +111,9 @@ func NewClient(b *client.BufferClient, repNum, reqNum, pclients int) *Client {
 		strongPendingKeys: make(map[int32]int64),
 		localCache:        make(map[int64]cacheEntry),
 
+		strongPendingCmds: make(map[int32]*defs.Propose),
+		numReplicas:       int32(repNum),
+		deadReplicas:      make(map[int32]bool),
 	}
 
 	c.lastCmdId = CommandId{
@@ -171,6 +182,9 @@ func (c *Client) handleStrongMsgs() {
 		case m := <-c.cs.syncReplyChan:
 			rep := m.(*MSyncReply)
 			c.handleSyncReply(rep)
+
+		case deadReplica := <-c.ReaderDead:
+			c.handleReaderDead(int32(deadReplica))
 
 		case <-c.t.c:
 			// Retry pending commands whose replies may have been dropped
@@ -260,7 +274,11 @@ func (c *Client) handleRecordAck(r *MRecordAck, fromLeader bool) {
 	if c.ballot == -1 {
 		c.ballot = r.Ballot
 	} else if c.ballot < r.Ballot {
+		// Higher term detected — update leader to this replica (it knows the new leader)
 		c.ballot = r.Ballot
+		if fromLeader {
+			c.updateLeader(r.Replica)
+		}
 	} else if c.ballot > r.Ballot {
 		return
 	}
@@ -291,6 +309,8 @@ func (c *Client) handleSyncReply(rep *MSyncReply) {
 		c.ballot = rep.Ballot
 	} else if c.ballot < rep.Ballot {
 		c.ballot = rep.Ballot
+		// SyncReply from a new-term replica means it's the new leader
+		c.updateLeader(rep.Replica)
 	} else if c.ballot > rep.Ballot {
 		c.mu.Unlock()
 		return
@@ -299,6 +319,7 @@ func (c *Client) handleSyncReply(rep *MSyncReply) {
 	c.val = state.Value(rep.Rep)
 	c.delivered[rep.CmdId.SeqNum] = struct{}{}
 	c.slowPaths++
+	delete(c.strongPendingCmds, rep.CmdId.SeqNum)
 
 	// Update local cache from strong slow-path result
 	if key, hasKey := c.strongPendingKeys[rep.CmdId.SeqNum]; hasKey {
@@ -334,6 +355,7 @@ func (c *Client) handleAcks(leaderMsg interface{}, msgs []interface{}) {
 
 	c.delivered[seqNum] = struct{}{}
 	c.fastPaths++
+	delete(c.strongPendingCmds, seqNum)
 
 	// Update local cache from strong fast-path result
 	if key, hasKey := c.strongPendingKeys[seqNum]; hasKey {
@@ -536,6 +558,11 @@ func (c *Client) SendStrongWrite(key int64, value []byte) int32 {
 	c.writerMu[c.LeaderId].Unlock()
 	c.mu.Lock()
 	c.strongPendingKeys[seqnum] = key
+	c.strongPendingCmds[seqnum] = &defs.Propose{
+		CommandId: seqnum,
+		ClientId:  c.ClientId,
+		Command:   state.Command{Op: state.PUT, K: state.Key(key), V: value},
+	}
 	c.mu.Unlock()
 	return seqnum
 }
@@ -549,6 +576,11 @@ func (c *Client) SendStrongRead(key int64) int32 {
 	c.writerMu[c.LeaderId].Unlock()
 	c.mu.Lock()
 	c.strongPendingKeys[seqnum] = key
+	c.strongPendingCmds[seqnum] = &defs.Propose{
+		CommandId: seqnum,
+		ClientId:  c.ClientId,
+		Command:   state.Command{Op: state.GET, K: state.Key(key), V: state.NIL()},
+	}
 	c.mu.Unlock()
 	return seqnum
 }
@@ -559,6 +591,95 @@ func (c *Client) SupportsWeak() bool {
 }
 
 func (c *Client) MarkAllSent() {}
+
+// updateLeader updates the leader to a new replica and syncs with base client's LeaderId.
+// Must be called with c.mu held.
+func (c *Client) updateLeader(newLeader int32) {
+	if newLeader == c.leader {
+		return
+	}
+	log.Printf("Leader changed: %d → %d (term %d)", c.leader, newLeader, c.ballot)
+	c.leader = newLeader
+	if c.BufferClient != nil {
+		c.LeaderId = int(newLeader)
+	}
+}
+
+// handleReaderDead is called when a reader goroutine exits (EOF/error).
+// Marks the replica as dead and, if it was the leader, rotates to the next replica
+// and resends pending commands.
+func (c *Client) handleReaderDead(deadReplica int32) {
+	c.mu.Lock()
+	c.deadReplicas[deadReplica] = true
+	if deadReplica != c.leader {
+		c.mu.Unlock()
+		return
+	}
+	oldLeader := c.leader
+	c.leader = c.rotateLeader(oldLeader)
+	newLeader := c.leader
+	if c.BufferClient != nil {
+		c.LeaderId = int(c.leader)
+	}
+	log.Printf("Leader %d dead (EOF), rotating to %d", oldLeader, newLeader)
+
+	// Collect pending commands to resend
+	var strongCmds []*defs.Propose
+	for _, cmd := range c.strongPendingCmds {
+		strongCmds = append(strongCmds, cmd)
+	}
+	var weakCmds []*MWeakPropose
+	for seqnum := range c.weakPending {
+		if _, exists := c.delivered[seqnum]; exists {
+			continue
+		}
+		if key, hasKey := c.weakPendingKeys[seqnum]; hasKey {
+			if val, hasVal := c.weakPendingValues[seqnum]; hasVal {
+				weakCmds = append(weakCmds, &MWeakPropose{
+					CommandId: seqnum,
+					ClientId:  c.ClientId,
+					Command:   state.Command{Op: state.PUT, K: state.Key(key), V: val},
+				})
+			}
+		}
+	}
+	c.mu.Unlock()
+
+	// Resend pending strong commands to new leader
+	for _, cmd := range strongCmds {
+		c.resendPropose(newLeader, cmd)
+	}
+	// Resend pending weak write commands to new leader
+	for _, wp := range weakCmds {
+		c.sendMsgSafe(newLeader, c.cs.weakProposeRPC, wp)
+	}
+}
+
+// rotateLeader returns the next alive replica ID after the given one.
+// Skips replicas known to be dead. Falls back to (current+1)%N if all are dead.
+// Must be called with c.mu held.
+func (c *Client) rotateLeader(current int32) int32 {
+	for i := int32(1); i < c.numReplicas; i++ {
+		next := (current + i) % c.numReplicas
+		if !c.deadReplicas[next] {
+			return next
+		}
+	}
+	return (current + 1) % c.numReplicas
+}
+
+// resendPropose sends a Propose directly to the specified replica using the writer.
+func (c *Client) resendPropose(rid int32, cmd *defs.Propose) {
+	w := c.GetWriter(rid)
+	if w == nil {
+		return
+	}
+	c.writerMu[rid].Lock()
+	w.WriteByte(defs.PROPOSE)
+	cmd.Marshal(w)
+	w.Flush()
+	c.writerMu[rid].Unlock()
+}
 
 // sendMsgSafe sends a message to a single replica under the per-replica writer mutex.
 // This prevents concurrent writes to the same bufio.Writer from different goroutines
