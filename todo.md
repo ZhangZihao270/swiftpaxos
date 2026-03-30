@@ -9390,3 +9390,30 @@ beyond what strong-strong conflicts already cause.
   - ~~`MSync` timer may not work correctly after leader rotation~~ → Fixed in Phase 128.2
 - ✅ Need to verify: does new leader correctly handle `ProposeChan` after recovery? → **Fixed in Phase 128.3**: Main loop now guards proposal processing with `r.status == NORMAL`. Without this, proposals during RECOVERING crash the leader (lastCmdSlot is stale → getCmdDescSeq hits delivered slot → Fatal). Also guarded weakProposeChan. After recovery, deliver() slot ordering works correctly because all recovered slots are in executed map.
 - ✅ Consider: skip log recovery entirely — **Decision: keep current log recovery.** It works correctly after Phase 128.1-128.4 fixes (scan limit optimization, skip re-execution for already-executed slots, heartbeat during replay). Skipping recovery would risk state divergence if followers missed some commits. Current approach is safe and fast enough (replay only committed entries up to lastCommitted).
+
+### Phase 128.5: Election Split Vote Fix + Remaining Recovery Issues (2026-03-30)
+
+**Fixed: Election split vote (commit 1497f08)**
+- Root cause: all 4 followers start election simultaneously after leader death. With 300-500ms random timeout, all land in the same term, each vote for self → permanent split vote.
+- Fix 1: Widened election timeout to 500-1500ms (1000ms spread)
+- Fix 2: Added `randomBackoffTimeout()` with **ID-based jitter**: each replica gets 100ms×ID offset, guaranteeing different retry times. Replica1 retries at 600-1600ms, Replica4 at 900-1900ms.
+- Fix 3: `startElection()` uses backoff timeout for retry instead of regular timeout
+- Verified: replica1 wins election for term 1, log recovery completes
+
+**Remaining issues (throughput still 0 after recovery):**
+
+1. **Log recovery only recovers 316 entries** (should be ~300K)
+   - `handleLogSync` scans up to `lastCommitted`, but follower's `lastCommitted` may not match actual committed slot count
+   - Follower's history[] may not have `phase=COMMIT` set for entries committed via Accept+Commit path (only leader sets phase in history?)
+   - Need to verify: does follower update `history[slot].phase = COMMIT` when processing MCommit?
+
+2. **Client sends to new leader but gets no reply**
+   - `sendProposeSafe()` broadcasts to all alive replicas, so new leader should receive proposals
+   - New leader completes recovery (status=NORMAL), but may not process proposals correctly
+   - Possible: `lastCmdSlot=316` after recovery, but actual committed slots are ~300K → new proposals get slot 316 which conflicts with already-executed slots
+   - Need to check: does deliver() work correctly when recovered lastCmdSlot << actual executed slots?
+
+3. **Client0 on dead machine (.101) permanently lost**
+   - Client0 is co-located with killed replica0, cannot recover
+   - This reduces throughput by 1/3 even if recovery succeeds
+   - Not a bug — expected behavior when client machine dies
