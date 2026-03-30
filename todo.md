@@ -9449,7 +9449,44 @@ grep "TPUT" results/exp2.3-test/client*.log | tail -20
 - ✅ New leader accepts proposals after recovery (status=NORMAL, lastCmdSlot correct)
 - ✅ Client pipeline flush works (128.7) — flush triggered, pipeline unblocked
 - ✅ Sender head-of-line blocking fixed (128.8) — fire-and-forget per-peer sends, no more wg.Wait()
-- ⬜ **Throughput still 0 after recovery**: all server-side fixes verified (election, slot sync, heartbeat, forwarding). Client pipeline flush triggers correctly. But HybridLoop stops sending new commands after flush. Need to debug: does fake reply injection corrupt HybridLoop state? Does HybridLoop exit early after fake replies?
+- ⬜ **Throughput still 0 after recovery** (see Phase 128.9 debug plan below)
+
+### Phase 128.9: Debug — Why HybridLoop Stops After Recovery
+
+**Symptom**: Server-side recovery fully works (election 1-2s, slot sync <1s, new leader NORMAL). Client detects dead leader, rotates, flushes pipeline (fake replies). But TPUT stays 0 for remaining 8+ seconds until client timeout exits.
+
+**Debug plan — narrow down which layer is broken**:
+
+#### ⬜ Step 1: Is HybridLoop sending new commands after flush?
+- Add debug log in `client/hybrid.go` HybridLoop: after pipeline flush, log each new command sent (seqnum, type, target)
+- If HybridLoop is NOT sending: fake reply injection is broken, or pipeline counter not reset, or HybridLoop exited early
+- If HybridLoop IS sending: commands are sent but replies not received → problem is on reply path
+
+#### ⬜ Step 2: Is new leader receiving proposals after recovery?
+- Add debug log in `curp-ht.go` event loop: when `ProposeChan` receives a propose AND `status == NORMAL`, log it
+- If new leader NOT receiving: `sendProposeSafe` is broken (dead writer?), or proposals stuck in network
+- If new leader IS receiving: leader processes but reply doesn't reach client
+
+#### ⬜ Step 3: Is new leader sending replies?
+- Add debug log in `deliver()` where reply is sent: `sender.SendToClient(clientId, rep, replyRPC)`
+- Check: does `ClientWriters[clientId]` exist on new leader? Client registered its writer when connecting at startup — if connection to new leader (was follower) is still alive, writer should exist
+- If writer is nil: client never connected to new leader, or connection dropped during failover
+
+#### ⬜ Step 4: Is client receiving replies from new leader?
+- Add debug log in curp-ht `handleAcks`/`handleRecordAck`/`handleSyncReply`: log received replies from replica
+- Check: after recovery, does client receive ANY reply from ANY replica?
+- If no replies: connection to new leader is broken on client side (reader goroutine died for that replica too?)
+
+**Key hypothesis**:
+- When replica0 dies, client's reader goroutine for replica0 exits (EOF). But reader goroutines for replicas 1-4 should still be alive.
+- Client rotates leader to replica1, sends proposals via `sendProposeSafe` to replicas 1-4.
+- New leader (e.g., replica3) processes proposals, sends reply via `SendToClient`.
+- Client should receive reply on reader goroutine for replica3.
+- But does `WaitReplies` only read from the leader replica? If `WaitReplies(closestId=0)` was the only reader, and it died, client has no readers!
+
+**Likely root cause**: `WaitReplies` was started for replica0 at init. When replica0 dies, that reader exits. No new `WaitReplies` is started for the new leader. Client has NO active readers for replies.
+
+**Fix direction**: In `handleReaderDead`, after rotating leader, start `WaitReplies(newLeader)` to read replies from new leader.
 
 ### Phase 128.7: Client Pipeline Recovery After Failover
 
