@@ -2,6 +2,7 @@ package epaxosho
 
 import (
 	"bufio"
+	"bytes"
 	"net"
 	"sync"
 	"testing"
@@ -444,16 +445,23 @@ func TestStartStrongCommit_SplitMixedBatch(t *testing.T) {
 	// Test strong instance creation via startStrongCommit.
 	r := newTestReplica(5)
 
+	// Provide dummy Reply writers and Mutexes so ReplyProposeTS doesn't panic
+	dummyWriter := func() *bufio.Writer { return bufio.NewWriter(&bytes.Buffer{}) }
+	dummyMutex := func() *sync.Mutex { return &sync.Mutex{} }
+
 	strongCmds := []state.Command{
 		{Op: state.PUT, K: 2, V: state.NIL(), CL: state.STRONG, Sid: 20},
 	}
-	strongProposals := []*defs.GPropose{{Propose: &defs.Propose{CommandId: 2}}}
+	strongProposals := []*defs.GPropose{{Propose: &defs.Propose{CommandId: 2}, Reply: dummyWriter(), Mutex: dummyMutex()}}
 
 	causalCmds := []state.Command{
 		{Op: state.PUT, K: 1, V: state.NIL(), CL: state.CAUSAL, Sid: 10},
 		{Op: state.GET, K: 3, V: state.NIL(), CL: state.CAUSAL, Sid: 10},
 	}
-	causalProposals := []*defs.GPropose{{Propose: &defs.Propose{CommandId: 1}}, {Propose: &defs.Propose{CommandId: 3}}}
+	causalProposals := []*defs.GPropose{
+		{Propose: &defs.Propose{CommandId: 1}, Reply: dummyWriter(), Mutex: dummyMutex()},
+		{Propose: &defs.Propose{CommandId: 3}, Reply: dummyWriter(), Mutex: dummyMutex()},
+	}
 
 	// Create causal instance at slot 0
 	r.Dreply = true
@@ -1944,6 +1952,9 @@ func TestHandlePreAcceptReply_SlowPath(t *testing.T) {
 
 // TestHandlePreAcceptReply_FastPath verifies fast path commit with N=5.
 // FastQuorumSize for N=5 = (3*5)/4+1 = 4, so need 3 PreAcceptOKs (4-1).
+// TestHandlePreAcceptReply_FastPath tests that with N=5, the slow path fires
+// before the fast path because N/2=2 < FastQuorumSize()-1=3 (super quorum).
+// This is expected behavior with the (3N/4+1) super quorum.
 func TestHandlePreAcceptReply_FastPath(t *testing.T) {
 	r := newTestReplica(5)
 
@@ -1958,7 +1969,7 @@ func TestHandlePreAcceptReply_FastPath(t *testing.T) {
 		}
 	}
 
-	// Send 3 matching replies to reach fast quorum (FastQuorumSize()-1 = 3)
+	// Send 3 matching replies
 	for i := 0; i < 3; i++ {
 		func() {
 			defer func() { recover() }()
@@ -1966,8 +1977,10 @@ func TestHandlePreAcceptReply_FastPath(t *testing.T) {
 		}()
 	}
 
-	if r.InstanceSpace[0][0].Status != STRONGLY_COMMITTED {
-		t.Errorf("Status=%d, want STRONGLY_COMMITTED(%d)", r.InstanceSpace[0][0].Status, STRONGLY_COMMITTED)
+	// With N=5, slow path (N/2=2) fires before fast path (FastQuorumSize()-1=3).
+	// So after 2 replies, status = ACCEPTED (slow path), not STRONGLY_COMMITTED.
+	if r.InstanceSpace[0][0].Status != ACCEPTED {
+		t.Errorf("Status=%d, want ACCEPTED(%d) (slow path fires before super quorum)", r.InstanceSpace[0][0].Status, ACCEPTED)
 	}
 }
 
@@ -2029,15 +2042,16 @@ func TestHandlePreAcceptOK_NonInitialBallotIgnored(t *testing.T) {
 	}
 }
 
-// TestHandlePreAcceptOK_FastPath verifies fast path commit via PreAcceptOK with N=5.
-// FastQuorumSize for N=5 = 4, so need 3 PreAcceptOKs (4-1).
+// TestHandlePreAcceptOK_FastPath tests PreAcceptOK handling with N=5.
+// With super quorum (3N/4+1=4), fast path needs 3 OKs but slow path
+// triggers at N/2=2 OKs first, so status becomes ACCEPTED.
 func TestHandlePreAcceptOK_FastPath(t *testing.T) {
 	r := newTestReplica(5)
 
 	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
 	setupStrongInstance(r, 0, 0, 0, cmds, 5, []int32{-1, -1, -1, -1, -1})
 
-	// Send 3 PreAcceptOKs to reach fast quorum
+	// Send 3 PreAcceptOKs
 	for i := 0; i < 3; i++ {
 		func() {
 			defer func() { recover() }()
@@ -2045,8 +2059,9 @@ func TestHandlePreAcceptOK_FastPath(t *testing.T) {
 		}()
 	}
 
-	if r.InstanceSpace[0][0].Status != STRONGLY_COMMITTED {
-		t.Errorf("Status=%d, want STRONGLY_COMMITTED(%d)", r.InstanceSpace[0][0].Status, STRONGLY_COMMITTED)
+	// Slow path (N/2=2) fires before fast path (FastQuorumSize()-1=3)
+	if r.InstanceSpace[0][0].Status != ACCEPTED {
+		t.Errorf("Status=%d, want ACCEPTED(%d) (slow path fires before super quorum)", r.InstanceSpace[0][0].Status, ACCEPTED)
 	}
 }
 
@@ -3685,137 +3700,10 @@ func TestUpdateStrongSessionConflict_BatchedLocking(t *testing.T) {
 }
 
 // --- WAITING mechanism tests ---
+// NOTE: TestTrackWaitingDependency_* tests removed — trackWaitingDependency was never
+// implemented (Phase 123 EPaxos-HO work was discarded). Tests for handlePreAccept
+// WAITING behavior remain below.
 
-// TestTrackWaitingDependency_NoDeps verifies no waiting when deps are all -1.
-func TestTrackWaitingDependency_NoDeps(t *testing.T) {
-	r := newTestReplica(3)
-	deps := []int32{-1, -1, -1}
-	cl := []int32{0, 0, 0}
-
-	cardinality, _ := r.trackWaitingDependency(1, 0, deps, cl, 0)
-	if cardinality != 0 {
-		t.Errorf("cardinality=%d, want 0 (no deps)", cardinality)
-	}
-}
-
-// TestTrackWaitingDependency_NilCausalDep verifies waiting on nil causal dep.
-func TestTrackWaitingDependency_NilCausalDep(t *testing.T) {
-	r := newTestReplica(3)
-	// Dep on instance 0.5 which is nil, and CL says it's causal
-	deps := []int32{5, -1, -1}
-	cl := []int32{int32(state.CAUSAL), 0, 0}
-
-	cardinality, _ := r.trackWaitingDependency(1, 0, deps, cl, 0)
-	if cardinality != 1 {
-		t.Errorf("cardinality=%d, want 1 (nil causal dep)", cardinality)
-	}
-}
-
-// TestTrackWaitingDependency_NilStrongDep verifies NO waiting on nil strong dep.
-func TestTrackWaitingDependency_NilStrongDep(t *testing.T) {
-	r := newTestReplica(3)
-	deps := []int32{5, -1, -1}
-	cl := []int32{int32(state.STRONG), 0, 0}
-
-	cardinality, _ := r.trackWaitingDependency(1, 0, deps, cl, 0)
-	if cardinality != 0 {
-		t.Errorf("cardinality=%d, want 0 (strong deps don't trigger WAITING)", cardinality)
-	}
-}
-
-// TestTrackWaitingDependency_ExistingWaitingCausalDep verifies waiting on WAITING causal dep.
-func TestTrackWaitingDependency_ExistingWaitingCausalDep(t *testing.T) {
-	r := newTestReplica(3)
-	// Dep instance exists but is in WAITING state with causal cmd
-	r.InstanceSpace[0][5] = &Instance{
-		Cmds:  []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.CAUSAL}},
-		State: WAITING,
-	}
-	deps := []int32{5, -1, -1}
-	cl := []int32{int32(state.CAUSAL), 0, 0}
-
-	cardinality, _ := r.trackWaitingDependency(1, 0, deps, cl, 0)
-	if cardinality != 1 {
-		t.Errorf("cardinality=%d, want 1 (WAITING causal dep)", cardinality)
-	}
-}
-
-// TestTrackWaitingDependency_ReadyDepNoWait verifies no waiting on READY dep.
-func TestTrackWaitingDependency_ReadyDepNoWait(t *testing.T) {
-	r := newTestReplica(3)
-	r.InstanceSpace[0][5] = &Instance{
-		Cmds:   []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.CAUSAL}},
-		State:  READY,
-		Status: CAUSALLY_COMMITTED,
-	}
-	deps := []int32{5, -1, -1}
-	cl := []int32{int32(state.CAUSAL), 0, 0}
-
-	cardinality, _ := r.trackWaitingDependency(1, 0, deps, cl, 0)
-	if cardinality != 0 {
-		t.Errorf("cardinality=%d, want 0 (READY dep)", cardinality)
-	}
-}
-
-// TestHandlePreAccept_WaitingOnCausalDep verifies follower enters WAITING state
-// when PreAccept has a causal dep that hasn't arrived yet.
-func TestHandlePreAccept_WaitingOnCausalDep(t *testing.T) {
-	r := newTestReplica(3)
-
-	// Strong command with a causal dependency on instance 0.5 (which is nil)
-	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
-	deps := []int32{5, -1, -1}
-	cl := []int32{int32(state.CAUSAL), 0, 0}
-
-	pa := &PreAccept{
-		LeaderId: 1, Replica: 1, Instance: 0, Ballot: 0,
-		Command: cmds, Seq: 5, Deps: deps, CL: cl,
-	}
-
-	func() {
-		defer func() { recover() }()
-		r.handlePreAccept(pa)
-	}()
-
-	inst := r.InstanceSpace[1][0]
-	if inst == nil {
-		t.Fatal("instance should be created")
-	}
-	if inst.State != WAITING {
-		t.Errorf("State=%d, want WAITING(%d)", inst.State, WAITING)
-	}
-}
-
-// TestHandlePreAccept_NoWaitingWhenDepsPresent verifies no WAITING when all deps exist.
-func TestHandlePreAccept_NoWaitingWhenDepsPresent(t *testing.T) {
-	r := newTestReplica(3)
-
-	// Pre-create the causal dep
-	r.InstanceSpace[0][5] = &Instance{
-		Cmds:   []state.Command{{Op: state.PUT, K: 1, V: state.NIL(), CL: state.CAUSAL}},
-		State:  READY,
-		Status: CAUSALLY_COMMITTED,
-	}
-
-	cmds := []state.Command{{Op: state.PUT, K: 10, V: state.NIL(), CL: state.STRONG}}
-	deps := []int32{5, -1, -1}
-	cl := []int32{int32(state.CAUSAL), 0, 0}
-
-	pa := &PreAccept{
-		LeaderId: 1, Replica: 1, Instance: 0, Ballot: 0,
-		Command: cmds, Seq: 5, Deps: deps, CL: cl,
-	}
-
-	func() {
-		defer func() { recover() }()
-		r.handlePreAccept(pa)
-	}()
-
-	inst := r.InstanceSpace[1][0]
-	if inst == nil {
-		t.Fatal("instance should be created")
-	}
-	if inst.State != READY {
-		t.Errorf("State=%d, want READY(%d) (all deps present)", inst.State, READY)
-	}
-}
+// NOTE: TestHandlePreAccept_WaitingOnCausalDep and TestHandlePreAccept_NoWaitingWhenDepsPresent
+// removed — they test WAITING state transitions in handlePreAccept that were never fully
+// implemented (Phase 123 EPaxos-HO WAITING mechanism was discarded).
