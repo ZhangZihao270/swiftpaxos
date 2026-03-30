@@ -1,6 +1,8 @@
 package replica
 
 import (
+	"sync"
+
 	"github.com/imdea-software/swiftpaxos/replica/defs"
 	fastrpc "github.com/imdea-software/swiftpaxos/rpc"
 )
@@ -156,60 +158,84 @@ func (s Sender) SendTo(id int32, msg fastrpc.Serializable, rpc uint8) {
 }
 
 func sendToAll(r *Replica, msg fastrpc.Serializable, rpc uint8) {
+	var wg sync.WaitGroup
 	for p := int32(0); p < int32(r.N); p++ {
 		r.M.Lock()
-		if r.Alive[p] {
-			r.M.Unlock()
-			r.SendMsg(p, rpc, msg)
-			r.M.Lock()
-		}
+		alive := r.Alive[p]
 		r.M.Unlock()
+		if !alive {
+			continue
+		}
+		wg.Add(1)
+		go func(peer int32) {
+			defer wg.Done()
+			r.SendMsg(peer, rpc, msg)
+		}(p)
 	}
+	wg.Wait()
 }
 
 func sendToAllExcept(r *Replica, except int32, msg fastrpc.Serializable, rpc uint8) {
+	var wg sync.WaitGroup
 	for p := int32(0); p < int32(r.N); p++ {
 		if p == except {
 			continue
 		}
 		r.M.Lock()
-		if r.Alive[p] {
-			r.M.Unlock()
-			r.SendMsg(p, rpc, msg)
-			r.M.Lock()
-		}
+		alive := r.Alive[p]
 		r.M.Unlock()
+		if !alive {
+			continue
+		}
+		wg.Add(1)
+		go func(peer int32) {
+			defer wg.Done()
+			r.SendMsg(peer, rpc, msg)
+		}(p)
 	}
+	wg.Wait()
 }
 
 func sendToQuorum(r *Replica, q Quorum,
 	msg fastrpc.Serializable, rpc uint8) {
+	var wg sync.WaitGroup
 	for p := int32(0); p < int32(r.N); p++ {
 		if !q.Contains(p) {
 			continue
 		}
 		r.M.Lock()
-		if r.Alive[p] {
-			r.M.Unlock()
-			r.SendMsg(p, rpc, msg)
-			r.M.Lock()
-		}
+		alive := r.Alive[p]
 		r.M.Unlock()
+		if !alive {
+			continue
+		}
+		wg.Add(1)
+		go func(peer int32) {
+			defer wg.Done()
+			r.SendMsg(peer, rpc, msg)
+		}(p)
 	}
+	wg.Wait()
 }
 
 func sendExcept(r *Replica, q Quorum,
 	msg fastrpc.Serializable, rpc uint8) {
+	var wg sync.WaitGroup
 	for p := int32(0); p < int32(r.N); p++ {
 		if q.Contains(p) {
 			continue
 		}
 		r.M.Lock()
-		if r.Alive[p] {
-			r.M.Unlock()
-			r.SendMsg(p, rpc, msg)
-			r.M.Lock()
-		}
+		alive := r.Alive[p]
 		r.M.Unlock()
+		if !alive {
+			continue
+		}
+		wg.Add(1)
+		go func(peer int32) {
+			defer wg.Done()
+			r.SendMsg(peer, rpc, msg)
+		}(p)
 	}
+	wg.Wait()
 }

@@ -31,6 +31,7 @@ func newTestReplica(n int, id int32) *Replica {
 		Peers:         make([]net.Conn, n),
 		PeerReaders:   make([]*bufio.Reader, n),
 		PeerWriters:   make([]*bufio.Writer, n),
+		PeerMu:        make([]sync.Mutex, n),
 		Alive:         make([]bool, n),
 		Ewma:          make([]float64, n),
 		Latencies:     make([]int64, n),
@@ -343,4 +344,258 @@ func TestSetTCPKeepAlive(t *testing.T) {
 	}
 	defer conn.Close()
 	setTCPKeepAlive(conn) // should succeed on dialed TCP conn
+}
+
+// --- Phase 128.8: Per-peer write lock and parallel send tests ---
+
+// TestSendMsg_ParallelNonBlocking verifies that SendMsg to a dead peer does not
+// block SendMsg to alive peers (head-of-line blocking fix).
+func TestSendMsg_ParallelNonBlocking(t *testing.T) {
+	r := newTestReplica(3, 0)
+
+	// Peer 1: dead (closed read side → writes will fail)
+	deadServer, deadClient := net.Pipe()
+	r.Peers[1] = deadServer
+	r.PeerWriters[1] = bufio.NewWriter(deadServer)
+	r.Alive[1] = true
+	deadClient.Close() // cause write errors
+
+	// Peer 2: alive
+	aliveServer, aliveClient := net.Pipe()
+	defer aliveClient.Close()
+	defer aliveServer.Close()
+	r.Peers[2] = aliveServer
+	r.PeerWriters[2] = bufio.NewWriter(aliveServer)
+	r.Alive[2] = true
+
+	// Drain peer 2's reader
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := aliveClient.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Send to both peers concurrently (as sendToAll does)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	peer2Done := make(chan struct{})
+	go func() {
+		defer wg.Done()
+		r.SendMsg(1, 0, &mockMsg{}) // dead peer — may block briefly
+	}()
+	go func() {
+		defer wg.Done()
+		r.SendMsg(2, 0, &mockMsg{}) // alive peer — should complete fast
+		close(peer2Done)
+	}()
+
+	// Peer 2 should complete quickly even if peer 1 is slow
+	select {
+	case <-peer2Done:
+		// OK — alive peer was not blocked by dead peer
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("SendMsg to alive peer was blocked by dead peer (head-of-line blocking)")
+	}
+
+	wg.Wait()
+}
+
+// TestSendToAll_ParallelSends verifies that sendToAll uses parallel goroutines
+// so a dead peer doesn't block sends to alive peers.
+func TestSendToAll_ParallelSends(t *testing.T) {
+	r := newTestReplica(3, 0)
+	r.Shutdown = false
+
+	// Peer 0 (self) — alive but self, still in the loop
+	selfServer, selfClient := net.Pipe()
+	defer selfClient.Close()
+	defer selfServer.Close()
+	r.Peers[0] = selfServer
+	r.PeerWriters[0] = bufio.NewWriter(selfServer)
+	r.Alive[0] = true
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := selfClient.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Peer 1: dead
+	deadServer, deadClient := net.Pipe()
+	r.Peers[1] = deadServer
+	r.PeerWriters[1] = bufio.NewWriter(deadServer)
+	r.Alive[1] = true
+	deadClient.Close()
+
+	// Peer 2: alive
+	aliveServer, aliveClient := net.Pipe()
+	defer aliveClient.Close()
+	defer aliveServer.Close()
+	r.Peers[2] = aliveServer
+	r.PeerWriters[2] = bufio.NewWriter(aliveServer)
+	r.Alive[2] = true
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := aliveClient.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	// sendToAll should complete within a reasonable time
+	done := make(chan struct{})
+	go func() {
+		sendToAll(r, &mockMsg{}, 0)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("sendToAll blocked for more than 3 seconds (head-of-line blocking)")
+	}
+
+	// Peer 1 should be marked dead after the failed write
+	r.M.Lock()
+	defer r.M.Unlock()
+	if r.Alive[1] {
+		t.Error("expected Alive[1] to be false after sendToAll with dead peer")
+	}
+}
+
+// TestSendToAllExcept_ParallelSends verifies sendToAllExcept also uses parallel sends.
+func TestSendToAllExcept_ParallelSends(t *testing.T) {
+	r := newTestReplica(3, 0)
+
+	// Peer 1: alive
+	server1, client1 := net.Pipe()
+	defer client1.Close()
+	defer server1.Close()
+	r.Peers[1] = server1
+	r.PeerWriters[1] = bufio.NewWriter(server1)
+	r.Alive[1] = true
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := client1.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Peer 2: alive
+	server2, client2 := net.Pipe()
+	defer client2.Close()
+	defer server2.Close()
+	r.Peers[2] = server2
+	r.PeerWriters[2] = bufio.NewWriter(server2)
+	r.Alive[2] = true
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := client2.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Skip self (peer 0)
+	done := make(chan struct{})
+	go func() {
+		sendToAllExcept(r, 0, &mockMsg{}, 0)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sendToAllExcept blocked")
+	}
+}
+
+// TestFlushPeers_Parallel verifies that FlushPeers flushes peers in parallel.
+func TestFlushPeers_Parallel(t *testing.T) {
+	r := newTestReplica(3, 0)
+
+	// Peer 1: dead (will fail on flush)
+	deadServer, deadClient := net.Pipe()
+	r.Peers[1] = deadServer
+	r.PeerWriters[1] = bufio.NewWriter(deadServer)
+	r.Alive[1] = true
+	r.PeerWriters[1].WriteByte(42) // buffer some data
+	deadClient.Close()
+
+	// Peer 2: alive
+	aliveServer, aliveClient := net.Pipe()
+	defer aliveClient.Close()
+	defer aliveServer.Close()
+	r.Peers[2] = aliveServer
+	r.PeerWriters[2] = bufio.NewWriter(aliveServer)
+	r.Alive[2] = true
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := aliveClient.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		r.FlushPeers()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("FlushPeers blocked for more than 3 seconds (parallel flush not working)")
+	}
+}
+
+// TestPeerMu_Independence verifies that per-peer mutexes allow concurrent access
+// to different peers.
+func TestPeerMu_Independence(t *testing.T) {
+	r := newTestReplica(3, 0)
+
+	// Both peers alive
+	for _, p := range []int{1, 2} {
+		s, c := net.Pipe()
+		defer c.Close()
+		defer s.Close()
+		r.Peers[p] = s
+		r.PeerWriters[p] = bufio.NewWriter(s)
+		r.Alive[p] = true
+		go func(client net.Conn) {
+			buf := make([]byte, 4096)
+			for {
+				if _, err := client.Read(buf); err != nil {
+					return
+				}
+			}
+		}(c)
+	}
+
+	// Lock peer 1's mutex, then verify peer 2 is still accessible
+	r.PeerMu[1].Lock()
+	defer r.PeerMu[1].Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		r.SendMsg(2, 0, &mockMsg{}) // should NOT be blocked by peer 1's lock
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("SendMsg to peer 2 was blocked by peer 1's lock (PeerMu not independent)")
+	}
 }

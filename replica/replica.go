@@ -42,6 +42,7 @@ type Replica struct {
 	Peers              []net.Conn
 	PeerReaders        []*bufio.Reader
 	PeerWriters        []*bufio.Writer
+	PeerMu             []sync.Mutex // per-peer write mutexes (avoids head-of-line blocking)
 	ClientWriters      map[int32]*bufio.Writer
 	ClientMu           map[int32]*sync.Mutex
 	ClientFastChan     map[int32]chan clientSendArg
@@ -91,6 +92,7 @@ func New(alias string, id, f int, addrs []string, thrifty, exec, lread bool, con
 		Peers:              make([]net.Conn, n),
 		PeerReaders:        make([]*bufio.Reader, n),
 		PeerWriters:        make([]*bufio.Writer, n),
+		PeerMu:             make([]sync.Mutex, n),
 		ClientWriters:      make(map[int32]*bufio.Writer),
 		ClientMu:           make(map[int32]*sync.Mutex),
 		ClientFastChan:     make(map[int32]chan clientSendArg),
@@ -250,17 +252,23 @@ func (r *Replica) WaitForClientConnections() {
 const peerWriteDeadline = 1 * time.Second
 
 func (r *Replica) SendMsg(peerId int32, code uint8, msg fastrpc.Serializable) {
-	r.M.Lock()
-	defer r.M.Unlock()
+	// Use per-peer lock so writes to different peers proceed in parallel.
+	// Only hold r.M briefly to snapshot writer/conn, avoiding head-of-line blocking.
+	r.PeerMu[peerId].Lock()
+	defer r.PeerMu[peerId].Unlock()
 
+	r.M.Lock()
 	w := r.PeerWriters[peerId]
+	conn := r.Peers[peerId]
+	r.M.Unlock()
+
 	if w == nil {
 		r.Printf("Connection to %d lost!", peerId)
 		return
 	}
 
 	// Set write deadline to avoid blocking for ~2 min on dead peer's TCP connection
-	if conn := r.Peers[peerId]; conn != nil {
+	if conn != nil {
 		conn.SetWriteDeadline(time.Now().Add(peerWriteDeadline))
 	}
 
@@ -268,16 +276,18 @@ func (r *Replica) SendMsg(peerId int32, code uint8, msg fastrpc.Serializable) {
 	msg.Marshal(w)
 	if err := w.Flush(); err != nil {
 		r.Printf("Peer %d write error: %v — marking dead", peerId, err)
+		r.M.Lock()
 		r.PeerWriters[peerId] = nil
 		r.Alive[peerId] = false
-		if conn := r.Peers[peerId]; conn != nil {
+		r.M.Unlock()
+		if conn != nil {
 			conn.Close()
 		}
 		return
 	}
 
 	// Clear write deadline on success
-	if conn := r.Peers[peerId]; conn != nil {
+	if conn != nil {
 		conn.SetWriteDeadline(time.Time{})
 	}
 }
@@ -342,10 +352,13 @@ func (r *Replica) SendClientMsgFast(id int32, code uint8, msg fastrpc.Serializab
 }
 
 func (r *Replica) SendMsgNoFlush(peerId int32, code uint8, msg fastrpc.Serializable) {
-	r.M.Lock()
-	defer r.M.Unlock()
+	r.PeerMu[peerId].Lock()
+	defer r.PeerMu[peerId].Unlock()
 
+	r.M.Lock()
 	w := r.PeerWriters[peerId]
+	r.M.Unlock()
+
 	if w == nil {
 		r.Printf("Connection to %d lost!", peerId)
 		return
@@ -355,31 +368,44 @@ func (r *Replica) SendMsgNoFlush(peerId int32, code uint8, msg fastrpc.Serializa
 }
 
 // FlushPeers flushes buffered writes to all connected peer writers.
-// Uses write deadlines to avoid blocking on dead peers.
+// Uses per-peer locks and write deadlines to avoid head-of-line blocking.
 func (r *Replica) FlushPeers() {
-	r.M.Lock()
-	defer r.M.Unlock()
+	var wg sync.WaitGroup
+	for i := 0; i < r.N; i++ {
+		wg.Add(1)
+		go func(p int) {
+			defer wg.Done()
+			r.PeerMu[p].Lock()
+			defer r.PeerMu[p].Unlock()
 
-	for i, w := range r.PeerWriters {
-		if w == nil {
-			continue
-		}
-		if conn := r.Peers[i]; conn != nil {
-			conn.SetWriteDeadline(time.Now().Add(peerWriteDeadline))
-		}
-		if err := w.Flush(); err != nil {
-			r.Printf("Peer %d flush error: %v — marking dead", i, err)
-			r.PeerWriters[i] = nil
-			r.Alive[i] = false
-			if conn := r.Peers[i]; conn != nil {
-				conn.Close()
+			r.M.Lock()
+			w := r.PeerWriters[p]
+			conn := r.Peers[p]
+			r.M.Unlock()
+
+			if w == nil {
+				return
 			}
-			continue
-		}
-		if conn := r.Peers[i]; conn != nil {
-			conn.SetWriteDeadline(time.Time{})
-		}
+			if conn != nil {
+				conn.SetWriteDeadline(time.Now().Add(peerWriteDeadline))
+			}
+			if err := w.Flush(); err != nil {
+				r.Printf("Peer %d flush error: %v — marking dead", p, err)
+				r.M.Lock()
+				r.PeerWriters[p] = nil
+				r.Alive[p] = false
+				r.M.Unlock()
+				if conn != nil {
+					conn.Close()
+				}
+				return
+			}
+			if conn != nil {
+				conn.SetWriteDeadline(time.Time{})
+			}
+		}(i)
 	}
+	wg.Wait()
 }
 
 func (r *Replica) ReplyProposeTS(reply *defs.ProposeReplyTS, w *bufio.Writer, lock *sync.Mutex) {
@@ -418,16 +444,20 @@ func (r *Replica) ReplyProposeTSDelayed(reply *defs.ProposeReplyTS, w *bufio.Wri
 }
 
 func (r *Replica) SendBeacon(peerId int32) {
-	r.M.Lock()
-	defer r.M.Unlock()
+	r.PeerMu[peerId].Lock()
+	defer r.PeerMu[peerId].Unlock()
 
+	r.M.Lock()
 	w := r.PeerWriters[peerId]
+	conn := r.Peers[peerId]
+	r.M.Unlock()
+
 	if w == nil {
 		r.Printf("Connection to %d lost!", peerId)
 		return
 	}
 
-	if conn := r.Peers[peerId]; conn != nil {
+	if conn != nil {
 		conn.SetWriteDeadline(time.Now().Add(peerWriteDeadline))
 	}
 
@@ -438,30 +468,37 @@ func (r *Replica) SendBeacon(peerId int32) {
 	beacon.Marshal(w)
 	if err := w.Flush(); err != nil {
 		r.Printf("Peer %d beacon write error: %v — marking dead", peerId, err)
+		r.M.Lock()
 		r.PeerWriters[peerId] = nil
 		r.Alive[peerId] = false
-		if conn := r.Peers[peerId]; conn != nil {
+		r.M.Unlock()
+		if conn != nil {
 			conn.Close()
 		}
 		return
 	}
 
-	if conn := r.Peers[peerId]; conn != nil {
+	if conn != nil {
 		conn.SetWriteDeadline(time.Time{})
 	}
 }
 
 func (r *Replica) ReplyBeacon(beacon *defs.GBeacon) {
-	r.M.Lock()
-	defer r.M.Unlock()
+	rid := beacon.Rid
+	r.PeerMu[rid].Lock()
+	defer r.PeerMu[rid].Unlock()
 
-	w := r.PeerWriters[beacon.Rid]
+	r.M.Lock()
+	w := r.PeerWriters[rid]
+	conn := r.Peers[rid]
+	r.M.Unlock()
+
 	if w == nil {
-		r.Printf("Connection to %d lost!", beacon.Rid)
+		r.Printf("Connection to %d lost!", rid)
 		return
 	}
 
-	if conn := r.Peers[beacon.Rid]; conn != nil {
+	if conn != nil {
 		conn.SetWriteDeadline(time.Now().Add(peerWriteDeadline))
 	}
 
@@ -471,16 +508,18 @@ func (r *Replica) ReplyBeacon(beacon *defs.GBeacon) {
 	}
 	rb.Marshal(w)
 	if err := w.Flush(); err != nil {
-		r.Printf("Peer %d beacon reply write error: %v — marking dead", beacon.Rid, err)
-		r.PeerWriters[beacon.Rid] = nil
-		r.Alive[beacon.Rid] = false
-		if conn := r.Peers[beacon.Rid]; conn != nil {
+		r.Printf("Peer %d beacon reply write error: %v — marking dead", rid, err)
+		r.M.Lock()
+		r.PeerWriters[rid] = nil
+		r.Alive[rid] = false
+		r.M.Unlock()
+		if conn != nil {
 			conn.Close()
 		}
 		return
 	}
 
-	if conn := r.Peers[beacon.Rid]; conn != nil {
+	if conn != nil {
 		conn.SetWriteDeadline(time.Time{})
 	}
 }

@@ -9529,11 +9529,14 @@ While the sender is blocked on peer 0, ALL subsequent sends are queued — inclu
 
 **Evidence**: replica3 log shows "Peer 0 marked dead" (reader detected), but no heartbeat output. Replica1 log has zero heartbeat/forward entries.
 
-#### ⬜ Step 1: Non-blocking send to peers
-- Option A: Use `SetWriteDeadline` on peer connections (e.g., 100ms timeout for writes)
-- Option B: Skip `SendMsg` for dead peers in `sendToAll`/`sendToAllExcept` (check `Alive` inside sender goroutine, not just before queuing)
-- Option C: Use per-peer sender goroutines instead of single shared sender (most robust but biggest change)
+#### ✅ Step 1: Non-blocking send to peers
+- Implemented per-peer write mutexes (`PeerMu []sync.Mutex`) in `Replica` struct
+- `SendMsg`, `SendMsgNoFlush`, `SendBeacon`, `ReplyBeacon` use per-peer lock instead of global `r.M` for write path
+- `r.M` only held briefly to snapshot writer/conn, then released before write/flush
+- `sendToAll`, `sendToAllExcept`, `sendToQuorum`, `sendExcept` now launch per-peer goroutines (parallel sends)
+- `FlushPeers` also flushes peers in parallel goroutines
+- 5 new tests: parallel non-blocking, sendToAll parallel, sendToAllExcept, FlushPeers parallel, PeerMu independence
 
-#### ⬜ Step 2: Test and verify
+#### ⬜ Step 2: Test and verify (lab only)
 - Kill-leader on lab: heartbeats should reach followers immediately after election
 - Throughput should recover within 2-3s of kill
