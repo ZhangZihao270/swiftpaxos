@@ -9443,4 +9443,8 @@ grep "TPUT" results/exp2.3-test/client*.log | tail -20
 
 **Expected (when fixed)**: throughput drops to 0 for 1-3s after kill, then recovers to ~70% of pre-kill level (client0 lost)
 
-**Current**: election succeeds (1-2s), recovery completes but only 316 entries, throughput stays 0
+**Current status (2026-03-30 19:30)**:
+- ✅ Election succeeds (1-2s) — fixed with ID-based jitter
+- ✅ Log recovery correct: 576K entries recovered, lastCmdSlot correct — fixed with history population in handleCommit
+- ⬜ Throughput still 0: recovery takes ~10s (scanning+merging 576K entries), client reply timeout is 10s → client exits just as recovery completes. Race condition: recovery finishes at 19:29:01, client timeout at 19:29:01.
+- **Next step**: increase `replyTimeout` config to 30s, or use fewer reqs (less committed entries = faster recovery), or optimize recovery to be faster (skip scanning for already-executed entries)
