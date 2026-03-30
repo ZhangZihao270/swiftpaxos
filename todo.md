@@ -9266,3 +9266,77 @@ beyond what strong-strong conflicts already cause.
 - Local smoke test with `go test ./...` and a quick 1-thread run
 - Deploy to AWS and run full experiment
 
+
+---
+
+## Phase 128: CURP-HT Leader Failure Recovery
+
+**Goal**: Implement Raft-style leader election and committed log recovery for CURP-HT. When the leader crashes, a new leader is elected and resumes from committed state. Unsynced (witness) commands are NOT recovered — clients retry them.
+
+**Scope**: Only recover committed log. No witness recovery, no unsynced recovery.
+
+### Design
+
+**Current state**: CURP-HT uses a static ballot (= replica ID). Leader is hardcoded at startup. No election, no term, no recovery. If leader dies, system halts.
+
+**Target state**: Dynamic ballot with term-based leader election, similar to Raft. New leader collects committed state from majority, resumes slot assignment and command processing.
+
+#### New Messages
+- `MRequestVote {Replica, Term, LastCommittedSlot}` — candidate → all replicas
+- `MRequestVoteReply {Replica, Term, VoteGranted}` — replica → candidate
+- `MLogSync {Replica, Term, FromSlot, ToSlot}` — new leader → followers (request committed log)
+- `MLogSyncReply {Replica, Term, Entries []LogEntry}` — follower → new leader (committed entries)
+
+#### New State (per replica)
+- `currentTerm int32` — replaces static `ballot`, incremented on each election
+- `votedFor int32` — candidate voted for in current term (-1 = none)
+- `role int` — FOLLOWER, CANDIDATE, LEADER (replaces `isLeader bool`)
+- `electionTimer` — random timeout, triggers election when leader heartbeat missing
+- `heartbeatTimer` — leader sends periodic heartbeats (empty MCommit or new message)
+
+### Steps
+
+#### ⬜ Step 1: Add term/vote state and role management
+- Replace `isLeader bool` + `ballot int32` with `currentTerm`, `votedFor`, `role`
+- Add `becomeFollower(term)`, `becomeCandidate()`, `becomeLeader()` methods
+- Add term check to all message handlers: if msg.Term > currentTerm → become follower
+- Add term check to all outgoing messages: attach currentTerm
+
+#### ⬜ Step 2: Leader election protocol
+- Add `MRequestVote` / `MRequestVoteReply` messages + serialization
+- Add election timer (random 150-300ms) — reset on receiving leader heartbeat or granting vote
+- `startElection()`: increment term, vote for self, broadcast MRequestVote
+- `handleRequestVote()`: grant vote if term >= currentTerm and haven't voted yet, compare LastCommittedSlot
+- `handleRequestVoteReply()`: collect votes, become leader when majority reached
+
+#### ⬜ Step 3: Leader heartbeat
+- Leader sends periodic heartbeat (e.g., empty MCommit or new MHeartbeat) every 50ms
+- Followers reset election timer on receiving heartbeat
+- If no heartbeat for election timeout → start election
+
+#### ⬜ Step 4: Log recovery on new leader
+- New leader broadcasts `MLogSync` to all replicas requesting committed entries
+- Each replica replies with `MLogSyncReply` containing committed entries from their log
+- New leader merges responses: for each slot, if majority has a committed entry → adopt it
+- Set `lastCmdSlot` = max committed slot + 1
+- Replay committed entries to rebuild state machine (execute in slot order)
+- Set `status = NORMAL`, start accepting new proposals
+
+#### ⬜ Step 5: Client leader discovery
+- Client tracks `currentTerm` from replies
+- If reply has higher term → update leader to reply sender
+- If leader unreachable (connection dead) → try other replicas, learn new leader from their redirects
+- MSync retry already exists — should work with new leader after discovery
+
+#### ⬜ Step 6: Tests
+- Unit test: election with 3/5 replicas, leader crash, new leader elected
+- Unit test: log recovery — committed commands survive leader change
+- Unit test: in-flight uncommitted commands are lost (client retries)
+- Integration: kill leader process, verify clients recover and continue
+
+### Correctness Notes
+- **Committed commands**: Safe. Majority has them. New leader recovers from majority.
+- **Accepted but uncommitted**: May be lost. Client MSync timer retries → re-proposed to new leader.
+- **Unsynced (witness only)**: Lost. Client gets timeout, retries. Acceptable for causal consistency.
+- **Slot ordering**: New leader starts from max committed slot + 1. No gaps because only committed slots are recovered.
+- **State machine**: Rebuilt by replaying committed log in order. Deterministic execution → same state.
