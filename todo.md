@@ -9447,9 +9447,48 @@ grep "TPUT" results/exp2.3-test/client*.log | tail -20
 - ✅ Election succeeds (1-2s) — fixed with ID-based jitter
 - ✅ Log recovery: slot sync completes in <1s (Phase 128.6)
 - ✅ New leader accepts proposals after recovery (status=NORMAL, lastCmdSlot correct)
-- ⬜ **Throughput still 0**: client pipeline is blocked. After leader kill, all 16 threads have pending requests waiting for replies. Pipeline is full (pendings=15), no new commands are sent. Recovery completes in 2s but client never sends new proposals because pipeline is stuck.
-- **Root cause**: client pipeline doesn't drain stale pending requests after failover. Needs pipeline reset: on leader rotation, clear pending counts so HybridLoop can send new commands.
-- **Fix**: in `handleReaderDead()`, after rotating leader, reset pipeline window (clear pending reply count for all threads). Or increase `replyTimeout` so client doesn't exit before retries complete.
+- ⬜ **Throughput still 0**: client pipeline blocked after failover (see Phase 128.7 below)
+
+### Phase 128.7: Client Pipeline Recovery After Failover
+
+**Problem**: After leader kill + election + recovery (all working, <2s), client throughput stays at 0. New leader is ready (status=NORMAL) but clients never send new commands.
+
+**Root cause analysis**:
+
+The client `HybridLoop` uses pipelining (pendings=15): each thread can have up to 15 outstanding requests. When leader dies:
+1. All 16 threads have ~15 pending requests each → 240 in-flight commands
+2. Leader dies → these commands will never get replies
+3. Pipeline is full → `HybridLoop` blocks at the `pendingOps >= window` check, waiting for replies
+4. Reply channel (`c.Reply`) is empty — no replies coming since leader is dead
+5. Thread is stuck forever (until replyTimeout=10s triggers exit)
+6. Recovery completes in 2s but client never sends new commands because all threads are blocked
+
+**What MSync timer does**: MSync retries pending commands every 2s. But MSync only resends the `MSync` message to replicas — it doesn't unblock the pipeline. The pipeline is blocked waiting for `c.Reply` channel, not for MSync response.
+
+**What needs to happen**: After failover, client must "flush" stale pending requests from the pipeline so new commands can be sent.
+
+#### ⬜ Step 1: Understand pipeline blocking in HybridLoop
+- `client/hybrid.go` `HybridLoop`/`HybridLoopWithOptions`: find where pipeline blocks (the `pendingOps` check)
+- Understand how `c.Reply` channel drains pending ops
+- Identify what `RegisterReply` does — does it unblock a specific thread or any thread?
+
+#### ⬜ Step 2: Add pipeline flush on failover
+- In curp-ht `handleReaderDead()`: after rotating leader, signal all threads to abandon stale pending requests
+- Options:
+  - (a) Push fake replies into `c.Reply` channel for all pending seqnums → unblocks all threads, they proceed to send new commands to new leader
+  - (b) Reset `pendingOps` counter atomically → HybridLoop sees pipeline as empty, sends new commands
+  - (c) Close and recreate `c.Reply` channel → all blocking reads return, threads restart
+- Need to be careful: fake replies must not corrupt latency metrics or delivered map
+
+#### ⬜ Step 3: Handle client0 on dead machine
+- Client0 (130.245.173.101) is co-located with killed replica0 — it will never recover
+- For experiment: either (a) don't co-locate client with killable replica, or (b) ignore client0 in throughput measurement
+- Not a code fix — just experiment design
+
+#### ⬜ Step 4: Test and verify
+- Kill-leader on lab: throughput should drop for ~2s then recover to ~70% (2 of 3 clients)
+- Check per-client TPUT: client0=0 (dead), client1+client2 should resume
+- Verify no data corruption: commands after recovery should complete correctly
 
 ### Phase 128.6: Lightweight Recovery (slot sync only)
 
