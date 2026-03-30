@@ -9513,7 +9513,7 @@ The client `HybridLoop` uses pipelining (pendings=15): each thread can have up t
 #### ✅ Step 3: Test and verify
 - 10 unit tests: serialization, slot sync start, handler, stale term, 3/5 replicas, higher term step-down, self lastCommitted
 - Updated old TestStartLogRecovery and TestRecoveryFullFlow to use slot sync
-- ⬜ Kill-leader test on lab: expect recovery in <1s (election ~1s + slot sync ~1 RTT)
-- ⬜ Throughput should recover within 2-3s of kill
+- ✅ Kill-leader test on lab: slot sync completes in <1s (verified 2026-03-30)
+- ⬜ Throughput recovery blocked by client pipeline issue (see Phase 128.7)
 
-**Expected timeline**: kill → 1-1.5s election → 0.1s slot sync → NORMAL → throughput resumes
+**Expected timeline**: kill → 1-1.5s election → 0.1s slot sync → NORMAL → throughput resumes (pending 128.7)
