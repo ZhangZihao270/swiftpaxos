@@ -1,7 +1,7 @@
 package replica
 
 import (
-	"sync"
+
 
 	"github.com/imdea-software/swiftpaxos/replica/defs"
 	fastrpc "github.com/imdea-software/swiftpaxos/rpc"
@@ -158,7 +158,6 @@ func (s Sender) SendTo(id int32, msg fastrpc.Serializable, rpc uint8) {
 }
 
 func sendToAll(r *Replica, msg fastrpc.Serializable, rpc uint8) {
-	var wg sync.WaitGroup
 	for p := int32(0); p < int32(r.N); p++ {
 		r.M.Lock()
 		alive := r.Alive[p]
@@ -166,17 +165,11 @@ func sendToAll(r *Replica, msg fastrpc.Serializable, rpc uint8) {
 		if !alive {
 			continue
 		}
-		wg.Add(1)
-		go func(peer int32) {
-			defer wg.Done()
-			r.SendMsg(peer, rpc, msg)
-		}(p)
+		go r.SendMsg(p, rpc, msg)
 	}
-	wg.Wait()
 }
 
 func sendToAllExcept(r *Replica, except int32, msg fastrpc.Serializable, rpc uint8) {
-	var wg sync.WaitGroup
 	for p := int32(0); p < int32(r.N); p++ {
 		if p == except {
 			continue
@@ -187,18 +180,12 @@ func sendToAllExcept(r *Replica, except int32, msg fastrpc.Serializable, rpc uin
 		if !alive {
 			continue
 		}
-		wg.Add(1)
-		go func(peer int32) {
-			defer wg.Done()
-			r.SendMsg(peer, rpc, msg)
-		}(p)
+		go r.SendMsg(p, rpc, msg)
 	}
-	wg.Wait()
 }
 
 func sendToQuorum(r *Replica, q Quorum,
 	msg fastrpc.Serializable, rpc uint8) {
-	var wg sync.WaitGroup
 	for p := int32(0); p < int32(r.N); p++ {
 		if !q.Contains(p) {
 			continue
@@ -209,18 +196,12 @@ func sendToQuorum(r *Replica, q Quorum,
 		if !alive {
 			continue
 		}
-		wg.Add(1)
-		go func(peer int32) {
-			defer wg.Done()
-			r.SendMsg(peer, rpc, msg)
-		}(p)
+		go r.SendMsg(p, rpc, msg)
 	}
-	wg.Wait()
 }
 
 func sendExcept(r *Replica, q Quorum,
 	msg fastrpc.Serializable, rpc uint8) {
-	var wg sync.WaitGroup
 	for p := int32(0); p < int32(r.N); p++ {
 		if q.Contains(p) {
 			continue
@@ -231,11 +212,6 @@ func sendExcept(r *Replica, q Quorum,
 		if !alive {
 			continue
 		}
-		wg.Add(1)
-		go func(peer int32) {
-			defer wg.Done()
-			r.SendMsg(peer, rpc, msg)
-		}(p)
+		go r.SendMsg(p, rpc, msg)
 	}
-	wg.Wait()
 }
