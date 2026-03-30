@@ -632,8 +632,8 @@ func (c *Client) updateLeader(newLeader int32) {
 }
 
 // handleReaderDead is called when a reader goroutine exits (EOF/error).
-// Marks the replica as dead and, if it was the leader, rotates to the next replica
-// and resends pending commands.
+// Marks the replica as dead and, if it was the leader, rotates to the next replica,
+// flushes the pipeline (so HybridLoop can send new commands), and resends pending commands.
 func (c *Client) handleReaderDead(deadReplica int32) {
 	c.mu.Lock()
 	c.deadReplicas[deadReplica] = true
@@ -644,34 +644,64 @@ func (c *Client) handleReaderDead(deadReplica int32) {
 	oldLeader := c.leader
 	c.leader = c.rotateLeader(oldLeader)
 	newLeader := c.leader
-	if c.BufferClient != nil {
+	if c.BufferClient != nil && c.BufferClient.Client != nil {
 		c.LeaderId = int(c.leader)
 	}
-	log.Printf("Leader %d dead (EOF), rotating to %d", oldLeader, newLeader)
 
-	// Collect pending commands to resend
-	var strongCmds []*defs.Propose
-	for _, cmd := range c.strongPendingCmds {
-		strongCmds = append(strongCmds, cmd)
+	// Collect pending seqnums for pipeline flush
+	var pendingSeqnums []int32
+	for seqnum := range c.strongPendingCmds {
+		pendingSeqnums = append(pendingSeqnums, seqnum)
 	}
-	var weakCmds []*MWeakPropose
 	for seqnum := range c.weakPending {
 		if _, exists := c.delivered[seqnum]; exists {
 			continue
 		}
-		if key, hasKey := c.weakPendingKeys[seqnum]; hasKey {
-			if val, hasVal := c.weakPendingValues[seqnum]; hasVal {
-				weakCmds = append(weakCmds, &MWeakPropose{
-					CommandId: seqnum,
-					ClientId:  c.ClientId,
-					Command:   state.Command{Op: state.PUT, K: state.Key(key), V: val},
-				})
+		pendingSeqnums = append(pendingSeqnums, seqnum)
+	}
+
+	// Mark all pending commands as delivered so real replies are ignored
+	for _, seqnum := range pendingSeqnums {
+		c.delivered[seqnum] = struct{}{}
+	}
+
+	// Collect pending commands for resend before clearing maps
+	var strongCmds []*defs.Propose
+	var weakCmds []*MWeakPropose
+	if c.BufferClient != nil && c.BufferClient.Client != nil {
+		for _, cmd := range c.strongPendingCmds {
+			strongCmds = append(strongCmds, cmd)
+		}
+		for seqnum := range c.weakPending {
+			if key, hasKey := c.weakPendingKeys[seqnum]; hasKey {
+				if val, hasVal := c.weakPendingValues[seqnum]; hasVal {
+					weakCmds = append(weakCmds, &MWeakPropose{
+						CommandId: seqnum,
+						ClientId:  c.ClientId,
+						Command:   state.Command{Op: state.PUT, K: state.Key(key), V: val},
+					})
+				}
 			}
 		}
 	}
+
+	// Clear pending maps — these commands are now "flushed"
+	c.strongPendingCmds = make(map[int32]*defs.Propose)
+	c.weakPending = make(map[int32]struct{})
+
+	log.Printf("Leader %d dead (EOF), rotating to %d, flushing %d pending ops",
+		oldLeader, newLeader, len(pendingSeqnums))
 	c.mu.Unlock()
 
-	// Resend pending strong commands to new leader
+	// Flush pipeline: push fake replies for all pending commands.
+	// This unblocks HybridLoop's sender goroutine which is blocked waiting
+	// for pipeline slots to free up. Without this, the sender stays blocked
+	// and never sends commands to the new leader.
+	for _, seqnum := range pendingSeqnums {
+		c.RegisterReply(state.NIL(), seqnum)
+	}
+
+	// Resend pending strong commands to new leader (may arrive before/after election)
 	for _, cmd := range strongCmds {
 		c.resendPropose(newLeader, cmd)
 	}
@@ -696,6 +726,9 @@ func (c *Client) rotateLeader(current int32) int32 {
 
 // resendPropose sends a Propose directly to the specified replica using the writer.
 func (c *Client) resendPropose(rid int32, cmd *defs.Propose) {
+	if c.BufferClient == nil || c.BufferClient.Client == nil {
+		return
+	}
 	w := c.GetWriter(rid)
 	if w == nil {
 		return
@@ -711,6 +744,9 @@ func (c *Client) resendPropose(rid int32, cmd *defs.Propose) {
 // This prevents concurrent writes to the same bufio.Writer from different goroutines
 // (e.g., timer retry sends in handleMsgs racing with benchmark Send calls).
 func (c *Client) sendMsgSafe(rid int32, code uint8, msg fastrpc.Serializable) {
+	if c.BufferClient == nil || c.BufferClient.Client == nil {
+		return
+	}
 	c.writerMu[rid].Lock()
 	c.SendMsg(rid, code, msg)
 	c.writerMu[rid].Unlock()

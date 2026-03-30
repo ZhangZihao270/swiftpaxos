@@ -11,6 +11,7 @@ import (
 
 	cmap "github.com/orcaman/concurrent-map"
 
+	"github.com/imdea-software/swiftpaxos/client"
 	"github.com/imdea-software/swiftpaxos/dlog"
 	"github.com/imdea-software/swiftpaxos/hook"
 	"github.com/imdea-software/swiftpaxos/replica"
@@ -3363,9 +3364,13 @@ func TestHandleReaderDeadNotLeader(t *testing.T) {
 	}
 }
 
-// TestHandleReaderDeadIsLeader tests that leader death triggers rotation.
+// TestHandleReaderDeadIsLeader tests that leader death triggers rotation and pipeline flush.
 func TestHandleReaderDeadIsLeader(t *testing.T) {
+	bc := &client.BufferClient{
+		Reply: make(chan *client.ReqReply, 100),
+	}
 	c := &Client{
+		BufferClient:      bc,
 		leader:            1,
 		numReplicas:       3,
 		weakPending:       make(map[int32]struct{}),
@@ -5449,5 +5454,205 @@ func TestSlotSyncSelfLastCommittedUsed(t *testing.T) {
 	}
 	if r.lastCmdSlot != 501 {
 		t.Errorf("lastCmdSlot should be 501 (self lastCommitted=500 is highest), got %d", r.lastCmdSlot)
+	}
+}
+
+// --- Phase 128.7: Pipeline flush on failover tests ---
+
+// newTestClientForFlush creates a Client with BufferClient.Reply channel for pipeline flush tests.
+func newTestClientForFlush(leader int32, nReplicas int) *Client {
+	bc := &client.BufferClient{
+		Reply: make(chan *client.ReqReply, 100),
+	}
+	return &Client{
+		BufferClient:      bc,
+		leader:            leader,
+		numReplicas:       int32(nReplicas),
+		weakPending:       make(map[int32]struct{}),
+		delivered:         make(map[int32]struct{}),
+		weakPendingKeys:   make(map[int32]int64),
+		weakPendingValues: make(map[int32]state.Value),
+		strongPendingKeys: make(map[int32]int64),
+		strongPendingCmds: make(map[int32]*defs.Propose),
+		deadReplicas:      make(map[int32]bool),
+		localCache:        make(map[int64]cacheEntry),
+		writerMu:          make([]sync.Mutex, nReplicas),
+	}
+}
+
+// TestPipelineFlushStrongPending tests that leader death flushes pending strong commands.
+func TestPipelineFlushStrongPending(t *testing.T) {
+	c := newTestClientForFlush(0, 3)
+
+	// Simulate 5 pending strong commands
+	for i := int32(1); i <= 5; i++ {
+		c.strongPendingCmds[i] = &defs.Propose{
+			CommandId: i,
+		}
+	}
+
+	c.handleReaderDead(0) // leader dies
+
+	// Should have 5 fake replies on Reply channel
+	if len(c.Reply) != 5 {
+		t.Errorf("expected 5 fake replies, got %d", len(c.Reply))
+	}
+
+	// All 5 seqnums should be marked delivered
+	for i := int32(1); i <= 5; i++ {
+		if _, ok := c.delivered[i]; !ok {
+			t.Errorf("seqnum %d should be marked delivered", i)
+		}
+	}
+
+	// strongPendingCmds should be cleared
+	if len(c.strongPendingCmds) != 0 {
+		t.Errorf("strongPendingCmds should be empty, got %d", len(c.strongPendingCmds))
+	}
+}
+
+// TestPipelineFlushWeakPending tests that leader death flushes pending weak commands.
+func TestPipelineFlushWeakPending(t *testing.T) {
+	c := newTestClientForFlush(0, 3)
+
+	// Simulate 3 pending weak write commands
+	for i := int32(10); i <= 12; i++ {
+		c.weakPending[i] = struct{}{}
+		c.weakPendingKeys[i] = int64(i * 100)
+		c.weakPendingValues[i] = state.Value("val")
+	}
+
+	c.handleReaderDead(0) // leader dies
+
+	// Should have 3 fake replies
+	if len(c.Reply) != 3 {
+		t.Errorf("expected 3 fake replies, got %d", len(c.Reply))
+	}
+
+	// All seqnums should be marked delivered
+	for i := int32(10); i <= 12; i++ {
+		if _, ok := c.delivered[i]; !ok {
+			t.Errorf("seqnum %d should be marked delivered", i)
+		}
+	}
+
+	// weakPending should be cleared
+	if len(c.weakPending) != 0 {
+		t.Errorf("weakPending should be empty, got %d", len(c.weakPending))
+	}
+}
+
+// TestPipelineFlushMixed tests flush with both strong and weak pending commands.
+func TestPipelineFlushMixed(t *testing.T) {
+	c := newTestClientForFlush(1, 3)
+
+	// 3 strong + 2 weak = 5 total pending
+	for i := int32(1); i <= 3; i++ {
+		c.strongPendingCmds[i] = &defs.Propose{
+			CommandId: i,
+		}
+	}
+	c.weakPending[10] = struct{}{}
+	c.weakPendingKeys[10] = 100
+	c.weakPendingValues[10] = state.Value("v")
+	c.weakPending[11] = struct{}{}
+	c.weakPendingKeys[11] = 200
+	c.weakPendingValues[11] = state.Value("w")
+
+	c.handleReaderDead(1) // leader dies
+
+	if len(c.Reply) != 5 {
+		t.Errorf("expected 5 fake replies, got %d", len(c.Reply))
+	}
+	if c.leader != 2 {
+		t.Errorf("expected leader=2, got %d", c.leader)
+	}
+}
+
+// TestPipelineFlushSkipsAlreadyDelivered tests that already-delivered weak commands are not flushed.
+func TestPipelineFlushSkipsAlreadyDelivered(t *testing.T) {
+	c := newTestClientForFlush(0, 3)
+
+	// 2 pending weak, 1 already delivered
+	c.weakPending[10] = struct{}{}
+	c.weakPendingKeys[10] = 100
+	c.weakPendingValues[10] = state.Value("v")
+	c.weakPending[11] = struct{}{}
+	c.weakPendingKeys[11] = 200
+	c.weakPendingValues[11] = state.Value("w")
+	c.delivered[11] = struct{}{} // already delivered
+
+	c.handleReaderDead(0) // leader dies
+
+	// Only 1 fake reply (seqnum 10); seqnum 11 was already delivered
+	if len(c.Reply) != 1 {
+		t.Errorf("expected 1 fake reply (skip delivered), got %d", len(c.Reply))
+	}
+}
+
+// TestPipelineFlushNoPending tests that flush with no pending commands is a no-op.
+func TestPipelineFlushNoPending(t *testing.T) {
+	c := newTestClientForFlush(0, 3)
+
+	c.handleReaderDead(0)
+
+	if len(c.Reply) != 0 {
+		t.Errorf("expected 0 fake replies (no pending), got %d", len(c.Reply))
+	}
+}
+
+// TestPipelineFlushRealReplyIgnored tests that real replies after flush are ignored via delivered map.
+func TestPipelineFlushRealReplyIgnored(t *testing.T) {
+	c := newTestClientForFlush(0, 3)
+
+	// Set up a pending strong command
+	c.strongPendingCmds[5] = &defs.Propose{
+		CommandId: 5,
+	}
+	c.acks = make(map[CommandId]*replica.MsgSet)
+	c.macks = make(map[CommandId]*replica.MsgSet)
+
+	c.handleReaderDead(0) // flushes seqnum 5
+
+	// Verify seqnum 5 is delivered
+	if _, ok := c.delivered[5]; !ok {
+		t.Fatal("seqnum 5 should be delivered after flush")
+	}
+
+	// Simulate a real MReply arriving for seqnum 5 after flush
+	c.handleReply(&MReply{
+		Replica: 2,
+		Ballot:  1,
+		CmdId:   CommandId{ClientId: 100, SeqNum: 5},
+		Ok:      TRUE,
+	})
+
+	// Should still have only 1 reply (the fake one), not 2
+	if len(c.Reply) != 1 {
+		t.Errorf("expected 1 reply (real reply should be ignored), got %d", len(c.Reply))
+	}
+}
+
+// TestPipelineFlushWeakReplyIgnored tests that weak real replies after flush are ignored.
+func TestPipelineFlushWeakReplyIgnored(t *testing.T) {
+	c := newTestClientForFlush(0, 3)
+
+	c.weakPending[7] = struct{}{}
+	c.weakPendingKeys[7] = 42
+	c.weakPendingValues[7] = state.Value("val")
+
+	c.handleReaderDead(0) // flushes seqnum 7
+
+	// Simulate a real MWeakReply arriving for seqnum 7 after flush
+	c.handleWeakReply(&MWeakReply{
+		Replica: 2,
+		Ballot:  1,
+		CmdId:   CommandId{ClientId: 100, SeqNum: 7},
+		Slot:    10,
+	})
+
+	// Should still have only 1 reply (the fake one)
+	if len(c.Reply) != 1 {
+		t.Errorf("expected 1 reply (weak real reply should be ignored), got %d", len(c.Reply))
 	}
 }

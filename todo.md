@@ -9467,18 +9467,18 @@ The client `HybridLoop` uses pipelining (pendings=15): each thread can have up t
 
 **What needs to happen**: After failover, client must "flush" stale pending requests from the pipeline so new commands can be sent.
 
-#### ⬜ Step 1: Understand pipeline blocking in HybridLoop
-- `client/hybrid.go` `HybridLoop`/`HybridLoopWithOptions`: find where pipeline blocks (the `pendingOps` check)
-- Understand how `c.Reply` channel drains pending ops
-- Identify what `RegisterReply` does — does it unblock a specific thread or any thread?
+#### ✅ Step 1: Understand pipeline blocking in HybridLoop
+- `HybridLoopWithOptions` sender blocks at `<-wait` when `cmdNum == window` (pipeline full)
+- Reply goroutine drains pipeline by reading from `c.Reply` and decrementing `cmdNum`
+- When leader dies: ~15 pending commands get no replies → pipeline full → sender blocks forever
+- `handleReaderDead` resends commands but new leader isn't elected yet → resent commands dropped
 
-#### ⬜ Step 2: Add pipeline flush on failover
-- In curp-ht `handleReaderDead()`: after rotating leader, signal all threads to abandon stale pending requests
-- Options:
-  - (a) Push fake replies into `c.Reply` channel for all pending seqnums → unblocks all threads, they proceed to send new commands to new leader
-  - (b) Reset `pendingOps` counter atomically → HybridLoop sees pipeline as empty, sends new commands
-  - (c) Close and recreate `c.Reply` channel → all blocking reads return, threads restart
-- Need to be careful: fake replies must not corrupt latency metrics or delivered map
+#### ✅ Step 2: Add pipeline flush on failover
+- Implemented option (a): push fake replies into `c.Reply` for all pending seqnums
+- In `handleReaderDead`: mark pending seqnums as delivered, push fake replies, clear pending maps
+- Real replies for flushed commands are silently ignored via `delivered` map check
+- Also added nil guards for `resendPropose`/`sendMsgSafe` and `LeaderId` update
+- 9 unit tests: strong/weak/mixed pending, already-delivered skip, no-op, real reply dedup
 
 #### ⬜ Step 3: Handle client0 on dead machine
 - Client0 (130.245.173.101) is co-located with killed replica0 — it will never recover
