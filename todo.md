@@ -9447,7 +9447,8 @@ grep "TPUT" results/exp2.3-test/client*.log | tail -20
 - ✅ Election succeeds (1-2s) — fixed with ID-based jitter
 - ✅ Log recovery: slot sync completes in <1s (Phase 128.6)
 - ✅ New leader accepts proposals after recovery (status=NORMAL, lastCmdSlot correct)
-- ✅ **Throughput still 0**: client pipeline blocked after failover — fixed in Phase 128.7 Steps 1-2 (pipeline flush). Pending lab verification.
+- ✅ Client pipeline flush works (128.7) — flush triggered, pipeline unblocked
+- ⬜ **Throughput still 0**: new root cause — sender goroutine blocked writing to dead peer (see Phase 128.8)
 
 ### Phase 128.7: Client Pipeline Recovery After Failover
 
@@ -9517,3 +9518,22 @@ The client `HybridLoop` uses pipelining (pendings=15): each thread can have up t
 - ✅ Throughput recovery: pipeline flush implemented in Phase 128.7 Steps 1-2. Pending lab verification.
 
 **Expected timeline**: kill → 1-1.5s election → 0.1s slot sync → NORMAL → throughput resumes (pending 128.7)
+
+### Phase 128.8: Sender Goroutine Blocked on Dead Peer
+
+**Problem**: After leader kill, new leader's sender goroutine is blocked writing to dead peer 0's broken TCP connection. Heartbeats never reach followers → followers don't set `currentLeader` → proposals not forwarded → throughput stays 0.
+
+**Root cause**: `replica/sender.go` has a single sender goroutine per replica. `sendToAllExcept` checks `Alive[p]` before writing, but `Alive[0]` is only set to false when the **reader** goroutine detects EOF. If the sender goroutine calls `SendMsg(0, ...)` before the reader detects the death, `SendMsg` blocks on `w.Flush()` to a broken TCP connection (kernel TCP timeout can be 15-60s).
+
+While the sender is blocked on peer 0, ALL subsequent sends are queued — including heartbeats to alive peers 1,2,4. This is a head-of-line blocking problem.
+
+**Evidence**: replica3 log shows "Peer 0 marked dead" (reader detected), but no heartbeat output. Replica1 log has zero heartbeat/forward entries.
+
+#### ⬜ Step 1: Non-blocking send to peers
+- Option A: Use `SetWriteDeadline` on peer connections (e.g., 100ms timeout for writes)
+- Option B: Skip `SendMsg` for dead peers in `sendToAll`/`sendToAllExcept` (check `Alive` inside sender goroutine, not just before queuing)
+- Option C: Use per-peer sender goroutines instead of single shared sender (most robust but biggest change)
+
+#### ⬜ Step 2: Test and verify
+- Kill-leader on lab: heartbeats should reach followers immediately after election
+- Throughput should recover within 2-3s of kill
