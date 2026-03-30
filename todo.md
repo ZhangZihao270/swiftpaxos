@@ -9443,10 +9443,13 @@ grep "TPUT" results/exp2.3-test/client*.log | tail -20
 
 **Expected (when fixed)**: throughput drops to 0 for 1-3s after kill, then recovers to ~70% of pre-kill level (client0 lost)
 
-**Current status (2026-03-30 19:30)**:
+**Current status (2026-03-30 20:10)**:
 - ✅ Election succeeds (1-2s) — fixed with ID-based jitter
-- ✅ Log recovery correct: 576K entries recovered, lastCmdSlot correct — fixed with history population in handleCommit
-- ⬜ Throughput still 0: recovery takes ~10s (scanning+merging 576K entries), client timeout is 10s → client exits just as recovery completes.
+- ✅ Log recovery: slot sync completes in <1s (Phase 128.6)
+- ✅ New leader accepts proposals after recovery (status=NORMAL, lastCmdSlot correct)
+- ⬜ **Throughput still 0**: client pipeline is blocked. After leader kill, all 16 threads have pending requests waiting for replies. Pipeline is full (pendings=15), no new commands are sent. Recovery completes in 2s but client never sends new proposals because pipeline is stuck.
+- **Root cause**: client pipeline doesn't drain stale pending requests after failover. Needs pipeline reset: on leader rotation, clear pending counts so HybridLoop can send new commands.
+- **Fix**: in `handleReaderDead()`, after rotating leader, reset pipeline window (clear pending reply count for all threads). Or increase `replyTimeout` so client doesn't exit before retries complete.
 
 ### Phase 128.6: Lightweight Recovery (slot sync only)
 
