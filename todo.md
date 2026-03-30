@@ -9451,7 +9451,7 @@ grep "TPUT" results/exp2.3-test/client*.log | tail -20
 - ✅ Sender head-of-line blocking fixed (128.8) — fire-and-forget per-peer sends, no more wg.Wait()
 - ✅ Proposals buffered during RECOVERING (128.9) — buffer + replay after recovery
 - ✅ Dead writer nil'd + write deadline (128.10) — sendProposeSafe no longer blocks
-- ⬜ **Throughput still 0**: election succeeds (term 4, 2s), slot sync completes, client flush+refill works, MSync retries. But new commands get NO reply from new leader. Likely: new leader processes proposals but `SendToClient` fails (no client writer registered on new leader, or reply goes to wrong reader). Need Phase 128.11 debug.
+- ✅ **Throughput still 0**: Root cause: after election (new term), old-term AcceptAcks/Commits rejected → uncommitted slots never commit → execution chain stalls → new proposals block on slot ordering. Fix: switched from lightweight slot sync to full log sync (transfers + replays committed entries from peers). See Phase 128.11.
 
 ### Phase 128.10: Client sendProposeSafe Blocks on Dead Writer
 
@@ -9674,15 +9674,32 @@ While the sender is blocked on peer 0, ALL subsequent sends are queued — inclu
 - Kill-leader on lab: heartbeats should reach followers immediately after election
 - Throughput should recover within 2-3s of kill
 
-### Phase 128.11: Debug + Fix Reply Path After Recovery
+### Phase 128.11: Debug + Fix Reply Path After Recovery — ✅ DONE (Step 1)
 
-**IMPORTANT: This is a self-contained debug-fix-test loop. Keep iterating until throughput recovers after kill. Do NOT stop after one fix — test on lab, if still broken, diagnose next issue and fix it.**
+**Root cause found**: The TODO's `WaitReplies` hypothesis was **wrong** — CURP-HT uses `RegisterRPCTable` which starts readers for ALL replicas. The actual root cause is:
 
-**Current symptom**: Election succeeds (2s), slot sync completes, client flush+refill works. Client sends new commands to all alive replicas. New leader (replica3) processes proposals. But client gets NO reply → TPUT stays 0.
+1. After election, new leader has `currentTerm = new_term`
+2. AcceptAcks/Commits from the old term have `msg.Ballot = old_term`
+3. `handleAcceptAck` (line 1142) and `handleCommit` (line 1175) reject old-term messages: `r.currentTerm != msg.Ballot → return`
+4. Slots that hadn't reached AcceptAck quorum on this replica before election can **never** commit via the normal path
+5. The execution chain (deliverChan) stalls at the first uncommitted slot
+6. New proposals at `lastCmdSlot` block on slot ordering (`!r.executed.Has(slot-1)`) → no replies → throughput = 0
 
-**Likely root cause**: CURP-HT client uses `WaitReplies(closestId)` at init to start a reader goroutine that reads `ProposeReplyTS` from one replica. When that replica (replica0) dies, reader exits. **No new reader is started.** Client can never receive replies from any replica.
+**Fix**: Switched `startLogRecovery` from lightweight slot sync (`MSlotSync`) to full log sync (`MLogSync`). Full log sync transfers committed entries from peers and replays them directly (bypassing AcceptAck→Commit chain), filling in any execution gaps.
 
-Note: CURP-HT uses `Fast=true` so replies come from the leader (not the closest replica). After failover, leader changes from replica0 to replica3, but there's no reader goroutine for replica3's connection.
+- Changed `startLogRecovery()` to send `MLogSync` instead of `MSlotSync`
+- `handleLogSyncReply` → `mergeAndRecoverLog` path was already implemented (legacy code)
+- `mergeAndRecoverLog` skips already-executed slots, executes missed ones, sets `r.executed`/`r.committed`/`r.delivered`/`r.values`
+- After recovery, `r.lastCmdSlot = maxSlot + 1` with ALL slots executed → slot ordering passes for new proposals
+
+**Tests**: 3 new tests + 2 updated tests (all pass):
+- `TestOldTermAcceptAcksRejected` — verifies root cause (old-term AcceptAcks rejected)
+- `TestLogSyncRecoversMissedSlots` — verifies fix (missed slots 6-9 recovered)
+- `TestStartLogRecoverySendsLogSync` — verifies MLogSync sent (not MSlotSync)
+- `TestStartLogRecovery` — updated to check logSyncExpected
+- `TestLogSyncStartsRecovery` — updated from TestSlotSyncStartsRecovery
+
+**Step 2 (lab verification)**: Deploy and run exp2.3 kill test to confirm throughput recovers.
 
 #### Fix plan:
 

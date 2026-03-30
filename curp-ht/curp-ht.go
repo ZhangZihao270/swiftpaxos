@@ -88,11 +88,11 @@ type Replica struct {
 	votesReceived  int           // Votes received in current election
 	lastCommitted  int32         // Highest committed slot (for log comparison in votes)
 
-	// Log recovery state (Phase 128 Step 4 — legacy, kept for handleLogSync compat)
+	// Log recovery state (full log sync — transfers committed entries from peers)
 	logSyncReplies  []MLogSyncReply // Collected log sync replies during recovery
 	logSyncExpected int             // Number of replies expected (N-1)
 
-	// Slot sync state (Phase 128.6 — lightweight recovery)
+	// Slot sync state (lightweight recovery — kept for handleSlotSync compat)
 	slotSyncReplies  []MSlotSyncReply // Collected slot sync replies during recovery
 	slotSyncExpected int              // Number of replies expected (N-1)
 
@@ -472,23 +472,25 @@ func (r *Replica) handleHeartbeat(msg *MHeartbeat) {
 	r.resetElectionTimer()
 }
 
-// startLogRecovery begins lightweight recovery after winning an election.
-// The new leader was a follower that already executed all committed commands —
-// it only needs to discover the highest committed slot across the cluster
-// to set lastCmdSlot correctly. No log entries are transferred.
+// startLogRecovery begins full log recovery after winning an election.
+// The new leader requests committed log entries from all peers, merges them,
+// and replays any entries it hasn't executed yet. This is necessary because
+// after election (new term), AcceptAcks/Commits from the old term are rejected
+// (ballot mismatch), so slots that hadn't reached quorum on this replica can
+// never commit via the normal path — they must be recovered from peers.
 func (r *Replica) startLogRecovery() {
 	r.status = RECOVERING
-	r.slotSyncReplies = make([]MSlotSyncReply, 0, r.N-1)
-	r.slotSyncExpected = r.N - 1
+	r.logSyncReplies = make([]MLogSyncReply, 0, r.N-1)
+	r.logSyncExpected = r.N - 1
 
-	r.Printf("Starting slot sync for term %d (lastCommitted=%d)\n",
+	r.Printf("Starting log sync for term %d (lastCommitted=%d)\n",
 		r.currentTerm, r.lastCommitted)
 
-	msg := &MSlotSync{
+	msg := &MLogSync{
 		Replica: r.Id,
 		Term:    r.currentTerm,
 	}
-	r.sender.SendToAll(msg, r.cs.slotSyncRPC)
+	r.sender.SendToAll(msg, r.cs.logSyncRPC)
 }
 
 // handleLogSync processes a log sync request from a new leader.

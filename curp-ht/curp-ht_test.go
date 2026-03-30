@@ -3111,16 +3111,16 @@ func TestStartLogRecovery(t *testing.T) {
 	if r.status != RECOVERING {
 		t.Errorf("expected RECOVERING status, got %d", r.status)
 	}
-	if r.slotSyncExpected != 2 { // N-1 = 3-1 = 2
-		t.Errorf("expected slotSyncExpected=2, got %d", r.slotSyncExpected)
+	if r.logSyncExpected != 2 { // N-1 = 3-1 = 2
+		t.Errorf("expected logSyncExpected=2, got %d", r.logSyncExpected)
 	}
 
-	// Verify MSlotSync was sent (at least one message on sender channel)
+	// Verify MLogSync was sent (at least one message on sender channel)
 	select {
 	case <-r.sender:
-		// OK — MSlotSync was sent
+		// OK — MLogSync was sent
 	case <-time.After(100 * time.Millisecond):
-		t.Error("expected MSlotSync to be sent to peers")
+		t.Error("expected MLogSync to be sent to peers")
 	}
 }
 
@@ -5257,7 +5257,7 @@ func TestMSlotSyncReplySerialization(t *testing.T) {
 }
 
 // TestSlotSyncStartsRecovery verifies that startLogRecovery uses slot sync.
-func TestSlotSyncStartsRecovery(t *testing.T) {
+func TestLogSyncStartsRecovery(t *testing.T) {
 	r := newTestReplicaForRecovery(1, 3)
 	r.role = LEADER
 	r.currentTerm = 5
@@ -5269,27 +5269,27 @@ func TestSlotSyncStartsRecovery(t *testing.T) {
 	if r.status != RECOVERING {
 		t.Errorf("status should be RECOVERING, got %d", r.status)
 	}
-	if r.slotSyncExpected != 2 { // N-1 = 3-1
-		t.Errorf("slotSyncExpected should be 2, got %d", r.slotSyncExpected)
+	if r.logSyncExpected != 2 { // N-1 = 3-1
+		t.Errorf("logSyncExpected should be 2, got %d", r.logSyncExpected)
 	}
 
-	// Verify a SlotSync message was sent (not LogSync)
+	// Verify a LogSync message was sent
 	senderCh := chan replica.SendArg(r.sender)
 	timeout := time.After(200 * time.Millisecond)
-	foundSlotSync := false
+	foundLogSync := false
 	for {
 		select {
 		case arg := <-senderCh:
-			if arg.Rpc() == r.cs.slotSyncRPC {
-				foundSlotSync = true
+			if arg.Rpc() == r.cs.logSyncRPC {
+				foundLogSync = true
 			}
 		case <-timeout:
 			goto done
 		}
 	}
 done:
-	if !foundSlotSync {
-		t.Error("startLogRecovery should send MSlotSync, not MLogSync")
+	if !foundLogSync {
+		t.Error("startLogRecovery should send MLogSync")
 	}
 }
 
@@ -5463,6 +5463,149 @@ func TestSlotSyncSelfLastCommittedUsed(t *testing.T) {
 	}
 	if r.lastCmdSlot != 501 {
 		t.Errorf("lastCmdSlot should be 501 (self lastCommitted=500 is highest), got %d", r.lastCmdSlot)
+	}
+}
+
+// --- Phase 128.11: Full log sync recovery tests ---
+
+// TestOldTermAcceptAcksRejected verifies that after election, AcceptAcks from
+// the old term are silently rejected (ballot mismatch). This is the root cause
+// of the post-recovery stall: slots that hadn't committed before election can
+// never commit via the normal AcceptAck path.
+func TestOldTermAcceptAcksRejected(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.role = LEADER
+	r.status = NORMAL
+	r.currentTerm = 5 // New term after election
+
+	// Create a descriptor for a slot from the OLD term (term 3)
+	desc := r.getCmdDesc(10, nil, -1)
+	if desc == nil {
+		t.Fatal("getCmdDesc returned nil")
+	}
+	desc.cmdSlot = 10
+	desc.phase = ACCEPT // Stuck in ACCEPT phase from old term
+
+	// AcceptAck from old term — should be rejected
+	oldAck := &MAcceptAck{
+		Replica: 2,
+		Ballot:  3, // Old term
+		CmdSlot: 10,
+	}
+	r.handleAcceptAck(oldAck, desc)
+
+	// desc.acks should NOT have the ack (rejected due to ballot mismatch)
+	// The descriptor remains in ACCEPT phase — it can never reach COMMIT
+	if desc.phase != ACCEPT {
+		t.Errorf("desc.phase should still be ACCEPT, got %d", desc.phase)
+	}
+}
+
+// TestLogSyncRecoversMissedSlots verifies that full log sync fills in slots
+// that the new leader hadn't committed before election. This tests the fix
+// for the "throughput = 0 after recovery" bug.
+func TestLogSyncRecoversMissedSlots(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.role = LEADER
+	r.status = RECOVERING
+	r.currentTerm = 5
+	r.currentLeader = 1
+
+	// Simulate: this replica executed slots 0-5 but NOT slots 6-9
+	for i := 0; i <= 5; i++ {
+		slotStr := strconv.Itoa(i)
+		r.executed.Set(slotStr, struct{}{})
+		r.committed.Set(slotStr, struct{}{})
+		r.delivered.Set(slotStr, struct{}{})
+	}
+	r.lastCommitted = 5
+
+	r.logSyncReplies = make([]MLogSyncReply, 0, 2)
+	r.logSyncExpected = 2
+
+	// Peer reports slots 0-9 committed (this peer had all of them)
+	entries := make([]LogEntry, 10)
+	for i := 0; i < 10; i++ {
+		entries[i] = LogEntry{
+			Slot:  int32(i),
+			CmdId: CommandId{ClientId: 100, SeqNum: int32(i)},
+			Cmd:   state.Command{Op: state.PUT, K: state.Key(i), V: []byte{byte(i)}},
+		}
+	}
+
+	reply := MLogSyncReply{
+		Replica:    0,
+		Term:       5,
+		NumEntries: 10,
+		Entries:    entries,
+	}
+
+	// Feed log sync reply — need majority (1 reply for 3 replicas)
+	r.handleLogSyncReply(&reply)
+
+	// Should transition to NORMAL
+	if r.status != NORMAL {
+		t.Fatalf("expected NORMAL after log sync, got %d", r.status)
+	}
+
+	// lastCmdSlot should be 10 (maxSlot=9, +1)
+	if r.lastCmdSlot != 10 {
+		t.Errorf("lastCmdSlot should be 10, got %d", r.lastCmdSlot)
+	}
+
+	// ALL slots 0-9 should now be executed (including 6-9 which were missing)
+	for i := 0; i <= 9; i++ {
+		slotStr := strconv.Itoa(i)
+		if !r.executed.Has(slotStr) {
+			t.Errorf("slot %d should be executed after log sync", i)
+		}
+	}
+
+	// New proposal at slot 10 should not be blocked by slot ordering
+	// (slot 9 is now executed)
+	if !r.executed.Has("9") {
+		t.Error("slot 9 must be executed for new proposals to proceed")
+	}
+}
+
+// TestStartLogRecoverySendsLogSync verifies that startLogRecovery sends
+// MLogSync (full log transfer), not MSlotSync (lightweight).
+func TestStartLogRecoverySendsLogSync(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.role = LEADER
+	r.currentTerm = 5
+	r.lastCommitted = 50
+
+	r.startLogRecovery()
+
+	if r.status != RECOVERING {
+		t.Errorf("status should be RECOVERING, got %d", r.status)
+	}
+
+	// Drain sender and check for MLogSync (not MSlotSync)
+	senderCh := chan replica.SendArg(r.sender)
+	timeout := time.After(200 * time.Millisecond)
+	foundLogSync := false
+	foundSlotSync := false
+	for {
+		select {
+		case arg := <-senderCh:
+			if arg.Rpc() == r.cs.logSyncRPC {
+				foundLogSync = true
+			}
+			if arg.Rpc() == r.cs.slotSyncRPC {
+				foundSlotSync = true
+			}
+		case <-timeout:
+			goto done
+		}
+	}
+done:
+	if !foundLogSync {
+		t.Error("startLogRecovery should send MLogSync")
+	}
+	if foundSlotSync {
+		t.Error("startLogRecovery should NOT send MSlotSync")
 	}
 }
 
