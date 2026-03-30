@@ -91,6 +91,9 @@ type Replica struct {
 	// Log recovery state (Phase 128 Step 4)
 	logSyncReplies  []MLogSyncReply // Collected log sync replies during recovery
 	logSyncExpected int             // Number of replies expected (N-1)
+
+	// Leader tracking for proposal forwarding (Phase 128.4)
+	currentLeader int32 // Replica ID of the current leader (set from heartbeats)
 }
 
 type commandDesc struct {
@@ -209,12 +212,14 @@ func New(alias string, rid int, addrs []string, exec bool, pl, f int,
 	if err == nil && len(leaderIds) != 0 {
 		r.currentTerm = leaderIds[0]
 		r.cballot = leaderIds[0]
+		r.currentLeader = leaderIds[0]
 		if leaderIds[0] == r.Id {
 			r.becomeLeader()
 		} else {
 			r.becomeFollower(leaderIds[0])
 		}
 	} else if err == replica.NO_QUORUM_FILE {
+		r.currentLeader = r.currentTerm
 		if r.currentTerm == r.Id {
 			r.becomeLeader()
 		} else {
@@ -273,6 +278,7 @@ func (r *Replica) becomeCandidate() {
 // and triggers log recovery from peers.
 func (r *Replica) becomeLeader() {
 	r.role = LEADER
+	r.currentLeader = r.Id
 }
 
 // IsLeader returns true if this replica is currently the leader.
@@ -436,6 +442,9 @@ func (r *Replica) handleHeartbeat(msg *MHeartbeat) {
 		// Another leader exists for this term — step down
 		r.becomeFollower(msg.Term)
 	}
+
+	// Track who the leader is (for proposal forwarding)
+	r.currentLeader = msg.Replica
 
 	r.resetElectionTimer()
 }
@@ -693,6 +702,19 @@ func (r *Replica) run() {
 				if exists {
 					r.getCmdDesc(slot, "deliver", -1)
 				}
+				// Forward proposal to the actual leader so it gets committed.
+				// Without this, proposals sent to a follower after failover
+				// never reach the leader and are never committed.
+				if r.currentLeader != r.Id && r.currentLeader >= 0 {
+					fwd := &MForwardPropose{
+						Replica:   r.Id,
+						ClientId:  propose.ClientId,
+						CommandId: propose.CommandId,
+						Command:   propose.Command,
+						Timestamp: propose.Timestamp,
+					}
+					r.sender.SendTo(r.currentLeader, fwd, r.cs.forwardProposeRPC)
+				}
 			}
 
 		case m := <-r.cs.acceptChan:
@@ -749,11 +771,13 @@ func (r *Replica) run() {
 			// COMMIT phase will reply when slot ordering completes.
 
 		case m := <-r.cs.weakProposeChan:
+			weakPropose := m.(*MWeakPropose)
 			if r.IsLeader() && r.status == NORMAL {
-				weakPropose := m.(*MWeakPropose)
 				r.handleWeakPropose(weakPropose)
+			} else if !r.IsLeader() && r.currentLeader != r.Id && r.currentLeader >= 0 {
+				// Forward weak propose to actual leader
+				r.sender.SendTo(r.currentLeader, weakPropose, r.cs.weakProposeRPC)
 			}
-			// Non-Leader or RECOVERING leader ignores weak propose
 
 		case m := <-r.cs.weakReadChan:
 			weakRead := m.(*MWeakRead)
@@ -784,12 +808,47 @@ func (r *Replica) run() {
 			lsr := m.(*MLogSyncReply)
 			r.handleLogSyncReply(lsr)
 
+		case m := <-r.cs.forwardProposeChan:
+			fwd := m.(*MForwardPropose)
+			r.handleForwardPropose(fwd)
+
 		case <-heartbeatCh:
 			if r.IsLeader() {
 				r.sendHeartbeat()
 			}
 		}
 	}
+}
+
+// handleForwardPropose processes a proposal forwarded from a follower.
+// The leader treats it as a new proposal if the command hasn't been committed yet.
+func (r *Replica) handleForwardPropose(fwd *MForwardPropose) {
+	if !r.IsLeader() || r.status != NORMAL {
+		return // Only the active leader processes forwarded proposals
+	}
+
+	cmdId := CommandId{ClientId: fwd.ClientId, SeqNum: fwd.CommandId}
+	if r.values.Has(cmdId.String()) {
+		return // Already committed — MSync will deliver the reply
+	}
+
+	// Create a GPropose and process it as a normal proposal
+	propose := &defs.GPropose{
+		Propose: &defs.Propose{
+			ClientId:  fwd.ClientId,
+			CommandId: fwd.CommandId,
+			Command:   fwd.Command,
+			Timestamp: fwd.Timestamp,
+		},
+	}
+
+	dep := r.leaderUnsync(propose.Command, r.lastCmdSlot)
+	desc := r.getCmdDescSeq(r.lastCmdSlot, propose, dep, true)
+	if desc == nil {
+		// Slot already delivered — command may have been committed via another path
+		return
+	}
+	r.lastCmdSlot++
 }
 
 func (r *Replica) handlePropose(msg *defs.GPropose, desc *commandDesc, slot int, dep int) {

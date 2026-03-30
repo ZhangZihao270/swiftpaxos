@@ -23,6 +23,7 @@ import (
 	"github.com/imdea-software/swiftpaxos/state"
 )
 
+type ClientSendArg = clientSendArg
 type clientSendArg struct {
 	code uint8
 	msg  fastrpc.Serializable

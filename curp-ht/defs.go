@@ -193,6 +193,17 @@ type MLogSyncReply struct {
 	Entries    []LogEntry // Committed log entries
 }
 
+// MForwardPropose - Follower forwards a client proposal to the actual leader.
+// Used when a client sends a Propose to a non-leader replica (e.g., after failover
+// when the client doesn't know who the real leader is).
+type MForwardPropose struct {
+	Replica   int32         // Forwarding replica ID
+	ClientId  int32         // Original client ID
+	CommandId int32         // Original command sequence number
+	Command   state.Command // The actual command
+	Timestamp int64         // Original timestamp
+}
+
 func (m *MReply) New() fastrpc.Serializable {
 	return new(MReply)
 }
@@ -261,6 +272,10 @@ func (m *MLogSyncReply) New() fastrpc.Serializable {
 	return new(MLogSyncReply)
 }
 
+func (m *MForwardPropose) New() fastrpc.Serializable {
+	return new(MForwardPropose)
+}
+
 type CommunicationSupply struct {
 	maxLatency time.Duration
 
@@ -288,6 +303,9 @@ type CommunicationSupply struct {
 	logSyncChan      chan fastrpc.Serializable
 	logSyncReplyChan chan fastrpc.Serializable
 
+	// Proposal forwarding channel
+	forwardProposeChan chan fastrpc.Serializable
+
 	replyRPC     uint8
 	acceptRPC    uint8
 	acceptAckRPC uint8
@@ -311,6 +329,9 @@ type CommunicationSupply struct {
 	// Log recovery RPCs
 	logSyncRPC      uint8
 	logSyncReplyRPC uint8
+
+	// Proposal forwarding RPC
+	forwardProposeRPC uint8
 }
 
 func initCs(cs *CommunicationSupply, t *fastrpc.Table) {
@@ -363,6 +384,10 @@ func initCs(cs *CommunicationSupply, t *fastrpc.Table) {
 	// Register log recovery RPCs
 	cs.logSyncRPC = t.Register(new(MLogSync), cs.logSyncChan)
 	cs.logSyncReplyRPC = t.Register(new(MLogSyncReply), cs.logSyncReplyChan)
+
+	// Initialize and register proposal forwarding
+	cs.forwardProposeChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
+	cs.forwardProposeRPC = t.Register(new(MForwardPropose), cs.forwardProposeChan)
 }
 
 type byteReader interface {
@@ -1916,5 +1941,95 @@ func (t *MLogSyncReply) Unmarshal(rr io.Reader) error {
 		t.Entries[i].CmdId.SeqNum = int32((uint32(bs[8]) | (uint32(bs[9]) << 8) | (uint32(bs[10]) << 16) | (uint32(bs[11]) << 24)))
 		t.Entries[i].Cmd.Unmarshal(wire)
 	}
+	return nil
+}
+
+// MForwardPropose serialization — variable size: Replica(4) + ClientId(4) + CommandId(4) + Command(var) + Timestamp(8)
+
+func (t *MForwardPropose) BinarySize() (nbytes int, sizeKnown bool) {
+	return 0, false
+}
+
+type MForwardProposeCache struct {
+	mu    sync.Mutex
+	cache []*MForwardPropose
+}
+
+func NewMForwardProposeCache() *MForwardProposeCache {
+	c := &MForwardProposeCache{}
+	c.cache = make([]*MForwardPropose, 0)
+	return c
+}
+
+func (p *MForwardProposeCache) Get() *MForwardPropose {
+	var t *MForwardPropose
+	p.mu.Lock()
+	if len(p.cache) > 0 {
+		t = p.cache[len(p.cache)-1]
+		p.cache = p.cache[0:(len(p.cache) - 1)]
+	}
+	p.mu.Unlock()
+	if t == nil {
+		t = &MForwardPropose{}
+	}
+	return t
+}
+
+func (p *MForwardProposeCache) Put(t *MForwardPropose) {
+	p.mu.Lock()
+	p.cache = append(p.cache, t)
+	p.mu.Unlock()
+}
+
+func (t *MForwardPropose) Marshal(wire io.Writer) {
+	var b [20]byte
+	var bs []byte
+	bs = b[:12]
+	tmp32 := t.Replica
+	bs[0] = byte(tmp32)
+	bs[1] = byte(tmp32 >> 8)
+	bs[2] = byte(tmp32 >> 16)
+	bs[3] = byte(tmp32 >> 24)
+	tmp32 = t.ClientId
+	bs[4] = byte(tmp32)
+	bs[5] = byte(tmp32 >> 8)
+	bs[6] = byte(tmp32 >> 16)
+	bs[7] = byte(tmp32 >> 24)
+	tmp32 = t.CommandId
+	bs[8] = byte(tmp32)
+	bs[9] = byte(tmp32 >> 8)
+	bs[10] = byte(tmp32 >> 16)
+	bs[11] = byte(tmp32 >> 24)
+	wire.Write(bs)
+	t.Command.Marshal(wire)
+	bs = b[:8]
+	tmp64 := t.Timestamp
+	bs[0] = byte(tmp64)
+	bs[1] = byte(tmp64 >> 8)
+	bs[2] = byte(tmp64 >> 16)
+	bs[3] = byte(tmp64 >> 24)
+	bs[4] = byte(tmp64 >> 32)
+	bs[5] = byte(tmp64 >> 40)
+	bs[6] = byte(tmp64 >> 48)
+	bs[7] = byte(tmp64 >> 56)
+	wire.Write(bs)
+}
+
+func (t *MForwardPropose) Unmarshal(wire io.Reader) error {
+	var b [20]byte
+	var bs []byte
+	bs = b[:12]
+	if _, err := io.ReadAtLeast(wire, bs, 12); err != nil {
+		return err
+	}
+	t.Replica = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
+	t.ClientId = int32((uint32(bs[4]) | (uint32(bs[5]) << 8) | (uint32(bs[6]) << 16) | (uint32(bs[7]) << 24)))
+	t.CommandId = int32((uint32(bs[8]) | (uint32(bs[9]) << 8) | (uint32(bs[10]) << 16) | (uint32(bs[11]) << 24)))
+	t.Command.Unmarshal(wire)
+	bs = b[:8]
+	if _, err := io.ReadAtLeast(wire, bs, 8); err != nil {
+		return err
+	}
+	t.Timestamp = int64((uint64(bs[0]) | (uint64(bs[1]) << 8) | (uint64(bs[2]) << 16) | (uint64(bs[3]) << 24) | (uint64(bs[4]) << 32) | (uint64(bs[5]) << 40) | (uint64(bs[6]) << 48) | (uint64(bs[7]) << 56)))
 	return nil
 }

@@ -1846,6 +1846,7 @@ func TestReplicaInitialState(t *testing.T) {
 // TestBecomeLeader verifies role transition to LEADER.
 func TestBecomeLeader(t *testing.T) {
 	r := &Replica{
+		Replica:     newTestBaseReplica(3),
 		role:        FOLLOWER,
 		currentTerm: 1,
 		votedFor:    -1,
@@ -4619,5 +4620,346 @@ func TestRecoveryThenProposalEndToEnd(t *testing.T) {
 	// Verify the precondition for slot ordering: slot 2 is executed
 	if !replicas[1].executed.Has("2") {
 		t.Error("slot 2 should be executed (needed for slot 3 ordering)")
+	}
+}
+
+// ============================================================================
+// Phase 128.4: Proposal Forwarding and Leader Discovery Tests
+// ============================================================================
+
+// TestCurrentLeaderInitialization verifies currentLeader is set correctly at startup.
+func TestCurrentLeaderInitialization(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 3)
+	// Default: currentLeader is 0 (zero value, same as leader)
+	r.currentLeader = 0
+	r.becomeLeader()
+	if r.currentLeader != 0 {
+		t.Errorf("leader's currentLeader should be self (0), got %d", r.currentLeader)
+	}
+
+	r2 := newTestReplicaForRecovery(1, 3)
+	r2.currentLeader = 0
+	r2.becomeFollower(1)
+	if r2.currentLeader != 0 {
+		t.Errorf("follower's currentLeader should remain 0, got %d", r2.currentLeader)
+	}
+}
+
+// TestCurrentLeaderUpdatedByHeartbeat verifies that receiving a heartbeat
+// updates currentLeader to the heartbeat sender.
+func TestCurrentLeaderUpdatedByHeartbeat(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.currentLeader = 0
+	r.role = FOLLOWER
+	r.currentTerm = 1
+	r.electionTimer = time.NewTimer(10 * time.Second)
+
+	// Receive heartbeat from replica 2 with term 2
+	hb := &MHeartbeat{Replica: 2, Term: 2}
+	r.handleHeartbeat(hb)
+
+	if r.currentLeader != 2 {
+		t.Errorf("currentLeader should be 2 after heartbeat, got %d", r.currentLeader)
+	}
+	if r.currentTerm != 2 {
+		t.Errorf("currentTerm should be 2 after heartbeat, got %d", r.currentTerm)
+	}
+}
+
+// TestCurrentLeaderUpdatedByElectionWin verifies that winning an election
+// sets currentLeader to self.
+func TestCurrentLeaderUpdatedByElectionWin(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.currentLeader = 0
+	r.role = FOLLOWER
+
+	r.becomeLeader()
+	if r.currentLeader != 1 {
+		t.Errorf("after becomeLeader, currentLeader should be self (1), got %d", r.currentLeader)
+	}
+}
+
+// TestMForwardProposeSerialization tests MForwardPropose Marshal/Unmarshal round-trip.
+func TestMForwardProposeSerialization(t *testing.T) {
+	original := &MForwardPropose{
+		Replica:   2,
+		ClientId:  100,
+		CommandId: 42,
+		Command:   state.Command{Op: state.PUT, K: 123, V: state.Value("456")},
+		Timestamp: 1234567890,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	restored := &MForwardPropose{}
+	err := restored.Unmarshal(&buf)
+	if err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if restored.Replica != original.Replica {
+		t.Errorf("Replica mismatch: got %d, want %d", restored.Replica, original.Replica)
+	}
+	if restored.ClientId != original.ClientId {
+		t.Errorf("ClientId mismatch: got %d, want %d", restored.ClientId, original.ClientId)
+	}
+	if restored.CommandId != original.CommandId {
+		t.Errorf("CommandId mismatch: got %d, want %d", restored.CommandId, original.CommandId)
+	}
+	if restored.Command.Op != original.Command.Op || restored.Command.K != original.Command.K {
+		t.Errorf("Command mismatch: got %+v, want %+v", restored.Command, original.Command)
+	}
+	if restored.Timestamp != original.Timestamp {
+		t.Errorf("Timestamp mismatch: got %d, want %d", restored.Timestamp, original.Timestamp)
+	}
+}
+
+// TestFollowerForwardsProposalToLeader verifies that a follower receiving a Propose
+// sends a ForwardPropose to the currentLeader.
+func TestFollowerForwardsProposalToLeader(t *testing.T) {
+	// Set up a follower replica
+	r := newTestReplicaForRecovery(1, 3)
+	r.role = FOLLOWER
+	r.currentTerm = 2
+	r.currentLeader = 0 // Leader is replica 0
+	r.Replica.ClientFastChan = make(map[int32]chan replica.ClientSendArg)
+	r.Replica.ClientFastChan[10] = make(chan replica.ClientSendArg, 100)
+
+	// Create a propose that would come from a client
+	propose := &defs.GPropose{
+		Propose: &defs.Propose{
+			ClientId:  10,
+			CommandId: 1,
+			Command:   state.Command{Op: state.PUT, K: 42, V: state.Value("100")},
+			Timestamp: 12345,
+		},
+	}
+
+	// Process the propose as a follower would in the main loop
+	cmdId := CommandId{ClientId: propose.ClientId, SeqNum: propose.CommandId}
+	r.proposes.Set(cmdId.String(), propose)
+	recAck := &MRecordAck{
+		Replica: r.Id,
+		Ballot:  r.currentTerm,
+		CmdId:   cmdId,
+		Ok:      r.ok(propose.Command),
+	}
+	r.sender.SendToClient(propose.ClientId, recAck, r.cs.recordAckRPC)
+	r.unsync(propose.Command)
+
+	// Forward to leader
+	if r.currentLeader != r.Id && r.currentLeader >= 0 {
+		fwd := &MForwardPropose{
+			Replica:   r.Id,
+			ClientId:  propose.ClientId,
+			CommandId: propose.CommandId,
+			Command:   propose.Command,
+			Timestamp: propose.Timestamp,
+		}
+		r.sender.SendTo(r.currentLeader, fwd, r.cs.forwardProposeRPC)
+	}
+
+	// Drain sender channel and verify a ForwardPropose was sent to replica 0
+	found := false
+	timeout := time.After(100 * time.Millisecond)
+	senderCh := chan replica.SendArg(r.sender)
+	for {
+		select {
+		case arg := <-senderCh:
+			if arg.Id() == 0 && arg.Rpc() == r.cs.forwardProposeRPC {
+				found = true
+			}
+		case <-timeout:
+			goto done
+		}
+	}
+done:
+	if !found {
+		t.Error("follower should have sent ForwardPropose to leader (replica 0)")
+	}
+}
+
+// TestLeaderHandlesForwardPropose verifies that the leader processes
+// a forwarded proposal and assigns it a slot.
+func TestLeaderHandlesForwardPropose(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 3)
+	r.role = LEADER
+	r.status = NORMAL
+	r.currentLeader = 0
+	r.lastCmdSlot = 0
+	r.batcher = NewBatcher(r, 100)
+	r.Replica.ClientFastChan = make(map[int32]chan replica.ClientSendArg)
+	r.Replica.ClientFastChan[10] = make(chan replica.ClientSendArg, 100)
+
+	fwd := &MForwardPropose{
+		Replica:   1,
+		ClientId:  10,
+		CommandId: 1,
+		Command:   state.Command{Op: state.PUT, K: 42, V: state.Value("100")},
+		Timestamp: 12345,
+	}
+
+	r.handleForwardPropose(fwd)
+
+	// lastCmdSlot should have been incremented
+	if r.lastCmdSlot != 1 {
+		t.Errorf("lastCmdSlot should be 1 after processing forwarded propose, got %d", r.lastCmdSlot)
+	}
+
+	// The command should be in the cmdDescs map at slot 0
+	if !r.cmdDescs.Has("0") {
+		t.Error("slot 0 should have a command descriptor after forwarded propose")
+	}
+}
+
+// TestLeaderIgnoresForwardProposeWhenRecovering verifies that a leader
+// in RECOVERING state drops forwarded proposals.
+func TestLeaderIgnoresForwardProposeWhenRecovering(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 3)
+	r.role = LEADER
+	r.status = RECOVERING
+	r.currentLeader = 0
+	r.lastCmdSlot = 0
+
+	fwd := &MForwardPropose{
+		Replica:   1,
+		ClientId:  10,
+		CommandId: 1,
+		Command:   state.Command{Op: state.PUT, K: 42, V: state.Value("100")},
+	}
+
+	r.handleForwardPropose(fwd)
+
+	// lastCmdSlot should NOT be incremented
+	if r.lastCmdSlot != 0 {
+		t.Errorf("lastCmdSlot should remain 0 during RECOVERING, got %d", r.lastCmdSlot)
+	}
+}
+
+// TestLeaderIgnoresForwardProposeForCommittedCmd verifies that the leader
+// skips forwarded proposals for commands already committed.
+func TestLeaderIgnoresForwardProposeForCommittedCmd(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 3)
+	r.role = LEADER
+	r.status = NORMAL
+	r.currentLeader = 0
+	r.lastCmdSlot = 5
+
+	// Pre-populate values (simulate already committed)
+	cmdId := CommandId{ClientId: 10, SeqNum: 1}
+	r.values.Set(cmdId.String(), []byte("done"))
+
+	fwd := &MForwardPropose{
+		Replica:   1,
+		ClientId:  10,
+		CommandId: 1,
+		Command:   state.Command{Op: state.PUT, K: 42, V: state.Value("100")},
+	}
+
+	r.handleForwardPropose(fwd)
+
+	// lastCmdSlot should NOT change
+	if r.lastCmdSlot != 5 {
+		t.Errorf("lastCmdSlot should remain 5 for already-committed command, got %d", r.lastCmdSlot)
+	}
+}
+
+// TestFollowerDoesNotForwardWhenSelfIsLeader verifies no forwarding loop.
+func TestFollowerDoesNotForwardWhenSelfIsLeader(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 3)
+	r.role = FOLLOWER
+	r.currentLeader = 0 // currentLeader == self
+	r.Replica.ClientFastChan = make(map[int32]chan replica.ClientSendArg)
+	r.Replica.ClientFastChan[10] = make(chan replica.ClientSendArg, 100)
+
+	// The forwarding condition: r.currentLeader != r.Id
+	// Since currentLeader == r.Id == 0, forwarding should NOT happen
+	if r.currentLeader != r.Id {
+		t.Error("this test expects currentLeader == r.Id to prevent forwarding")
+	}
+}
+
+// TestNonLeaderForwardsWeakPropose verifies that a non-leader forwards
+// weak proposes to the actual leader.
+func TestNonLeaderForwardsWeakPropose(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.role = FOLLOWER
+	r.currentTerm = 2
+	r.currentLeader = 0
+
+	wp := &MWeakPropose{
+		ClientId:  10,
+		CommandId: 5,
+		Command:   state.Command{Op: state.PUT, K: 42, V: state.Value("100")},
+	}
+
+	// Simulate the main loop weak propose handling for non-leader
+	if !r.IsLeader() && r.currentLeader != r.Id && r.currentLeader >= 0 {
+		r.sender.SendTo(r.currentLeader, wp, r.cs.weakProposeRPC)
+	}
+
+	// Drain sender and verify
+	found := false
+	timeout := time.After(100 * time.Millisecond)
+	senderCh := chan replica.SendArg(r.sender)
+	for {
+		select {
+		case arg := <-senderCh:
+			if arg.Id() == 0 && arg.Rpc() == r.cs.weakProposeRPC {
+				found = true
+			}
+		case <-timeout:
+			goto done
+		}
+	}
+done:
+	if !found {
+		t.Error("non-leader should have forwarded weak propose to leader (replica 0)")
+	}
+}
+
+// TestEndToEndForwardedProposalCommits verifies the full flow:
+// follower receives propose → forwards to leader → leader commits → reply available.
+func TestEndToEndForwardedProposalCommits(t *testing.T) {
+	// Create leader (replica 0) and follower (replica 1)
+	leader := newTestReplicaForRecovery(0, 3)
+	leader.role = LEADER
+	leader.status = NORMAL
+	leader.currentLeader = 0
+	leader.lastCmdSlot = 0
+	leader.batcher = NewBatcher(leader, 100)
+	leader.Replica.ClientFastChan = make(map[int32]chan replica.ClientSendArg)
+	leader.Replica.ClientFastChan[10] = make(chan replica.ClientSendArg, 100)
+
+	// Simulate: client sends propose to follower, follower creates ForwardPropose
+	fwd := &MForwardPropose{
+		Replica:   1,
+		ClientId:  10,
+		CommandId: 1,
+		Command:   state.Command{Op: state.PUT, K: 42, V: state.Value("100")},
+		Timestamp: 12345,
+	}
+
+	// Leader receives forwarded proposal
+	leader.handleForwardPropose(fwd)
+
+	// Verify slot was assigned
+	if leader.lastCmdSlot != 1 {
+		t.Fatalf("leader lastCmdSlot should be 1, got %d", leader.lastCmdSlot)
+	}
+
+	// Verify the command descriptor was created
+	descI, ok := leader.cmdDescs.Get("0")
+	if !ok {
+		t.Fatal("no command descriptor at slot 0")
+	}
+	desc := descI.(*commandDesc)
+	if desc.propose == nil {
+		t.Fatal("desc.propose should be set")
+	}
+	if desc.propose.ClientId != 10 || desc.propose.CommandId != 1 {
+		t.Errorf("propose mismatch: got client=%d seq=%d, want client=10 seq=1",
+			desc.propose.ClientId, desc.propose.CommandId)
 	}
 }

@@ -9381,10 +9381,12 @@ beyond what strong-strong conflicts already cause.
 
 **Remaining issues (throughput doesn't recover after kill):**
 - ✅ Election still unstable: 4 replicas each win 1 election before stabilizing → **Fixed in Phase 128.2**: widened timeout spread from 150-300ms to 300-500ms (matching Raft-HT), added 3s initial election delay to let leader establish heartbeats.
-- ⬜ Client failover incomplete: client rotates leader and sends to new leader, but doesn't receive replies. Possible causes:
-  - New leader's `delivered` map blocks new proposals (slot ordering waits for old delivered slots)
-  - Multiple leaders during election instability → commands processed by wrong leader → no reply — **mitigated by election stability fix**
-  - Client0 on dead replica machine (.101) can never recover
-  - ~~`MSync` timer may not work correctly after leader rotation~~ → **Fixed in Phase 128.2**: MSync now skips dead replicas
+- ✅ Client failover incomplete → **Fixed in Phase 128.4**: Root cause: client `rotateLeader()` picks next alive replica, not the actual elected leader. Proposal goes to follower, never reaches leader, never gets committed. MSync also fails since no replica has the value.
+  - Fix: (1) Track `currentLeader` on each replica (set from heartbeats + becomeLeader), (2) follower forwards proposals to actual leader via new `MForwardPropose` RPC, (3) weak proposes also forwarded. Leader processes forwarded proposals as normal proposals.
+  - Also exported `SendArg.Id()/Rpc()` accessors for testing.
+  - ~~New leader's `delivered` map blocks new proposals~~ → not the issue (lastCmdSlot = maxSlot+1 after recovery, no overlap)
+  - ~~Multiple leaders during election instability~~ → mitigated by election stability fix
+  - Client0 on dead replica machine (.101) can never recover — separate issue (machine-level)
+  - ~~`MSync` timer may not work correctly after leader rotation~~ → Fixed in Phase 128.2
 - ✅ Need to verify: does new leader correctly handle `ProposeChan` after recovery? → **Fixed in Phase 128.3**: Main loop now guards proposal processing with `r.status == NORMAL`. Without this, proposals during RECOVERING crash the leader (lastCmdSlot is stale → getCmdDescSeq hits delivered slot → Fatal). Also guarded weakProposeChan. After recovery, deliver() slot ordering works correctly because all recovered slots are in executed map.
 - ⬜ Consider: skip log recovery entirely — new leader starts fresh from current state (followers already have state). Only need to set `lastCmdSlot` correctly.

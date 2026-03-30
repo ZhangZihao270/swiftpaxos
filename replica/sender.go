@@ -27,6 +27,15 @@ type SendArg struct {
 	free     func()
 }
 
+// Id returns the target replica/client ID for this send argument (for testing).
+func (a SendArg) Id() int32 { return a.id }
+
+// Rpc returns the RPC code for this send argument (for testing).
+func (a SendArg) Rpc() uint8 { return a.rpc }
+
+// SendType returns the send type for this send argument (for testing).
+func (a SendArg) GetSendType() SendType { return a.sendType }
+
 type Sender chan SendArg
 
 func NewSender(r *Replica) Sender {
