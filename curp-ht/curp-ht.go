@@ -662,7 +662,7 @@ func (r *Replica) run() {
 			r.getCmdDesc(int, "deliver", -1)
 
 		case propose := <-r.ProposeChan:
-			if r.IsLeader() {
+			if r.IsLeader() && r.status == NORMAL {
 				dep := r.leaderUnsync(propose.Command, r.lastCmdSlot)
 				desc := r.getCmdDescSeq(r.lastCmdSlot, propose, dep, true) // why Seq?
 				if desc == nil {
@@ -670,6 +670,10 @@ func (r *Replica) run() {
 						propose.ClientId, propose.CommandId)
 				}
 				r.lastCmdSlot++
+			} else if r.IsLeader() {
+				// Leader is RECOVERING — drop proposal. Client will retry via MSync timer.
+				r.Printf("Dropping proposal during recovery: client=%d seq=%d\n",
+					propose.ClientId, propose.CommandId)
 			} else {
 				cmdId.ClientId = propose.ClientId
 				cmdId.SeqNum = propose.CommandId
@@ -745,11 +749,11 @@ func (r *Replica) run() {
 			// COMMIT phase will reply when slot ordering completes.
 
 		case m := <-r.cs.weakProposeChan:
-			if r.IsLeader() {
+			if r.IsLeader() && r.status == NORMAL {
 				weakPropose := m.(*MWeakPropose)
 				r.handleWeakPropose(weakPropose)
 			}
-			// Non-Leader ignores weak propose (should not receive it)
+			// Non-Leader or RECOVERING leader ignores weak propose
 
 		case m := <-r.cs.weakReadChan:
 			weakRead := m.(*MWeakRead)

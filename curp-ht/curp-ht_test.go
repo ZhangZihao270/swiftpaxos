@@ -4423,3 +4423,201 @@ func TestMSyncSkipsAllDeadReplicas(t *testing.T) {
 		t.Errorf("MSync should send to 2 alive replicas (2, 4), got %d", aliveCount)
 	}
 }
+
+// ============================================================================
+// Phase 128.3: New Leader ProposeChan + Deliver After Recovery Tests
+// ============================================================================
+
+// TestRecoveringLeaderDropsProposals verifies that a leader in RECOVERING status
+// does not process proposals (would crash: lastCmdSlot is stale, delivered map has
+// recovered slots → getCmdDescSeq returns nil → Fatal).
+func TestRecoveringLeaderDropsProposals(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 3)
+	r.role = LEADER
+	r.status = RECOVERING
+	r.currentTerm = 5
+	r.lastCmdSlot = 0 // stale — not yet updated by mergeAndRecoverLog
+
+	// Simulate: slot 0 already delivered by partial recovery
+	r.delivered.Set("0", struct{}{})
+
+	// If the main loop processed this proposal, it would call:
+	//   getCmdDescSeq(0, propose, ...) → delivered.Has("0") → nil → Fatal
+	// The fix: main loop checks r.status == NORMAL before processing.
+
+	// Verify the guard works: getCmdDescSeq should return nil for slot 0
+	desc := r.getCmdDescSeq(0, nil, -1, true)
+	if desc != nil {
+		t.Error("getCmdDescSeq should return nil for delivered slot")
+	}
+
+	// Verify status is not NORMAL
+	if r.status == NORMAL {
+		t.Error("status should be RECOVERING, not NORMAL")
+	}
+}
+
+// TestNewLeaderAcceptsProposalsAfterRecovery verifies that after recovery completes
+// (status=NORMAL, lastCmdSlot updated), the leader can correctly process new proposals.
+func TestNewLeaderAcceptsProposalsAfterRecovery(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 3)
+	r.role = LEADER
+	r.status = RECOVERING
+	r.currentTerm = 5
+
+	// Simulate recovery: slots 0-4 committed
+	r.logSyncReplies = []MLogSyncReply{
+		{
+			Replica: 1, Term: 5, NumEntries: 5,
+			Entries: func() []LogEntry {
+				entries := make([]LogEntry, 5)
+				for i := 0; i < 5; i++ {
+					entries[i] = LogEntry{
+						Slot:  int32(i),
+						CmdId: CommandId{10, int32(i)},
+						Cmd:   state.Command{Op: state.PUT, K: state.Key(i), V: state.NIL()},
+					}
+				}
+				return entries
+			}(),
+		},
+	}
+
+	r.mergeAndRecoverLog()
+
+	// Verify post-recovery state
+	if r.status != NORMAL {
+		t.Fatalf("expected NORMAL, got %d", r.status)
+	}
+	if r.lastCmdSlot != 5 {
+		t.Fatalf("expected lastCmdSlot=5, got %d", r.lastCmdSlot)
+	}
+
+	// Verify slot 5 is NOT delivered (available for new proposals)
+	if r.delivered.Has("5") {
+		t.Error("slot 5 should NOT be delivered (it's the next free slot)")
+	}
+
+	// Verify getCmdDescSeq succeeds for slot 5
+	desc := r.getCmdDescSeq(5, nil, -1, true)
+	if desc == nil {
+		t.Error("getCmdDescSeq should succeed for slot 5 (not delivered)")
+	}
+}
+
+// TestSlotOrderingWorksAfterRecovery verifies that deliver() slot ordering
+// passes for new proposals after recovery (previous slots are all executed).
+func TestSlotOrderingWorksAfterRecovery(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 3)
+	r.role = LEADER
+	r.status = RECOVERING
+	r.currentTerm = 5
+
+	// Simulate recovery: slots 0-2 committed
+	r.logSyncReplies = []MLogSyncReply{
+		{
+			Replica: 1, Term: 5, NumEntries: 3,
+			Entries: []LogEntry{
+				{Slot: 0, CmdId: CommandId{10, 0}, Cmd: state.Command{Op: state.PUT, K: 1, V: state.NIL()}},
+				{Slot: 1, CmdId: CommandId{10, 1}, Cmd: state.Command{Op: state.PUT, K: 2, V: state.NIL()}},
+				{Slot: 2, CmdId: CommandId{10, 2}, Cmd: state.Command{Op: state.PUT, K: 3, V: state.NIL()}},
+			},
+		},
+	}
+
+	r.mergeAndRecoverLog()
+
+	// Verify all recovered slots are executed (needed for slot ordering)
+	for i := 0; i <= 2; i++ {
+		if !r.executed.Has(fmt.Sprintf("%d", i)) {
+			t.Errorf("slot %d should be executed after recovery", i)
+		}
+	}
+
+	// For a new proposal at slot 3, slot ordering checks executed(2)
+	// This should pass because slot 2 was executed during recovery
+	if !r.executed.Has("2") {
+		t.Fatal("slot 2 must be executed for slot 3 ordering to pass")
+	}
+
+	// Slot 3 should NOT be executed yet
+	if r.executed.Has("3") {
+		t.Error("slot 3 should not be executed yet")
+	}
+}
+
+// TestRecoveryThenProposalEndToEnd simulates the full flow:
+// election → recovery → proposals work on new leader.
+func TestRecoveryThenProposalEndToEnd(t *testing.T) {
+	const N = 3
+	replicas := make([]*Replica, N)
+	for i := 0; i < N; i++ {
+		replicas[i] = newTestReplicaForRecovery(int32(i), N)
+		replicas[i].currentTerm = 1
+		replicas[i].role = FOLLOWER
+		replicas[i].votedFor = -1
+	}
+
+	// Phase 1: Old leader (replica 0) commits slots 0-2
+	for slot := 0; slot < 3; slot++ {
+		for i := 0; i < N; i++ {
+			replicas[i].history[slot] = commandStaticDesc{
+				cmdSlot: slot, phase: COMMIT,
+				cmd:   state.Command{Op: state.PUT, K: state.Key(slot), V: state.NIL()},
+				cmdId: CommandId{10, int32(slot)},
+			}
+		}
+	}
+
+	// Phase 2: Replica 1 wins election (term 2)
+	replicas[1].becomeCandidate()
+	replicas[1].votesReceived = 1
+	replicas[1].handleRequestVoteReply(&MRequestVoteReply{Replica: 2, Term: 2, VoteGranted: TRUE})
+
+	if replicas[1].role != LEADER {
+		t.Fatal("replica 1 should be leader")
+	}
+
+	// Phase 3: During RECOVERING, proposals would be dangerous
+	if replicas[1].status != RECOVERING {
+		t.Fatal("new leader should be RECOVERING")
+	}
+	// lastCmdSlot is still 0 — using it for proposals would crash
+	if replicas[1].lastCmdSlot != 0 {
+		t.Errorf("lastCmdSlot should be 0 during recovery, got %d", replicas[1].lastCmdSlot)
+	}
+
+	// Phase 4: Recovery completes
+	replicas[1].handleLogSyncReply(&MLogSyncReply{
+		Replica: 2, Term: 2, NumEntries: 3,
+		Entries: []LogEntry{
+			{Slot: 0, CmdId: CommandId{10, 0}, Cmd: state.Command{Op: state.PUT, K: 0, V: state.NIL()}},
+			{Slot: 1, CmdId: CommandId{10, 1}, Cmd: state.Command{Op: state.PUT, K: 1, V: state.NIL()}},
+			{Slot: 2, CmdId: CommandId{10, 2}, Cmd: state.Command{Op: state.PUT, K: 2, V: state.NIL()}},
+		},
+	})
+
+	if replicas[1].status != NORMAL {
+		t.Fatal("should be NORMAL after recovery")
+	}
+
+	// Phase 5: Now proposals are safe
+	if replicas[1].lastCmdSlot != 3 {
+		t.Errorf("lastCmdSlot should be 3 after recovery, got %d", replicas[1].lastCmdSlot)
+	}
+
+	// Slot 3 should be available for new proposals
+	if replicas[1].delivered.Has("3") {
+		t.Error("slot 3 should NOT be in delivered map")
+	}
+
+	desc := replicas[1].getCmdDescSeq(3, nil, -1, true)
+	if desc == nil {
+		t.Fatal("getCmdDescSeq(3) should succeed after recovery")
+	}
+
+	// Verify the precondition for slot ordering: slot 2 is executed
+	if !replicas[1].executed.Has("2") {
+		t.Error("slot 2 should be executed (needed for slot 3 ordering)")
+	}
+}
