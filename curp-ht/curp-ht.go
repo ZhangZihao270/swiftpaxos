@@ -288,16 +288,26 @@ func (r *Replica) IsLeader() bool {
 
 // Election timeout constants
 const (
-	ElectionTimeoutMin    = 300 * time.Millisecond
-	ElectionTimeoutMax    = 500 * time.Millisecond
+	ElectionTimeoutMin    = 500 * time.Millisecond
+	ElectionTimeoutMax    = 1500 * time.Millisecond
 	HeartbeatInterval     = 50 * time.Millisecond
 	InitialElectionDelay  = 3 * time.Second // Long initial delay to let leader establish heartbeats
 )
 
 // randomElectionTimeout returns a random duration between ElectionTimeoutMin and ElectionTimeoutMax.
 func randomElectionTimeout() time.Duration {
+	// Use large random spread to avoid split vote when all followers lose heartbeat simultaneously
 	spread := ElectionTimeoutMax - ElectionTimeoutMin
 	return ElectionTimeoutMin + time.Duration(rand.Int63n(int64(spread)))
+}
+
+// randomBackoffTimeout returns a longer random timeout for retrying after a failed election.
+// Uses ID-seeded jitter: each replica gets a different base offset to break symmetry.
+func (r *Replica) randomBackoffTimeout() time.Duration {
+	// Base offset proportional to replica ID (0-400ms spread across 5 replicas)
+	idOffset := time.Duration(r.Id) * 100 * time.Millisecond
+	spread := ElectionTimeoutMax - ElectionTimeoutMin
+	return ElectionTimeoutMin + idOffset + time.Duration(rand.Int63n(int64(spread)))
 }
 
 // resetElectionTimer resets the election timer with a new random timeout.
@@ -353,8 +363,10 @@ func (r *Replica) startElection() {
 	}
 	r.sender.SendToAllExecpt(r.Id, msg, r.cs.requestVoteRPC)
 
-	// Reset election timer in case we don't win
-	r.resetElectionTimer()
+	// Use backoff timeout with ID-based jitter to break symmetry
+	if r.electionTimer != nil {
+		r.electionTimer.Reset(r.randomBackoffTimeout())
+	}
 }
 
 // handleRequestVote processes a vote request from a candidate.
