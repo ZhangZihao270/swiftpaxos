@@ -9449,7 +9449,7 @@ grep "TPUT" results/exp2.3-test/client*.log | tail -20
 - ✅ New leader accepts proposals after recovery (status=NORMAL, lastCmdSlot correct)
 - ✅ Client pipeline flush works (128.7) — flush triggered, pipeline unblocked
 - ✅ Sender head-of-line blocking fixed (128.8) — fire-and-forget per-peer sends, no more wg.Wait()
-- ⬜ **Throughput still 0 after recovery** (see Phase 128.9 debug plan below)
+- ✅ **Throughput still 0 after recovery** — fixed in Phase 128.9: buffer proposals during RECOVERING, replay after recovery
 
 ### Phase 128.9: Fix — Proposals Dropped During RECOVERING State ✅
 
