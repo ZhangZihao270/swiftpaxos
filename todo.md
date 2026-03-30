@@ -9450,7 +9450,41 @@ grep "TPUT" results/exp2.3-test/client*.log | tail -20
 - ✅ Client pipeline flush works (128.7) — flush triggered, pipeline unblocked
 - ✅ Sender head-of-line blocking fixed (128.8) — fire-and-forget per-peer sends, no more wg.Wait()
 - ✅ Proposals buffered during RECOVERING (128.9) — buffer + replay after recovery
-- ⬜ **Throughput still 0 in lab test**: debug shows forwarding works during normal operation (97K forwards), heartbeat arrives at followers, election + slot sync succeeds. But after kill, followers forward to **leader 0 (dead)** because `currentLeader` hasn't been updated yet (heartbeat from new leader hasn't arrived). Then `sendProposeSafe` may block on dead writer before `deadReplicas` is set. Race condition between `handleReaderDead` (sets deadReplicas) and HybridLoop threads (call sendProposeSafe). Need: (a) set write deadline on peer connections, or (b) nil out `writers[deadId]` in `handleReaderDead`.
+- ⬜ **Throughput still 0 in lab test** (see Phase 128.10 below)
+
+### Phase 128.10: Client sendProposeSafe Blocks on Dead Writer
+
+**Debug findings (2026-03-30 22:37)**:
+- Server side fully works: election 1-2s, slot sync <1s, heartbeat sent+received, forwarding works (97K during normal run)
+- After kill, followers initially forward to **leader 0 (dead)** — `currentLeader` not yet updated (heartbeat from new leader takes ~1s to arrive)
+- Client `sendProposeSafe` iterates replicas 0-4, checks `deadReplicas[rep]`, skips dead ones
+- **BUT**: there's a race — 16 HybridLoop threads call `sendProposeSafe` concurrently. Some threads enter the function BEFORE `handleReaderDead` sets `deadReplicas[0]=true`. These threads call `writerMu[0].Lock()` → `w.Flush()` on dead connection → **blocks for TCP timeout (15-60s)**
+- Since `writerMu[0]` is a regular mutex, once one thread blocks on Flush, all other threads block on `writerMu[0].Lock()` → all 16 threads deadlocked on writer 0
+
+**Two independent problems**:
+1. `sendProposeSafe` blocks on dead writer (client-side head-of-line blocking)
+2. Followers forward to dead leader 0 before heartbeat updates `currentLeader`
+
+#### ⬜ Step 1: Nil out dead writer in handleReaderDead
+- In `curp-ht/client.go` `handleReaderDead()`: after setting `deadReplicas[deadReplica]=true`, also nil out the base client writer: `c.SetWriter(deadReplica, nil)`
+- Need to add `SetWriter` method to base `client.Client` if not exists
+- This makes `sendProposeSafe`'s `GetWriter(rep)` return nil → skip immediately, no blocking
+- Also prevents `writerMu[0]` deadlock since no thread tries to write
+
+#### ⬜ Step 2: Add write timeout as safety net
+- In `sendProposeSafe`: wrap `w.Flush()` with a short timeout (e.g., 100ms)
+- Or set `SetWriteDeadline` on the underlying TCP connection when connecting to replicas
+- This prevents any future blocking on slow/dead connections even if `deadReplicas` isn't set yet
+
+#### ⬜ Step 3: Verify follower forwarding after heartbeat arrives
+- After Step 1 fix, followers should receive heartbeat from new leader within 1s
+- `currentLeader` updates to new leader → subsequent proposals forwarded correctly
+- May need a brief gap (1-2s) where proposals are lost (forwarded to dead leader 0 before heartbeat) — acceptable, client MSync retries
+
+#### ⬜ Step 4: Test on lab
+- Build, deploy, run kill-leader experiment (same as Phase 128.9 Step 5)
+- Success: TPUT drops for 2-3s, then recovers to >0 from client1+client2
+- Check: `grep "Forwarding proposal to leader 3" replica*.log` should appear after heartbeat
 
 ### Phase 128.9: Fix — Proposals Dropped During RECOVERING State ✅
 
