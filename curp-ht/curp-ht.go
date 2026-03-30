@@ -633,14 +633,23 @@ func (r *Replica) mergeAndRecoverLog() {
 		}
 	}
 
-	// Set lastCmdSlot to max committed slot + 1
-	if maxSlot >= 0 {
-		r.lastCmdSlot = int(maxSlot) + 1
+	// Set lastCmdSlot to max committed slot + 1.
+	// Use max(maxSlot, pre-recovery lastCommitted) to account for entries
+	// that this replica committed but peers didn't report back.
+	// Only use lastCommitted if it exceeds maxSlot (safety net for entries
+	// not yet in any peer's history reply).
+	prevLastCommitted := r.lastCommitted
+	effectiveMax := maxSlot
+	if maxSlot >= 0 && r.lastCommitted > effectiveMax {
+		effectiveMax = r.lastCommitted
 	}
-	r.lastCommitted = maxSlot
+	if effectiveMax >= 0 {
+		r.lastCmdSlot = int(effectiveMax) + 1
+	}
+	r.lastCommitted = effectiveMax
 
-	r.Printf("Log recovery complete: %d entries recovered, lastCmdSlot=%d\n",
-		len(slotEntries), r.lastCmdSlot)
+	r.Printf("Log recovery complete: %d entries recovered, lastCmdSlot=%d (maxSlot=%d, prevLastCommitted=%d)\n",
+		len(slotEntries), r.lastCmdSlot, maxSlot, prevLastCommitted)
 
 	// Clear recovery state
 	r.logSyncReplies = nil
@@ -889,6 +898,7 @@ func (r *Replica) handlePropose(msg *defs.GPropose, desc *commandDesc, slot int,
 	acc := &MAccept{
 		Replica: r.Id,
 		Ballot:  r.currentTerm,
+		Cmd:     desc.cmd, // Include command so followers can populate history for recovery
 		CmdId:   desc.cmdId,
 		CmdSlot: slot,
 	}
@@ -1015,6 +1025,18 @@ func (r *Replica) handleCommit(msg *MCommit, desc *commandDesc) {
 		if int32(desc.cmdSlot) > r.lastCommitted {
 			r.lastCommitted = int32(desc.cmdSlot)
 		}
+
+		// Write to history immediately for recovery (handleLogSync scans history[]).
+		// This must happen BEFORE deliver() and slot ordering, because slot ordering
+		// can block indefinitely if a prior slot's propose hasn't arrived yet.
+		// Without this, handleLogSync finds almost nothing on followers.
+		if desc.cmdSlot >= 0 && desc.cmdSlot < HISTORY_SIZE {
+			r.history[desc.cmdSlot].cmdSlot = desc.cmdSlot
+			r.history[desc.cmdSlot].phase = COMMIT
+			r.history[desc.cmdSlot].cmd = desc.cmd
+			r.history[desc.cmdSlot].cmdId = desc.cmdId
+		}
+
 		if r.IsLeader() {
 			r.committed.Set(strconv.Itoa(desc.cmdSlot), struct{}{})
 			r.notifyCommit(desc.cmdSlot) // Notify waiters that slot is committed

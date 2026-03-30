@@ -9402,23 +9402,21 @@ beyond what strong-strong conflicts already cause.
 
 **Remaining issues (throughput still 0 after recovery):**
 
-#### ⬜ Issue 1: Log recovery only recovers 316 entries (should be ~300K)
-- `handleLogSync` scans `history[]` up to `lastCommitted`, but follower's `history[slot].phase` may not be set to `COMMIT`
-- Follower processes MCommit in `deliver()` which sets `desc.phase = COMMIT`, but this is on the `commandDesc` (in-memory descriptor), not on `history[]`
-- Need to verify: does follower write `history[slot].phase = COMMIT` anywhere? If not, `handleLogSync` finds nothing in history.
-- **Fix direction**: either (a) follower writes to `history[]` when handling MCommit, or (b) `handleLogSync` scans `executed` map instead of `history[]`
+#### ✅ Issue 1: Log recovery only recovers 316 entries (should be ~300K)
+- **Root cause**: `history[]` was only written at the END of `deliver()`, after slot ordering. But slot ordering blocks when any prior slot's Propose hasn't arrived (chain breaks at ~slot 316). Also, strong-path `MAccept` didn't carry `Cmd`, so followers only got the command from client Propose (race condition).
+- **Fix** (Phase 128.5):
+  1. Include `Cmd` in strong-path `MAccept` (was already present in weak path)
+  2. Write `history[]` in `handleCommit()` immediately — BEFORE deliver/slot ordering
+  3. This ensures `handleLogSync` finds all committed entries regardless of slot ordering state
 
-#### ⬜ Issue 2: Client sends to new leader but gets no reply
-- `sendProposeSafe()` broadcasts to all alive replicas, so new leader should receive proposals
-- New leader completes recovery (status=NORMAL), but may not process proposals correctly
-- Possible: `lastCmdSlot=316` after recovery, but actual executed slots are ~300K → new proposals get slot 316 which conflicts with already-executed slots → deliver() blocks forever waiting for slot 315 to be executed
-- **Fix direction**: after recovery, `lastCmdSlot` must be set to `max(recovered slots, already executed slots) + 1`
+#### ✅ Issue 2: Client sends to new leader but gets no reply
+- **Root cause**: `lastCmdSlot` after recovery was based only on recovered entries. If follower history was incomplete (Issue 1), `lastCmdSlot` was too low → new proposals overlapped already-executed slots → deliver blocks forever.
+- **Fix** (Phase 128.5): Use `max(maxSlot from recovery, pre-recovery lastCommitted)` as `lastCmdSlot` base. With Issue 1 fixed, `maxSlot` is now correct, and `lastCommitted` serves as safety net.
+- Also fixed in Phase 128.4: proposal forwarding from follower to actual leader.
 
-#### ⬜ Issue 3: Client0 on dead machine (.101) permanently lost
-- Client0 is co-located with killed replica0, cannot recover
-- This reduces throughput by 1/3 even if recovery succeeds
-- Not a bug — expected behavior when client machine dies
-- For experiments: use a config where clients are NOT co-located with the killed replica, or only measure client1+client2 throughput
+#### ✅ Issue 3: Client0 on dead machine (.101) permanently lost
+- Not a bug — expected behavior when client machine dies. Client0 is co-located with killed replica0.
+- For experiments: use a config where clients are NOT co-located with the killed replica, or only measure client1+client2 throughput.
 
 ### How to reproduce and verify
 

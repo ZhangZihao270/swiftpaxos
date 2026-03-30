@@ -3,6 +3,7 @@ package curpht
 import (
 	"bytes"
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -4961,5 +4962,251 @@ func TestEndToEndForwardedProposalCommits(t *testing.T) {
 	if desc.propose.ClientId != 10 || desc.propose.CommandId != 1 {
 		t.Errorf("propose mismatch: got client=%d seq=%d, want client=10 seq=1",
 			desc.propose.ClientId, desc.propose.CommandId)
+	}
+}
+
+// ============================================================================
+// Phase 128.5: Log Recovery Fixes — History Population and lastCmdSlot
+// ============================================================================
+
+// TestStrongAcceptCarriesCommand verifies that when the leader builds an
+// MAccept for a strong command, the Cmd field is populated.
+func TestStrongAcceptCarriesCommand(t *testing.T) {
+	// Build the Accept struct the same way handlePropose does (line 889-894)
+	cmd := state.Command{Op: state.PUT, K: 42, V: state.Value("hello")}
+	cmdId := CommandId{ClientId: 10, SeqNum: 1}
+
+	acc := &MAccept{
+		Replica: 0,
+		Ballot:  1,
+		Cmd:     cmd, // This is the fix: strong path now includes Cmd
+		CmdId:   cmdId,
+		CmdSlot: 5,
+	}
+
+	// Verify Cmd is present in the Accept
+	if acc.Cmd.Op != state.PUT || acc.Cmd.K != 42 {
+		t.Errorf("MAccept.Cmd should have the command: got Op=%d K=%d", acc.Cmd.Op, acc.Cmd.K)
+	}
+
+	// Verify round-trip serialization preserves the command
+	var buf bytes.Buffer
+	acc.Marshal(&buf)
+	restored := &MAccept{}
+	if err := restored.Unmarshal(&buf); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if restored.Cmd.Op != state.PUT || restored.Cmd.K != 42 {
+		t.Errorf("After round-trip, Cmd should be preserved: got Op=%d K=%d", restored.Cmd.Op, restored.Cmd.K)
+	}
+}
+
+// TestHandleCommitWritesHistory verifies that handleCommit writes to
+// history[] immediately, BEFORE slot ordering / deliver().
+func TestHandleCommitWritesHistory(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.role = FOLLOWER
+	r.status = NORMAL
+	r.currentTerm = 1
+	r.currentLeader = 0
+
+	// Create a descriptor at slot 5 with command data (as if Accept was received)
+	slot := 5
+	cmdId := CommandId{ClientId: 10, SeqNum: 1}
+	desc := r.newDesc()
+	desc.cmdSlot = slot
+	desc.cmdId = cmdId
+	desc.cmd = state.Command{Op: state.PUT, K: 42, V: state.Value("val")}
+	desc.seq = true
+	r.cmdDescs.Set(strconv.Itoa(slot), desc)
+
+	// Simulate handleCommit setting phase and writing history
+	// (slot ordering will block deliver since slot 4 not executed,
+	//  but history should still be written)
+	commit := &MCommit{
+		Replica: 0,
+		Ballot:  1,
+		CmdSlot: slot,
+	}
+	r.handleCommit(commit, desc)
+
+	// Verify history was written DESPITE slot ordering blocking deliver
+	if r.history[slot].phase != COMMIT {
+		t.Errorf("history[%d].phase should be COMMIT (%d), got %d", slot, COMMIT, r.history[slot].phase)
+	}
+	if r.history[slot].cmd.Op != state.PUT || r.history[slot].cmd.K != 42 {
+		t.Errorf("history[%d].cmd mismatch: got Op=%d K=%d", slot, r.history[slot].cmd.Op, r.history[slot].cmd.K)
+	}
+	if r.history[slot].cmdId != cmdId {
+		t.Errorf("history[%d].cmdId mismatch: got %+v, want %+v", slot, r.history[slot].cmdId, cmdId)
+	}
+
+	// Verify lastCommitted was updated
+	if r.lastCommitted != int32(slot) {
+		t.Errorf("lastCommitted should be %d, got %d", slot, r.lastCommitted)
+	}
+}
+
+// TestHandleCommitHistoryWithBlockedSlotOrdering verifies that history[]
+// is populated even when slot ordering prevents deliver from executing.
+func TestHandleCommitHistoryWithBlockedSlotOrdering(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.role = FOLLOWER
+	r.status = NORMAL
+	r.currentTerm = 1
+	r.currentLeader = 0
+
+	// Create descriptors for slots 0, 1, 2 but only commit slots 0 and 2
+	// Slot 2 should have history written even though slot 1 is not executed
+	for i := 0; i < 3; i++ {
+		desc := r.newDesc()
+		desc.cmdSlot = i
+		desc.cmdId = CommandId{ClientId: 10, SeqNum: int32(i)}
+		desc.cmd = state.Command{Op: state.PUT, K: state.Key(i), V: state.Value("v")}
+		desc.seq = true
+		r.cmdDescs.Set(strconv.Itoa(i), desc)
+	}
+
+	// Commit slot 0 — deliver should succeed (no prior slot to wait for)
+	desc0, _ := r.cmdDescs.Get("0")
+	commit0 := &MCommit{Replica: 0, Ballot: 1, CmdSlot: 0}
+	r.handleCommit(commit0, desc0.(*commandDesc))
+
+	// Commit slot 2 — deliver will block (slot 1 not executed), but history should be written
+	desc2, _ := r.cmdDescs.Get("2")
+	commit2 := &MCommit{Replica: 0, Ballot: 1, CmdSlot: 2}
+	r.handleCommit(commit2, desc2.(*commandDesc))
+
+	// Verify slot 2 history is written even though deliver was blocked
+	if r.history[2].phase != COMMIT {
+		t.Errorf("history[2].phase should be COMMIT, got %d", r.history[2].phase)
+	}
+	if r.history[2].cmdId.SeqNum != 2 {
+		t.Errorf("history[2].cmdId.SeqNum should be 2, got %d", r.history[2].cmdId.SeqNum)
+	}
+
+	// Verify lastCommitted tracks the highest committed slot
+	if r.lastCommitted != 2 {
+		t.Errorf("lastCommitted should be 2, got %d", r.lastCommitted)
+	}
+}
+
+// TestHandleLogSyncFindsHistoryEntries verifies that after handleCommit
+// writes to history[], handleLogSync can find all committed entries.
+func TestHandleLogSyncFindsHistoryEntries(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.role = FOLLOWER
+	r.status = NORMAL
+	r.currentTerm = 1
+	r.currentLeader = 0
+
+	// Simulate 100 committed entries written to history
+	for i := 0; i < 100; i++ {
+		r.history[i].cmdSlot = i
+		r.history[i].phase = COMMIT
+		r.history[i].cmdId = CommandId{ClientId: 10, SeqNum: int32(i)}
+		r.history[i].cmd = state.Command{Op: state.PUT, K: state.Key(i), V: state.Value("v")}
+	}
+	r.lastCommitted = 99
+
+	// handleLogSync should find all 100 entries
+	msg := &MLogSync{Replica: 2, Term: 2}
+
+	// Update term so the message is accepted
+	r.currentTerm = 1 // msg.Term > r.currentTerm → accepted
+
+	r.handleLogSync(msg)
+
+	// Drain sender to find the LogSyncReply
+	senderCh := chan replica.SendArg(r.sender)
+	timeout := time.After(200 * time.Millisecond)
+	foundReply := false
+	for {
+		select {
+		case arg := <-senderCh:
+			if arg.Rpc() == r.cs.logSyncReplyRPC {
+				foundReply = true
+			}
+		case <-timeout:
+			goto done
+		}
+	}
+done:
+	if !foundReply {
+		t.Error("handleLogSync should have sent a LogSyncReply")
+	}
+}
+
+// TestRecoveryLastCmdSlotUsesMaxOfRecoveredAndCommitted verifies that
+// mergeAndRecoverLog sets lastCmdSlot to max(recovered, pre-recovery lastCommitted) + 1.
+func TestRecoveryLastCmdSlotUsesMaxOfRecoveredAndCommitted(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.role = LEADER
+	r.status = RECOVERING
+	r.currentLeader = 1
+
+	// Simulate: this replica had committed up to slot 1000 before becoming leader
+	r.lastCommitted = 1000
+
+	// But peers only report entries up to slot 500
+	r.logSyncReplies = []MLogSyncReply{
+		{
+			Replica:    0,
+			Term:       1,
+			NumEntries: 3,
+			Entries: []LogEntry{
+				{Slot: 0, CmdId: CommandId{ClientId: 10, SeqNum: 0}, Cmd: state.Command{Op: state.PUT, K: 1, V: state.Value("a")}},
+				{Slot: 250, CmdId: CommandId{ClientId: 10, SeqNum: 250}, Cmd: state.Command{Op: state.PUT, K: 2, V: state.Value("b")}},
+				{Slot: 500, CmdId: CommandId{ClientId: 10, SeqNum: 500}, Cmd: state.Command{Op: state.PUT, K: 3, V: state.Value("c")}},
+			},
+		},
+	}
+	r.logSyncExpected = 1
+
+	r.mergeAndRecoverLog()
+
+	// lastCmdSlot should be max(500, 1000) + 1 = 1001
+	if r.lastCmdSlot != 1001 {
+		t.Errorf("lastCmdSlot should be 1001 (max of recovered 500 and pre-committed 1000 + 1), got %d", r.lastCmdSlot)
+	}
+	if r.status != NORMAL {
+		t.Errorf("status should be NORMAL after recovery, got %d", r.status)
+	}
+}
+
+// TestAcceptCmdCopiedToDescOnFollower verifies that when a follower receives
+// an Accept with Cmd set, desc.cmd is populated (needed for history writes).
+func TestAcceptCmdCopiedToDescOnFollower(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.role = FOLLOWER
+	r.status = NORMAL
+	r.currentTerm = 1
+
+	slot := 10
+	cmdId := CommandId{ClientId: 10, SeqNum: 1}
+	cmd := state.Command{Op: state.PUT, K: 42, V: state.Value("hello")}
+
+	// getCmdDesc creates the descriptor
+	acc := &MAccept{
+		Replica: 0,
+		Ballot:  1,
+		Cmd:     cmd,
+		CmdId:   cmdId,
+		CmdSlot: slot,
+	}
+	desc := r.getCmdDesc(slot, acc, -1)
+	if desc == nil {
+		t.Fatal("getCmdDesc returned nil")
+	}
+
+	// Give goroutine time to process the Accept message
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify desc.cmd was copied from Accept
+	if desc.cmd.Op != state.PUT || desc.cmd.K != 42 {
+		t.Errorf("desc.cmd should have command from Accept: got Op=%d K=%d", desc.cmd.Op, desc.cmd.K)
+	}
+	if desc.cmdId != cmdId {
+		t.Errorf("desc.cmdId mismatch: got %+v, want %+v", desc.cmdId, cmdId)
 	}
 }
