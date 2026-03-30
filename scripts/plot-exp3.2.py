@@ -60,12 +60,12 @@ def plot_latency(ax, rows):
                 label=f'{label} (p99)', zorder=2)
 
     ax.set_xlabel('Causal Operation Ratio (%)')
-    ax.set_ylabel('Linear Latency\n(ms)')
+    ax.set_ylabel('Latency (ms)')
     
     ax.set_xticks([0, 25, 50, 75, 99])
-    ax.legend(loc='upper left', fontsize=10, ncol=1)
+    ax.legend(loc='upper left', ncol=2, fontsize=12)
     ax.set_xlim(-5, 105)
-    ax.set_ylim(top=120)
+    ax.set_ylim(top=150)
 
 
 def plot_throughput(ax, rows):
@@ -82,9 +82,9 @@ def plot_throughput(ax, rows):
 
     ax.set_xlabel('Causal Operation Ratio (%)')
     ax.set_ylabel('Throughput\n(Kops/sec)')
-    
+
     ax.set_xticks([0, 25, 50, 75, 99])
-    ax.legend(loc='upper left', fontsize=10)
+    ax.legend(loc='upper left')
     ax.set_xlim(-5, 105)
     ax.set_ylim(bottom=0)
 
@@ -101,13 +101,13 @@ def main():
     plot_throughput(ax1, rows)
     plot_latency(ax2, rows)
 
-    ax1.text(0.5, -0.40, '(a)', transform=ax1.transAxes,
-             fontsize=14, fontweight='bold', ha='center')
-    ax2.text(0.5, -0.40, '(b)', transform=ax2.transAxes,
-             fontsize=14, fontweight='bold', ha='center')
+    ax1.text(0.5, -0.48, '(a) Throughput vs Causal Ratio', transform=ax1.transAxes,
+             fontsize=16, fontweight='bold', ha='center')
+    ax2.text(0.5, -0.48, '(b) Linear Latency vs Causal Ratio', transform=ax2.transAxes,
+             fontsize=16, fontweight='bold', ha='center')
 
-    plt.tight_layout(w_pad=3)
-    plt.subplots_adjust(bottom=0.28)
+    plt.tight_layout(w_pad=1.5)
+    plt.subplots_adjust(bottom=0.32)
     save_figure(fig, out_dir, 'exp3.2-t-property')
 
 

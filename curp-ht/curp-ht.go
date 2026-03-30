@@ -329,7 +329,7 @@ func (r *Replica) sendHeartbeat() {
 		Replica: r.Id,
 		Term:    r.currentTerm,
 	}
-	r.sender.SendToAll(hb, r.cs.heartbeatRPC)
+	r.sender.SendToAllExecpt(r.Id, hb, r.cs.heartbeatRPC)
 }
 
 // startElection begins a new leader election.
@@ -344,7 +344,7 @@ func (r *Replica) startElection() {
 		Term:             r.currentTerm,
 		LastCommittedSlot: r.lastCommitted,
 	}
-	r.sender.SendToAll(msg, r.cs.requestVoteRPC)
+	r.sender.SendToAllExecpt(r.Id, msg, r.cs.requestVoteRPC)
 
 	// Reset election timer in case we don't win
 	r.resetElectionTimer()
@@ -364,6 +364,12 @@ func (r *Replica) handleRequestVote(msg *MRequestVote) {
 		return
 	}
 
+	// Don't step down during log recovery — need to finish before yielding leadership
+	if r.role == LEADER && r.status == RECOVERING {
+		r.sender.SendTo(msg.Replica, reply, r.cs.requestVoteReplyRPC)
+		return
+	}
+
 	if msg.Term > r.currentTerm {
 		r.becomeFollower(msg.Term)
 		r.stopHeartbeat()
@@ -377,6 +383,10 @@ func (r *Replica) handleRequestVote(msg *MRequestVote) {
 		r.votedFor = msg.Replica
 		reply.VoteGranted = TRUE
 		r.resetElectionTimer() // Reset timer when granting vote
+		r.Printf("Granted vote to %d for term %d\n", msg.Replica, msg.Term)
+	} else {
+		r.Printf("Rejected vote for %d term %d (votedFor=%d, myTerm=%d, theirSlot=%d, mySlot=%d)\n",
+			msg.Replica, msg.Term, r.votedFor, r.currentTerm, msg.LastCommittedSlot, r.lastCommitted)
 	}
 
 	r.sender.SendTo(msg.Replica, reply, r.cs.requestVoteReplyRPC)
@@ -394,6 +404,9 @@ func (r *Replica) handleRequestVoteReply(msg *MRequestVoteReply) {
 	if r.role != CANDIDATE || msg.Term != r.currentTerm {
 		return
 	}
+
+	r.Printf("Vote reply from %d: granted=%v (myTerm=%d, replyTerm=%d, votes=%d)\n",
+		msg.Replica, msg.VoteGranted == TRUE, r.currentTerm, msg.Term, r.votesReceived)
 
 	if msg.VoteGranted == TRUE {
 		r.votesReceived++
@@ -456,9 +469,13 @@ func (r *Replica) handleLogSync(msg *MLogSync) {
 		r.stopHeartbeat()
 	}
 
-	// Collect committed entries from history
+	// Collect committed entries from history (scan up to lastCommitted)
+	scanLimit := int(r.lastCommitted) + 1
+	if scanLimit > HISTORY_SIZE {
+		scanLimit = HISTORY_SIZE
+	}
 	var entries []LogEntry
-	for i := 0; i < HISTORY_SIZE; i++ {
+	for i := 0; i < scanLimit; i++ {
 		if r.history[i].phase == COMMIT {
 			entries = append(entries, LogEntry{
 				Slot:  int32(r.history[i].cmdSlot),
@@ -515,8 +532,12 @@ func (r *Replica) mergeAndRecoverLog() {
 	slotEntries := make(map[int32]LogEntry)
 	maxSlot := int32(-1)
 
-	// Include our own history
-	for i := 0; i < HISTORY_SIZE; i++ {
+	// Include our own history (scan up to lastCommitted)
+	scanLimit := int(r.lastCommitted) + 1
+	if scanLimit > HISTORY_SIZE {
+		scanLimit = HISTORY_SIZE
+	}
+	for i := 0; i < scanLimit; i++ {
 		if r.history[i].phase == COMMIT {
 			slot := int32(r.history[i].cmdSlot)
 			slotEntries[slot] = LogEntry{
@@ -543,6 +564,7 @@ func (r *Replica) mergeAndRecoverLog() {
 	}
 
 	// Replay committed entries in slot order to rebuild state machine
+	replayCount := 0
 	for slot := int32(0); slot <= maxSlot; slot++ {
 		entry, exists := slotEntries[slot]
 		if !exists {
@@ -551,12 +573,24 @@ func (r *Replica) mergeAndRecoverLog() {
 
 		slotStr := strconv.Itoa(int(slot))
 
-		// Skip already executed slots
+		// Send heartbeat periodically during replay to prevent election timeouts
+		replayCount++
+		if replayCount%500 == 0 {
+			r.sendHeartbeat()
+		}
+
+		// If already executed (follower was keeping up), just update metadata
 		if r.executed.Has(slotStr) {
+			r.committed.Set(slotStr, struct{}{})
+			r.slots[entry.CmdId] = int(slot)
+			r.history[slot].cmdSlot = int(slot)
+			r.history[slot].phase = COMMIT
+			r.history[slot].cmd = entry.Cmd
+			r.history[slot].cmdId = entry.CmdId
 			continue
 		}
 
-		// Execute command and update state
+		// Execute command and update state (only for slots not yet executed)
 		val := entry.Cmd.Execute(r.State)
 		r.executed.Set(slotStr, struct{}{})
 		r.committed.Set(slotStr, struct{}{})
@@ -900,11 +934,11 @@ func (r *Replica) handleCommit(msg *MCommit, desc *commandDesc) {
 		}
 
 		desc.phase = COMMIT
+		if int32(desc.cmdSlot) > r.lastCommitted {
+			r.lastCommitted = int32(desc.cmdSlot)
+		}
 		if r.IsLeader() {
 			r.committed.Set(strconv.Itoa(desc.cmdSlot), struct{}{})
-			if int32(desc.cmdSlot) > r.lastCommitted {
-				r.lastCommitted = int32(desc.cmdSlot)
-			}
 			r.notifyCommit(desc.cmdSlot) // Notify waiters that slot is committed
 		}
 

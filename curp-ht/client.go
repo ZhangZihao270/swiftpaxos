@@ -551,36 +551,59 @@ func (c *Client) getNextSeqnum() int32 {
 
 // SendStrongWrite sends a linearizable write command (delegates to base SendWrite).
 // Tracks the key for local cache updates on completion.
-func (c *Client) SendStrongWrite(key int64, value []byte) int32 {
-	// Protect writer against concurrent MSync timer sends
-	c.writerMu[c.LeaderId].Lock()
-	seqnum := c.SendWrite(key, value)
-	c.writerMu[c.LeaderId].Unlock()
+// sendProposeSafe broadcasts a Propose to all alive replicas, skipping dead ones.
+func (c *Client) sendProposeSafe(p defs.Propose) {
 	c.mu.Lock()
-	c.strongPendingKeys[seqnum] = key
-	c.strongPendingCmds[seqnum] = &defs.Propose{
+	dead := make(map[int32]bool, len(c.deadReplicas))
+	for k, v := range c.deadReplicas {
+		dead[k] = v
+	}
+	c.mu.Unlock()
+
+	for rep := int32(0); rep < c.numReplicas; rep++ {
+		if dead[rep] {
+			continue
+		}
+		w := c.GetWriter(rep)
+		if w == nil {
+			continue
+		}
+		c.writerMu[rep].Lock()
+		w.WriteByte(defs.PROPOSE)
+		p.Marshal(w)
+		w.Flush()
+		c.writerMu[rep].Unlock()
+	}
+}
+
+func (c *Client) SendStrongWrite(key int64, value []byte) int32 {
+	seqnum := c.getNextSeqnum()
+	p := defs.Propose{
 		CommandId: seqnum,
 		ClientId:  c.ClientId,
 		Command:   state.Command{Op: state.PUT, K: state.Key(key), V: value},
 	}
+	c.sendProposeSafe(p)
+	c.mu.Lock()
+	c.strongPendingKeys[seqnum] = key
+	c.strongPendingCmds[seqnum] = &p
 	c.mu.Unlock()
 	return seqnum
 }
 
-// SendStrongRead sends a linearizable read command (delegates to base SendRead).
+// SendStrongRead sends a linearizable read command.
 // Tracks the key for local cache updates on completion.
 func (c *Client) SendStrongRead(key int64) int32 {
-	// Protect writer against concurrent MSync timer sends
-	c.writerMu[c.LeaderId].Lock()
-	seqnum := c.SendRead(key)
-	c.writerMu[c.LeaderId].Unlock()
-	c.mu.Lock()
-	c.strongPendingKeys[seqnum] = key
-	c.strongPendingCmds[seqnum] = &defs.Propose{
+	seqnum := c.getNextSeqnum()
+	p := defs.Propose{
 		CommandId: seqnum,
 		ClientId:  c.ClientId,
 		Command:   state.Command{Op: state.GET, K: state.Key(key), V: state.NIL()},
 	}
+	c.sendProposeSafe(p)
+	c.mu.Lock()
+	c.strongPendingKeys[seqnum] = key
+	c.strongPendingCmds[seqnum] = &p
 	c.mu.Unlock()
 	return seqnum
 }

@@ -25,6 +25,10 @@ ALL_PROTOS = ['raft-baseline', 'raftht',
               'mongotunable',
               'pileus', 'pileusht']
 
+# Two-column legend grouping
+LEFT_PROTOS  = ['raft-baseline', 'raftht', 'curp-baseline', 'curpht', 'curpho']
+RIGHT_PROTOS = ['epaxos-baseline', 'epaxosho', 'mongotunable', 'pileus', 'pileusht']
+
 CDF_THREADS = 8
 
 # Result directory for CDF latencies.json
@@ -65,8 +69,18 @@ def plot_tput_lat(ax, rows, protocols, title):
 
     ax.set_xlabel('Throughput (Kops/sec)')
     ax.set_ylabel('Avg Latency (ms)')
-    ax.set_title(title, fontsize=13)
-    ax.legend(loc='upper right', fontsize=10, ncol=1)
+    # Two-column legend: left=Raft+CURP, right=EPaxos+Mongo+Pileus
+    handles, labels = ax.get_legend_handles_labels()
+    label_map = dict(zip(labels, handles))
+    ordered_handles = []
+    ordered_labels = []
+    for p in LEFT_PROTOS + RIGHT_PROTOS:
+        lbl = PROTOCOL_LABELS[p]
+        if lbl in label_map:
+            ordered_handles.append(label_map[lbl])
+            ordered_labels.append(lbl)
+    ax.legend(ordered_handles, ordered_labels, loc='upper center', ncol=2, fontsize=11,
+              columnspacing=1.0)
     ax.set_xlim(left=0)
     ax.set_ylim(bottom=0)
     ax.xaxis.set_major_formatter(ticker.FuncFormatter(kops_formatter))
@@ -95,8 +109,17 @@ def plot_cdf(ax, base, protocols, title):
 
     ax.set_xlabel('Latency (ms)')
     ax.set_ylabel('CDF')
-    ax.set_title(title, fontsize=13)
-    ax.legend(loc='lower right', fontsize=10, ncol=1)
+    handles, labels = ax.get_legend_handles_labels()
+    label_map = dict(zip(labels, handles))
+    ordered_handles = []
+    ordered_labels = []
+    for p in LEFT_PROTOS + RIGHT_PROTOS:
+        lbl = PROTOCOL_LABELS[p]
+        if lbl in label_map:
+            ordered_handles.append(label_map[lbl])
+            ordered_labels.append(lbl)
+    ax.legend(ordered_handles, ordered_labels, loc='lower right', ncol=2, fontsize=11,
+              columnspacing=1.0)
     ax.set_ylim(0, 1.02)
     ax.set_xlim(left=0, right=150)
     ax.set_xticks([0, 50, 100, 150])
@@ -110,18 +133,21 @@ def main():
     setup_style()
     rows = load_csv(csv_path)
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    fig, axes = plt.subplots(1, 2, figsize=(12, 3.5))
 
-    plot_tput_lat(axes[0], rows, ALL_PROTOS, 'TAO: Throughput vs Latency')
-    plot_cdf(axes[1], base, ALL_PROTOS, f'TAO: Latency CDF ({CDF_THREADS * 6} clients)')
+    plot_tput_lat(axes[0], rows, ALL_PROTOS, 'Throughput vs Latency')
+    plot_cdf(axes[1], base, ALL_PROTOS, f'Latency CDF ({CDF_THREADS * 6} clients)')
 
-    labels = ['(a)', '(b)']
+    subcaptions = [
+        '(a) Throughput vs Latency',
+        '(b) Latency CDF',
+    ]
     for i, ax in enumerate(axes):
-        ax.text(0.5, -0.28, labels[i], transform=ax.transAxes,
-                fontsize=14, fontweight='bold', ha='center')
+        ax.text(0.5, -0.32, subcaptions[i], transform=ax.transAxes,
+                fontsize=16, fontweight='bold', ha='center')
 
     plt.tight_layout(w_pad=1.5)
-    plt.subplots_adjust(bottom=0.18)
+    plt.subplots_adjust(bottom=0.20)
     save_figure(fig, out_dir, 'exp-tao-throughput-latency')
 
 

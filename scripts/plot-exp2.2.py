@@ -69,7 +69,7 @@ def plot_throughput(ax, rows):
     ax.set_xlabel('Zipf Skew')
     ax.set_ylabel('Throughput\n(Kops/sec)')
     
-    ax.legend(loc='lower left', fontsize=10)
+    ax.legend(loc='lower left')
     ax.set_xlim(-0.05, 1.04)
     ax.set_xticks([0, 0.25, 0.5, 0.75, 0.99])
     ax.set_ylim(bottom=0)
@@ -161,7 +161,7 @@ def main():
 
     import matplotlib.gridspec as gridspec
     fig = plt.figure(figsize=(12, 3))
-    gs = gridspec.GridSpec(1, 2, figure=fig, wspace=0.2)
+    gs = gridspec.GridSpec(1, 2, figure=fig, wspace=0.28)
 
     # Left: throughput
     ax_tput = fig.add_subplot(gs[0])
@@ -170,11 +170,11 @@ def main():
     # Right: broken y-axis latency
     plot_latency_broken(fig, gs[1], lat_data)
 
-    ax_tput.text(0.5, -0.38, '(a)', transform=ax_tput.transAxes,
-                 fontsize=14, fontweight='bold', ha='center')
-    fig.text(0.73, -0.03, '(b)', fontsize=14, fontweight='bold', ha='center')
+    ax_tput.text(0.5, -0.43, '(a) Throughput vs Conflict Rate', transform=ax_tput.transAxes,
+                 fontsize=16, fontweight='bold', ha='center')
+    fig.text(0.73, -0.03, '(b) Latency vs Conflict Rate', fontsize=16, fontweight='bold', ha='center')
 
-    plt.subplots_adjust(bottom=0.22)
+    plt.subplots_adjust(bottom=0.25)
     save_figure(fig, out_dir, 'exp2.2-conflict-sweep')
 
 
