@@ -9673,3 +9673,80 @@ While the sender is blocked on peer 0, ALL subsequent sends are queued — inclu
 #### ⬜ Step 2: Test and verify (lab only)
 - Kill-leader on lab: heartbeats should reach followers immediately after election
 - Throughput should recover within 2-3s of kill
+
+### Phase 128.11: Debug + Fix Reply Path After Recovery
+
+**IMPORTANT: This is a self-contained debug-fix-test loop. Keep iterating until throughput recovers after kill. Do NOT stop after one fix — test on lab, if still broken, diagnose next issue and fix it.**
+
+**Current symptom**: Election succeeds (2s), slot sync completes, client flush+refill works. Client sends new commands to all alive replicas. New leader (replica3) processes proposals. But client gets NO reply → TPUT stays 0.
+
+**Likely root cause**: CURP-HT client uses `WaitReplies(closestId)` at init to start a reader goroutine that reads `ProposeReplyTS` from one replica. When that replica (replica0) dies, reader exits. **No new reader is started.** Client can never receive replies from any replica.
+
+Note: CURP-HT uses `Fast=true` so replies come from the leader (not the closest replica). After failover, leader changes from replica0 to replica3, but there's no reader goroutine for replica3's connection.
+
+#### Fix plan:
+
+##### Step 1: Start new reader after leader death
+- In `curp-ht/client.go` `handleReaderDead()`: after rotating leader + flushing pipeline, call `c.WaitReplies(int(c.leader))` to start a new reader for the new leader
+- BUT: check if `WaitReplies` can be called multiple times safely (it starts a goroutine that reads from `c.readers[rid]`). If previous reader for this replica is still alive, don't start a duplicate.
+- Alternative: CURP-HT with `Fast=true` broadcasts to ALL replicas, so replies may come from any replica. May need readers for ALL alive replicas, not just leader.
+
+##### Step 2: Check if reply path works on new leader
+- In `curp-ht.go` `deliver()`: when leader sends reply via `sender.SendToClient(clientId, rep, replyRPC)`, verify `ClientWriters[clientId]` exists on new leader
+- Client registered with all replicas at startup (connected to all 5). If connection to replica3 is still alive, `ClientWriters` should have the entry.
+- Add debug log: `r.Printf("Sending reply to client %d via SendToClient", clientId)` in deliver
+
+##### Iterate loop:
+After each fix:
+```bash
+# 1. Build + test
+go build -o swiftpaxos-dist . && go test ./curp-ht/ -count=1 -timeout 120s
+
+# 2. Deploy
+for host in 130.245.173.{101,103,104,125,126}; do
+  scp swiftpaxos-dist $host:~/swiftpaxos/
+done
+
+# 3. Clean + run
+for host in 130.245.173.{101,103,104,125,126}; do
+  ssh $host "pkill -9 -x swiftpaxos-dist"
+done
+sleep 2
+REMOTE_WORK_DIR=~/swiftpaxos timeout 300 ./run-multi-client.sh -d -c benchmark.conf -t 16 -o results/exp2.3-test &
+sleep 60
+ssh 130.245.173.101 "pkill -9 -f 'swiftpaxos-dist.*server'"
+wait
+
+# 4. Check results
+# Extract per-second throughput:
+for f in results/exp2.3-test/client*.log; do
+  grep "TPUT " "$f" | awk '$3=="TPUT" {print $5","$4","$6}'
+done | awk -F, 'NR==1{first=$1} {s[$1-first]+=$3} END{for(k in s) print k","s[k]}' | sort -t, -k1,1n
+
+# Check election + recovery:
+grep "Won election\|Slot sync" results/exp2.3-test/replica*.log
+# Check client flush:
+grep "flush" results/exp2.3-test/client1.log | head -3
+# Check forwarding after recovery:
+grep "Forwarding proposal to leader" results/exp2.3-test/replica1.log | tail -5
+# Check if new leader sends replies:
+grep "SendToClient\|reply\|Reply" results/exp2.3-test/replica3.log | tail -5
+```
+
+**Success criteria**: Per-second throughput shows >0 after kill (from client1+client2). Example:
+```
+18,8000    # pre-kill steady state
+19,100     # kill happens
+20,0       # election in progress
+21,0       # slot sync
+22,3000    # recovery! throughput resumes
+23,5000    # recovering
+24,6000    # near steady state (2/3 of pre-kill, since client0 is dead)
+```
+
+**If still broken**: Add debug logs at the broken layer, re-run, find next issue. Common things to check:
+- Does new leader receive proposals? (log in ProposeChan handler)
+- Does new leader call deliver()? (log in deliver)
+- Does deliver() send reply? (log in SendToClient)
+- Does client have active reader? (log reader goroutine start/stop)
+- Does client receive the reply byte? (log in WaitReplies/GetReplyFrom)
