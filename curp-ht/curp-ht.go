@@ -98,6 +98,13 @@ type Replica struct {
 
 	// Leader tracking for proposal forwarding (Phase 128.4)
 	currentLeader int32 // Replica ID of the current leader (set from heartbeats)
+
+	// Recovery proposal buffer (Phase 128.9)
+	// Proposals arriving while leader is RECOVERING are buffered here
+	// and replayed after recovery completes (status → NORMAL).
+	recoveryProposals     []*defs.GPropose
+	recoveryWeakProposals []*MWeakPropose
+	recoveryForwards      []*MForwardPropose
 }
 
 type commandDesc struct {
@@ -660,6 +667,9 @@ func (r *Replica) mergeAndRecoverLog() {
 	// Clear recovery state
 	r.logSyncReplies = nil
 	r.status = NORMAL
+
+	// Replay buffered proposals that arrived during recovery
+	r.replayRecoveryBuffer()
 }
 
 // handleSlotSync processes a slot sync request from a new leader.
@@ -729,6 +739,53 @@ func (r *Replica) completeSlotSync() {
 	// Clear recovery state
 	r.slotSyncReplies = nil
 	r.status = NORMAL
+
+	// Replay buffered proposals that arrived during recovery
+	r.replayRecoveryBuffer()
+}
+
+// replayRecoveryBuffer processes proposals that were buffered during RECOVERING state.
+// Called after recovery completes and status transitions to NORMAL.
+func (r *Replica) replayRecoveryBuffer() {
+	nProposals := len(r.recoveryProposals)
+	nWeakProposals := len(r.recoveryWeakProposals)
+	nForwards := len(r.recoveryForwards)
+	total := nProposals + nWeakProposals + nForwards
+	if total == 0 {
+		return
+	}
+
+	r.Printf("Replaying %d buffered proposals (%d strong, %d weak, %d forwarded)\n",
+		total, nProposals, nWeakProposals, nForwards)
+
+	// Replay strong proposals
+	for _, propose := range r.recoveryProposals {
+		cmdId := CommandId{ClientId: propose.ClientId, SeqNum: propose.CommandId}
+		if r.values.Has(cmdId.String()) {
+			continue // Already committed — skip duplicate
+		}
+		dep := r.leaderUnsync(propose.Command, r.lastCmdSlot)
+		desc := r.getCmdDescSeq(r.lastCmdSlot, propose, dep, true)
+		if desc == nil {
+			r.Printf("Skipping buffered proposal (already delivered): client=%d seq=%d\n",
+				propose.ClientId, propose.CommandId)
+			continue
+		}
+		r.lastCmdSlot++
+	}
+	r.recoveryProposals = nil
+
+	// Replay weak proposals
+	for _, wp := range r.recoveryWeakProposals {
+		r.handleWeakPropose(wp)
+	}
+	r.recoveryWeakProposals = nil
+
+	// Replay forwarded proposals
+	for _, fwd := range r.recoveryForwards {
+		r.handleForwardPropose(fwd)
+	}
+	r.recoveryForwards = nil
 }
 
 func (r *Replica) run() {
@@ -768,17 +825,24 @@ func (r *Replica) run() {
 
 		case propose := <-r.ProposeChan:
 			if r.IsLeader() && r.status == NORMAL {
+				// Duplicate detection: skip if already committed (e.g., MSync retry after recovery)
+				cmdId.ClientId = propose.ClientId
+				cmdId.SeqNum = propose.CommandId
+				if r.values.Has(cmdId.String()) {
+					continue
+				}
 				dep := r.leaderUnsync(propose.Command, r.lastCmdSlot)
-				desc := r.getCmdDescSeq(r.lastCmdSlot, propose, dep, true) // why Seq?
+				desc := r.getCmdDescSeq(r.lastCmdSlot, propose, dep, true)
 				if desc == nil {
-					r.Fatal("Got propose for the delivered command:",
-						propose.ClientId, propose.CommandId)
+					// Already delivered but not yet in r.values — skip safely
+					continue
 				}
 				r.lastCmdSlot++
 			} else if r.IsLeader() {
-				// Leader is RECOVERING — drop proposal. Client will retry via MSync timer.
-				r.Printf("Dropping proposal during recovery: client=%d seq=%d\n",
-					propose.ClientId, propose.CommandId)
+				// Leader is RECOVERING — buffer proposal for replay after recovery.
+				r.recoveryProposals = append(r.recoveryProposals, propose)
+				r.Printf("Buffering proposal during recovery: client=%d seq=%d (buffered=%d)\n",
+					propose.ClientId, propose.CommandId, len(r.recoveryProposals))
 			} else {
 				cmdId.ClientId = propose.ClientId
 				cmdId.SeqNum = propose.CommandId
@@ -870,6 +934,9 @@ func (r *Replica) run() {
 			weakPropose := m.(*MWeakPropose)
 			if r.IsLeader() && r.status == NORMAL {
 				r.handleWeakPropose(weakPropose)
+			} else if r.IsLeader() {
+				// Leader is RECOVERING — buffer weak proposal for replay after recovery.
+				r.recoveryWeakProposals = append(r.recoveryWeakProposals, weakPropose)
 			} else if !r.IsLeader() && r.currentLeader != r.Id && r.currentLeader >= 0 {
 				// Forward weak propose to actual leader
 				r.sender.SendTo(r.currentLeader, weakPropose, r.cs.weakProposeRPC)
@@ -927,8 +994,13 @@ func (r *Replica) run() {
 // handleForwardPropose processes a proposal forwarded from a follower.
 // The leader treats it as a new proposal if the command hasn't been committed yet.
 func (r *Replica) handleForwardPropose(fwd *MForwardPropose) {
-	if !r.IsLeader() || r.status != NORMAL {
-		return // Only the active leader processes forwarded proposals
+	if !r.IsLeader() {
+		return
+	}
+	if r.status != NORMAL {
+		// Buffer forwarded proposals during recovery for replay after.
+		r.recoveryForwards = append(r.recoveryForwards, fwd)
+		return
 	}
 
 	cmdId := CommandId{ClientId: fwd.ClientId, SeqNum: fwd.CommandId}

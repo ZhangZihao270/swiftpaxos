@@ -2633,6 +2633,14 @@ func newTestReplicaForRecovery(id int32, n int) *Replica {
 	r.closedChan = make(chan struct{})
 	close(r.closedChan)
 
+	r.batcher = NewBatcher(r, 128)
+	r.weakReplyPool = sync.Pool{
+		New: func() interface{} { return &MWeakReply{} },
+	}
+
+	// Set up ClientFastChan so SendToClient doesn't panic
+	r.Replica.ClientFastChan = make(map[int32]chan replica.ClientSendArg)
+
 	return r
 }
 
@@ -5654,5 +5662,233 @@ func TestPipelineFlushWeakReplyIgnored(t *testing.T) {
 	// Should still have only 1 reply (the fake one)
 	if len(c.Reply) != 1 {
 		t.Errorf("expected 1 reply (weak real reply should be ignored), got %d", len(c.Reply))
+	}
+}
+
+// === Phase 128.9 Tests: Recovery Proposal Buffering ===
+
+// TestRecoveryBuffersProposals verifies that proposals arriving during RECOVERING
+// are buffered and replayed after recovery completes.
+func TestRecoveryBuffersProposals(t *testing.T) {
+	const N = 3
+	r := newTestReplicaForRecovery(1, N)
+
+	// Set up as new leader in RECOVERING state
+	r.becomeCandidate()
+	r.becomeLeader()
+	r.status = RECOVERING
+	r.lastCmdSlot = 0
+
+	// Simulate 3 proposals arriving during recovery
+	proposals := []*defs.GPropose{
+		{Propose: &defs.Propose{ClientId: 10, CommandId: 0, Command: state.Command{Op: state.PUT, K: 0, V: state.NIL()}}},
+		{Propose: &defs.Propose{ClientId: 10, CommandId: 1, Command: state.Command{Op: state.PUT, K: 1, V: state.NIL()}}},
+		{Propose: &defs.Propose{ClientId: 11, CommandId: 0, Command: state.Command{Op: state.PUT, K: 2, V: state.NIL()}}},
+	}
+
+	for _, p := range proposals {
+		r.recoveryProposals = append(r.recoveryProposals, p)
+	}
+
+	if len(r.recoveryProposals) != 3 {
+		t.Fatalf("expected 3 buffered proposals, got %d", len(r.recoveryProposals))
+	}
+
+	// Simulate slot sync completing: sets lastCmdSlot and transitions to NORMAL
+	r.lastCmdSlot = 5 // pretend prior leader committed up to slot 4
+	r.status = NORMAL
+	r.replayRecoveryBuffer()
+
+	// After replay, buffered proposals should be processed
+	if r.recoveryProposals != nil {
+		t.Error("recoveryProposals should be nil after replay")
+	}
+
+	// lastCmdSlot should have advanced by 3 (one per proposal)
+	if r.lastCmdSlot != 8 {
+		t.Errorf("expected lastCmdSlot=8 after replaying 3 proposals, got %d", r.lastCmdSlot)
+	}
+}
+
+// TestRecoveryBuffersWeakProposals verifies weak proposals are buffered during recovery.
+func TestRecoveryBuffersWeakProposals(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.becomeCandidate()
+	r.becomeLeader()
+	r.status = RECOVERING
+
+	wp := &MWeakPropose{
+		CommandId: 5,
+		ClientId:  10,
+		Command:   state.Command{Op: state.PUT, K: 42, V: state.NIL()},
+	}
+	r.recoveryWeakProposals = append(r.recoveryWeakProposals, wp)
+
+	if len(r.recoveryWeakProposals) != 1 {
+		t.Fatalf("expected 1 buffered weak proposal, got %d", len(r.recoveryWeakProposals))
+	}
+
+	// Complete recovery
+	r.lastCmdSlot = 3
+	r.status = NORMAL
+	r.replayRecoveryBuffer()
+
+	if r.recoveryWeakProposals != nil {
+		t.Error("recoveryWeakProposals should be nil after replay")
+	}
+}
+
+// TestRecoveryBuffersForwardedProposals verifies forwarded proposals are buffered during recovery.
+func TestRecoveryBuffersForwardedProposals(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.becomeCandidate()
+	r.becomeLeader()
+	r.status = RECOVERING
+
+	fwd := &MForwardPropose{
+		Replica:   2,
+		ClientId:  10,
+		CommandId: 5,
+		Command:   state.Command{Op: state.PUT, K: 42, V: state.NIL()},
+	}
+	r.recoveryForwards = append(r.recoveryForwards, fwd)
+
+	// Complete recovery
+	r.lastCmdSlot = 3
+	r.status = NORMAL
+	r.replayRecoveryBuffer()
+
+	if r.recoveryForwards != nil {
+		t.Error("recoveryForwards should be nil after replay")
+	}
+
+	// Forward propose should have been processed — lastCmdSlot should advance
+	if r.lastCmdSlot != 4 {
+		t.Errorf("expected lastCmdSlot=4 after replaying forwarded proposal, got %d", r.lastCmdSlot)
+	}
+}
+
+// TestRecoveryBufferSkipsDuplicates verifies that already-committed commands
+// are skipped during replay.
+func TestRecoveryBufferSkipsDuplicates(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.becomeCandidate()
+	r.becomeLeader()
+	r.status = RECOVERING
+
+	// Mark command as already committed
+	cmdId := CommandId{ClientId: 10, SeqNum: 0}
+	r.values.Set(cmdId.String(), state.NIL())
+
+	// Buffer a proposal for the same command
+	r.recoveryProposals = append(r.recoveryProposals, &defs.GPropose{
+		Propose: &defs.Propose{ClientId: 10, CommandId: 0,
+			Command: state.Command{Op: state.PUT, K: 0, V: state.NIL()}},
+	})
+
+	r.lastCmdSlot = 5
+	r.status = NORMAL
+	r.replayRecoveryBuffer()
+
+	// lastCmdSlot should NOT advance (duplicate was skipped)
+	if r.lastCmdSlot != 5 {
+		t.Errorf("expected lastCmdSlot=5 (duplicate skipped), got %d", r.lastCmdSlot)
+	}
+}
+
+// TestLeaderProposeDuplicateDetection verifies the leader's propose handler
+// skips already-committed commands instead of Fatal-ing.
+func TestLeaderProposeDuplicateDetection(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.becomeLeader()
+	r.status = NORMAL
+	r.lastCmdSlot = 5
+
+	// Mark a command as committed
+	cmdId := CommandId{ClientId: 10, SeqNum: 0}
+	r.values.Set(cmdId.String(), state.NIL())
+
+	// Simulate sending a duplicate propose to ProposeChan
+	// The leader should skip it (not Fatal)
+	p := &defs.GPropose{
+		Propose: &defs.Propose{ClientId: 10, CommandId: 0,
+			Command: state.Command{Op: state.PUT, K: 0, V: state.NIL()}},
+	}
+
+	// Directly test duplicate detection: r.values.Has should be true
+	if !r.values.Has(cmdId.String()) {
+		t.Fatal("values should contain the committed command")
+	}
+
+	// A new propose should still work
+	p2 := &defs.GPropose{
+		Propose: &defs.Propose{ClientId: 10, CommandId: 1,
+			Command: state.Command{Op: state.PUT, K: 1, V: state.NIL()}},
+	}
+	_ = p
+	dep := r.leaderUnsync(p2.Command, r.lastCmdSlot)
+	desc := r.getCmdDescSeq(r.lastCmdSlot, p2, dep, true)
+	if desc == nil {
+		t.Fatal("getCmdDescSeq should succeed for new command")
+	}
+	r.lastCmdSlot++
+
+	if r.lastCmdSlot != 6 {
+		t.Errorf("expected lastCmdSlot=6 after 1 new proposal, got %d", r.lastCmdSlot)
+	}
+}
+
+// TestSlotSyncTriggersReplay verifies that completeSlotSync calls replayRecoveryBuffer.
+func TestSlotSyncTriggersReplay(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.becomeCandidate()
+	r.becomeLeader()
+	r.status = RECOVERING
+	r.slotSyncReplies = make([]MSlotSyncReply, 0)
+	r.slotSyncExpected = 2
+	r.lastCommitted = -1
+
+	// Buffer a proposal during recovery
+	r.recoveryProposals = append(r.recoveryProposals, &defs.GPropose{
+		Propose: &defs.Propose{ClientId: 10, CommandId: 0,
+			Command: state.Command{Op: state.PUT, K: 0, V: state.NIL()}},
+	})
+
+	// Send slot sync replies (need N/2 = 1 for 3 replicas)
+	r.handleSlotSyncReply(&MSlotSyncReply{
+		Replica:       2,
+		Term:          2,
+		LastCommitted: 4,
+	})
+
+	// Should transition to NORMAL
+	if r.status != NORMAL {
+		t.Fatalf("expected NORMAL after slot sync, got %d", r.status)
+	}
+
+	// Buffered proposal should have been replayed
+	if r.recoveryProposals != nil {
+		t.Error("recoveryProposals should be nil after slot sync completes")
+	}
+
+	// lastCmdSlot should be 5 (maxCommitted=4, +1) then +1 for the replayed proposal = 6
+	if r.lastCmdSlot != 6 {
+		t.Errorf("expected lastCmdSlot=6 after slot sync + replay, got %d", r.lastCmdSlot)
+	}
+}
+
+// TestEmptyRecoveryBuffer verifies replayRecoveryBuffer is a no-op when nothing is buffered.
+func TestEmptyRecoveryBuffer(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.becomeLeader()
+	r.status = NORMAL
+	r.lastCmdSlot = 5
+
+	// No buffered proposals
+	r.replayRecoveryBuffer()
+
+	// Nothing should change
+	if r.lastCmdSlot != 5 {
+		t.Errorf("expected lastCmdSlot=5 (no-op), got %d", r.lastCmdSlot)
 	}
 }

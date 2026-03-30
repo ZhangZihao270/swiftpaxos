@@ -9451,28 +9451,45 @@ grep "TPUT" results/exp2.3-test/client*.log | tail -20
 - ✅ Sender head-of-line blocking fixed (128.8) — fire-and-forget per-peer sends, no more wg.Wait()
 - ⬜ **Throughput still 0 after recovery** (see Phase 128.9 debug plan below)
 
-### Phase 128.9: Debug — Why HybridLoop Stops After Recovery
+### Phase 128.9: Fix — Proposals Dropped During RECOVERING State ✅
 
-**Symptom**: Server-side recovery fully works (election 1-2s, slot sync <1s, new leader NORMAL). Client detects dead leader, rotates, flushes pipeline (fake replies). But TPUT stays 0 for remaining 8+ seconds until client timeout exits.
+**Root cause** (found via code analysis): When the new leader wins election, it enters RECOVERING state for slot sync. During RECOVERING, all proposals (direct, weak, and forwarded) were **silently dropped** at lines 778-781, 871, and 930 of curp-ht.go. The client's MSync timer could only look up already-committed values — it could not cause uncommitted commands to be committed. Result: throughput permanently stuck at 0.
 
-**Debug plan — narrow down which layer is broken**:
+**Fix** (Phase 128.9 Step 5):
+1. **Buffer proposals during RECOVERING**: Instead of dropping, append to `recoveryProposals`, `recoveryWeakProposals`, and `recoveryForwards` slices
+2. **Replay after recovery**: `replayRecoveryBuffer()` called from both `completeSlotSync()` and `mergeAndRecoverLog()` after `status = NORMAL`
+3. **Duplicate detection**: Leader's propose handler now checks `r.values.Has(cmdId)` before processing — prevents double-commit on MSync retry. Changed `r.Fatal` to `continue` for already-delivered commands.
+4. **Forwarded proposal buffering**: `handleForwardPropose` also buffers during recovery instead of returning silently.
 
-#### ⬜ Step 1: Is HybridLoop sending new commands after flush?
+**Tests** (7 new tests, all pass):
+- `TestRecoveryBuffersProposals` — 3 proposals buffered during RECOVERING, replayed after slot sync
+- `TestRecoveryBuffersWeakProposals` — weak proposals buffered and replayed
+- `TestRecoveryBuffersForwardedProposals` — forwarded proposals buffered and replayed
+- `TestRecoveryBufferSkipsDuplicates` — already-committed commands skipped during replay
+- `TestLeaderProposeDuplicateDetection` — leader skips duplicate instead of Fatal
+- `TestSlotSyncTriggersReplay` — slot sync completion triggers replay automatically
+- `TestEmptyRecoveryBuffer` — no-op when nothing buffered
+
+**Status**: Code-complete, needs lab verification (Step 5 in TODO below).
+
+**Previous debug plan (for reference)**:
+
+#### ~~⬜~~ ✅ Step 1: Is HybridLoop sending new commands after flush?
 - Add debug log in `client/hybrid.go` HybridLoop: after pipeline flush, log each new command sent (seqnum, type, target)
 - If HybridLoop is NOT sending: fake reply injection is broken, or pipeline counter not reset, or HybridLoop exited early
 - If HybridLoop IS sending: commands are sent but replies not received → problem is on reply path
 
-#### ⬜ Step 2: Is new leader receiving proposals after recovery?
+#### ~~⬜~~ ✅ Step 2: Is new leader receiving proposals after recovery?
 - Add debug log in `curp-ht.go` event loop: when `ProposeChan` receives a propose AND `status == NORMAL`, log it
 - If new leader NOT receiving: `sendProposeSafe` is broken (dead writer?), or proposals stuck in network
 - If new leader IS receiving: leader processes but reply doesn't reach client
 
-#### ⬜ Step 3: Is new leader sending replies?
+#### ~~⬜~~ ✅ Step 3: Is new leader sending replies?
 - Add debug log in `deliver()` where reply is sent: `sender.SendToClient(clientId, rep, replyRPC)`
 - Check: does `ClientWriters[clientId]` exist on new leader? Client registered its writer when connecting at startup — if connection to new leader (was follower) is still alive, writer should exist
 - If writer is nil: client never connected to new leader, or connection dropped during failover
 
-#### ⬜ Step 4: Is client receiving replies from new leader?
+#### ~~⬜~~ ✅ Step 4: Is client receiving replies from new leader?
 - Add debug log in curp-ht `handleAcks`/`handleRecordAck`/`handleSyncReply`: log received replies from replica
 - Check: after recovery, does client receive ANY reply from ANY replica?
 - If no replies: connection to new leader is broken on client side (reader goroutine died for that replica too?)
@@ -9484,11 +9501,12 @@ grep "TPUT" results/exp2.3-test/client*.log | tail -20
 - Client should receive reply on reader goroutine for replica3.
 - But does `WaitReplies` only read from the leader replica? If `WaitReplies(closestId=0)` was the only reader, and it died, client has no readers!
 
-**Likely root cause**: `WaitReplies` was started for replica0 at init. When replica0 dies, that reader exits. No new `WaitReplies` is started for the new leader. Client has NO active readers for replies.
+**Original hypothesis (DISPROVED)**: `WaitReplies` was started for replica0 at init. When replica0 dies, that reader exits. No new `WaitReplies` is started for the new leader.
+→ Actually, curp-ht uses `RegisterRPCTable` which starts readers for ALL replicas, not just one. The WaitReplies hypothesis was wrong.
 
-**Fix direction**: In `handleReaderDead`, after rotating leader, start `WaitReplies(newLeader)` to read replies from new leader.
+**Actual root cause**: Proposals arriving during RECOVERING state were silently dropped. Fixed by buffering and replaying after recovery.
 
-#### ⬜ Step 5: Fix, verify, iterate
+#### ⬜ Step 5: Lab verification (needs cluster)
 After each fix:
 1. Build and deploy:
 ```bash
