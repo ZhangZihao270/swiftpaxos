@@ -9446,5 +9446,30 @@ grep "TPUT" results/exp2.3-test/client*.log | tail -20
 **Current status (2026-03-30 19:30)**:
 - ✅ Election succeeds (1-2s) — fixed with ID-based jitter
 - ✅ Log recovery correct: 576K entries recovered, lastCmdSlot correct — fixed with history population in handleCommit
-- ⬜ Throughput still 0: recovery takes ~10s (scanning+merging 576K entries), client reply timeout is 10s → client exits just as recovery completes. Race condition: recovery finishes at 19:29:01, client timeout at 19:29:01.
-- **Next step**: increase `replyTimeout` config to 30s, or use fewer reqs (less committed entries = faster recovery), or optimize recovery to be faster (skip scanning for already-executed entries)
+- ⬜ Throughput still 0: recovery takes ~10s (scanning+merging 576K entries), client timeout is 10s → client exits just as recovery completes.
+
+### Phase 128.6: Lightweight Recovery (slot sync only)
+
+**Problem**: Current recovery transfers 576K LogEntry structs (~69MB per peer) over network, then replays them. This takes ~10s, too slow for failover.
+
+**Insight**: New leader was a follower — it already has all committed state (executed all commands). It only needs to know `lastCmdSlot` to resume accepting new proposals. No need to transfer or replay any entries.
+
+**Plan**: Replace full log transfer with lightweight slot sync:
+
+#### ⬜ Step 1: New message `MSlotSync` / `MSlotSyncReply`
+- `MSlotSync {Replica, Term}` — new leader asks peers for their lastCommitted
+- `MSlotSyncReply {Replica, Term, LastCommitted}` — peer replies with its lastCommitted
+- Tiny messages (~12 bytes), no entry data
+
+#### ⬜ Step 2: Simplify `startLogRecovery`
+- Broadcast `MSlotSync` instead of `MLogSync`
+- `handleSlotSync`: reply with `r.lastCommitted` (no history scan)
+- `handleSlotSyncReply`: collect replies, when majority received → take max lastCommitted across self + peers → set `lastCmdSlot = max + 1`, set `status = NORMAL`
+- No `mergeAndRecoverLog`, no replay, no Execute
+
+#### ⬜ Step 3: Test and verify
+- Unit test: slot sync with 3/5 replicas
+- Kill-leader test on lab: expect recovery in <1s (election ~1s + slot sync ~1 RTT)
+- Throughput should recover within 2-3s of kill
+
+**Expected timeline**: kill → 1-1.5s election → 0.1s slot sync → NORMAL → throughput resumes
