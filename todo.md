@@ -9296,11 +9296,13 @@ beyond what strong-strong conflicts already cause.
 
 ### Steps
 
-#### ⬜ Step 1: Add term/vote state and role management
-- Replace `isLeader bool` + `ballot int32` with `currentTerm`, `votedFor`, `role`
-- Add `becomeFollower(term)`, `becomeCandidate()`, `becomeLeader()` methods
-- Add term check to all message handlers: if msg.Term > currentTerm → become follower
-- Add term check to all outgoing messages: attach currentTerm
+#### ✅ Step 1: Add term/vote state and role management [26:03:30]
+- [x] Replaced `isLeader bool` + `ballot int32` with `currentTerm int32`, `votedFor int32`, `role int`
+- [x] Added role constants: FOLLOWER, CANDIDATE, LEADER in defs.go
+- [x] Added `becomeFollower(term)`, `becomeCandidate()`, `becomeLeader()`, `IsLeader()` methods
+- [x] Updated all `r.isLeader` → `r.IsLeader()` and `r.ballot` → `r.currentTerm` (15+ locations)
+- [x] Added term step-down to handleAccept, handleAcceptAck, handleCommit: if msg.Ballot > currentTerm → becomeFollower
+- [x] 12 new tests: role constants, initial state, becomeX transitions, full lifecycle, handler step-down, stale term rejection
 
 #### ⬜ Step 2: Leader election protocol
 - Add `MRequestVote` / `MRequestVoteReply` messages + serialization

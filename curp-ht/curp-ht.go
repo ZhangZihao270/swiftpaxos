@@ -19,16 +19,17 @@ import (
 type Replica struct {
 	*replica.Replica
 
-	ballot  int32
-	cballot int32
-	status  int
+	currentTerm int32
+	cballot     int32
+	status      int
+	votedFor    int32
+	role        int
 
 	optimized      bool
 	contactClients bool
 
 	Q replica.Majority
 
-	isLeader    bool
 	lastCmdSlot int
 
 	slots     map[CommandId]int
@@ -131,14 +132,15 @@ func New(alias string, rid int, addrs []string, exec bool, pl, f int,
 	r := &Replica{
 		Replica: replica.New(alias, rid, f, addrs, false, exec, false, conf, logger),
 
-		ballot:  0,
-		cballot: 0,
-		status:  NORMAL,
+		currentTerm: 0,
+		cballot:     0,
+		status:      NORMAL,
+		votedFor:    -1,
+		role:        FOLLOWER,
 
 		optimized:      opt,
 		contactClients: false,
 
-		isLeader:    false,
 		lastCmdSlot: 0,
 
 		slots:     make(map[CommandId]int),
@@ -193,11 +195,19 @@ func New(alias string, rid int, addrs []string, exec bool, pl, f int,
 
 	_, leaderIds, err := replica.NewQuorumsFromFile(conf.Quorum, r.Replica)
 	if err == nil && len(leaderIds) != 0 {
-		r.ballot = leaderIds[0]
+		r.currentTerm = leaderIds[0]
 		r.cballot = leaderIds[0]
-		r.isLeader = (leaderIds[0] == r.Id)
+		if leaderIds[0] == r.Id {
+			r.becomeLeader()
+		} else {
+			r.becomeFollower(leaderIds[0])
+		}
 	} else if err == replica.NO_QUORUM_FILE {
-		r.isLeader = (r.ballot == r.Id)
+		if r.currentTerm == r.Id {
+			r.becomeLeader()
+		} else {
+			r.becomeFollower(r.currentTerm)
+		}
 	} else {
 		r.Fatal(err)
 	}
@@ -229,6 +239,33 @@ func (r *Replica) BeTheLeader(args *defs.BeTheLeaderArgs, reply *defs.BeTheLeade
 	return nil
 }
 
+// becomeFollower transitions to FOLLOWER role for the given term.
+// Resets votedFor if the term is newer than the current term.
+func (r *Replica) becomeFollower(term int32) {
+	if term > r.currentTerm {
+		r.currentTerm = term
+		r.votedFor = -1
+	}
+	r.role = FOLLOWER
+}
+
+// becomeCandidate transitions to CANDIDATE role, increments term, and votes for self.
+func (r *Replica) becomeCandidate() {
+	r.currentTerm++
+	r.role = CANDIDATE
+	r.votedFor = r.Id
+}
+
+// becomeLeader transitions to LEADER role. Called after winning an election.
+func (r *Replica) becomeLeader() {
+	r.role = LEADER
+}
+
+// IsLeader returns true if this replica is currently the leader.
+func (r *Replica) IsLeader() bool {
+	return r.role == LEADER
+}
+
 func (r *Replica) run() {
 	r.ConnectToPeers()
 	latencies := r.ComputeClosestPeers()
@@ -248,7 +285,7 @@ func (r *Replica) run() {
 			r.getCmdDesc(int, "deliver", -1)
 
 		case propose := <-r.ProposeChan:
-			if r.isLeader {
+			if r.IsLeader() {
 				dep := r.leaderUnsync(propose.Command, r.lastCmdSlot)
 				desc := r.getCmdDescSeq(r.lastCmdSlot, propose, dep, true) // why Seq?
 				if desc == nil {
@@ -265,7 +302,7 @@ func (r *Replica) run() {
 				r.proposes.Set(cmdId.String(), propose)
 				recAck := &MRecordAck{
 					Replica: r.Id,
-					Ballot:  r.ballot,
+					Ballot:  r.currentTerm,
 					CmdId:   cmdId,
 					Ok:      r.ok(propose.Command),
 				}
@@ -318,7 +355,7 @@ func (r *Replica) run() {
 				}
 				rep := &MSyncReply{
 					Replica: r.Id,
-					Ballot:  r.ballot,
+					Ballot:  r.currentTerm,
 					CmdId:   sync.CmdId,
 					Rep:     val.([]byte),
 					Slot:    slotVal,
@@ -331,7 +368,7 @@ func (r *Replica) run() {
 			// COMMIT phase will reply when slot ordering completes.
 
 		case m := <-r.cs.weakProposeChan:
-			if r.isLeader {
+			if r.IsLeader() {
 				weakPropose := m.(*MWeakPropose)
 				r.handleWeakPropose(weakPropose)
 			}
@@ -369,7 +406,7 @@ func (r *Replica) handlePropose(msg *defs.GPropose, desc *commandDesc, slot int,
 
 	acc := &MAccept{
 		Replica: r.Id,
-		Ballot:  r.ballot,
+		Ballot:  r.currentTerm,
 		CmdId:   desc.cmdId,
 		CmdSlot: slot,
 	}
@@ -380,7 +417,10 @@ func (r *Replica) handlePropose(msg *defs.GPropose, desc *commandDesc, slot int,
 }
 
 func (r *Replica) handleAccept(msg *MAccept, desc *commandDesc) {
-	if r.status != NORMAL || r.ballot != msg.Ballot {
+	if msg.Ballot > r.currentTerm {
+		r.becomeFollower(msg.Ballot)
+	}
+	if r.status != NORMAL || r.currentTerm != msg.Ballot {
 		return
 	}
 
@@ -413,14 +453,14 @@ func (r *Replica) handleAccept(msg *MAccept, desc *commandDesc) {
 		// Non-leaders should always send ORDERED reply when previous commands are ready
 		// This is needed for the macks quorum to complete when there are key conflicts
 		// (when non-leaders initially return Ok=FALSE instead of TRUE)
-		if !r.isLeader {
+		if !r.IsLeader() {
 			prop, exists := r.proposes.Get(desc.cmdId.String())
 			if exists { // or if desc.propose != nil ?
 				r.IfPreviousAreReady(desc, func() {
 					propose := prop.(*defs.GPropose)
 					recAck := &MRecordAck{
 						Replica: r.Id,
-						Ballot:  r.ballot,
+						Ballot:  r.currentTerm,
 						CmdId:   desc.cmdId,
 						Ok:      ORDERED,
 					}
@@ -439,7 +479,7 @@ func (r *Replica) handleAccept(msg *MAccept, desc *commandDesc) {
 			r.batcher.SendAcceptAck(ack)
 			r.handleAcceptAck(ack, desc)
 		} else {
-			if r.isLeader {
+			if r.IsLeader() {
 				r.handleAcceptAck(ack, desc)
 			} else {
 				r.sender.SendTo(msg.Replica, ack, r.cs.acceptAckRPC)
@@ -449,7 +489,10 @@ func (r *Replica) handleAccept(msg *MAccept, desc *commandDesc) {
 }
 
 func (r *Replica) handleAcceptAck(msg *MAcceptAck, desc *commandDesc) {
-	if r.status != NORMAL || r.ballot != msg.Ballot {
+	if msg.Ballot > r.currentTerm {
+		r.becomeFollower(msg.Ballot)
+	}
+	if r.status != NORMAL || r.currentTerm != msg.Ballot {
 		return
 	}
 
@@ -460,12 +503,12 @@ func getAcksHandler(r *Replica, desc *commandDesc) replica.MsgSetHandler {
 	return func(_ interface{}, _ []interface{}) {
 		commit := &MCommit{
 			Replica: r.Id,
-			Ballot:  r.ballot,
+			Ballot:  r.currentTerm,
 			CmdSlot: desc.cmdSlot,
 		}
 		if r.optimized {
 			r.handleCommit(commit, desc)
-		} else if r.isLeader {
+		} else if r.IsLeader() {
 			r.sender.SendToAll(commit, r.cs.commitRPC)
 			r.handleCommit(commit, desc)
 		}
@@ -473,18 +516,21 @@ func getAcksHandler(r *Replica, desc *commandDesc) replica.MsgSetHandler {
 }
 
 func (r *Replica) handleCommit(msg *MCommit, desc *commandDesc) {
+	if msg.Ballot > r.currentTerm {
+		r.becomeFollower(msg.Ballot)
+	}
 	slotStr := strconv.Itoa(msg.CmdSlot)
 	if r.delivered.Has(slotStr) {
 		return
 	}
 
 	desc.afterPayload.Call(func() {
-		if r.status != NORMAL || r.ballot != msg.Ballot || desc.phase == COMMIT {
+		if r.status != NORMAL || r.currentTerm != msg.Ballot || desc.phase == COMMIT {
 			return
 		}
 
 		desc.phase = COMMIT
-		if r.isLeader {
+		if r.IsLeader() {
 			r.committed.Set(strconv.Itoa(desc.cmdSlot), struct{}{})
 			r.notifyCommit(desc.cmdSlot) // Notify waiters that slot is committed
 		}
@@ -504,7 +550,7 @@ func (r *Replica) handleCommit(msg *MCommit, desc *commandDesc) {
 }
 
 func (r *Replica) sync(cmdId CommandId, cmd state.Command) {
-	if r.isLeader {
+	if r.IsLeader() {
 		return
 	}
 	key := r.int32ToString(int32(cmd.K))
@@ -570,7 +616,7 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 			return
 		}
 
-		if desc.phase != COMMIT && !r.isLeader {
+		if desc.phase != COMMIT && !r.IsLeader() {
 			return
 		}
 
@@ -592,10 +638,10 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 			return
 		}
 
-		if !r.isLeader && desc.propose != nil {
+		if !r.IsLeader() && desc.propose != nil {
 			desc.cmd = desc.propose.Command
 			r.sync(desc.cmdId, desc.cmd)
-		} else if !r.isLeader && desc.cmd.Op != 0 {
+		} else if !r.IsLeader() && desc.cmd.Op != 0 {
 			// Weak command on non-leader: cmd is already set from Accept message
 			r.sync(desc.cmdId, desc.cmd)
 		}
@@ -608,10 +654,10 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 
 		// Speculative reply to client for strong commands (leader only, before commit)
 		// Weak commands are handled separately via handleWeakPropose
-		if r.isLeader && desc.phase != COMMIT && desc.propose != nil {
+		if r.IsLeader() && desc.phase != COMMIT && desc.propose != nil {
 			rep := &MReply{
 				Replica: r.Id,
-				Ballot:  r.ballot,
+				Ballot:  r.currentTerm,
 				CmdId:   desc.cmdId,
 				Rep:     desc.val,
 				Slot:    int32(slot),
@@ -653,10 +699,10 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 			// Weak commands are handled separately
 			if !r.contactClients && desc.propose != nil {
 				if (r.optimized && desc.propose.Proxy) ||
-					(!r.optimized && r.isLeader) {
+					(!r.optimized && r.IsLeader()) {
 					rep := &MSyncReply{
 						Replica: r.Id,
-						Ballot:  r.ballot,
+						Ballot:  r.currentTerm,
 						CmdId:   desc.cmdId,
 						Rep:     desc.val,
 						Slot:    int32(slot),
@@ -673,7 +719,7 @@ func (r *Replica) deliver(desc *commandDesc, slot int) {
 			// owns the descriptor lifecycle — it will send the reply, save the value,
 			// mark delivered, and then trigger handler cleanup via desc.msgs <- slot.
 			// This avoids freeing the descriptor while asyncReplicateWeak still needs it.
-			if desc.isWeak && r.isLeader {
+			if desc.isWeak && r.IsLeader() {
 				return
 			}
 			desc.msgs <- slot
@@ -871,7 +917,7 @@ func (r *Replica) handleWeakPropose(propose *MWeakPropose) {
 	// of whether the pending op is strong or weak (conflict-driven, not CL-driven).
 	rep := r.weakReplyPool.Get().(*MWeakReply)
 	rep.Replica = r.Id
-	rep.Ballot = r.ballot
+	rep.Ballot = r.currentTerm
 	rep.CmdId = desc.cmdId
 	rep.Rep = state.NIL()
 	rep.Slot = int32(slot)
@@ -928,7 +974,7 @@ func (r *Replica) asyncReplicateWeak(desc *commandDesc, slot int, clientId int32
 	// Send Accept to other replicas
 	acc := &MAccept{
 		Replica: r.Id,
-		Ballot:  r.ballot,
+		Ballot:  r.currentTerm,
 		Cmd:     desc.cmd,
 		CmdId:   desc.cmdId,
 		CmdSlot: slot,
@@ -1099,7 +1145,7 @@ func (r *Replica) handleWeakRead(msg *MWeakRead) {
 	}
 	reply := &MWeakReadReply{
 		Replica: r.Id,
-		Ballot:  r.ballot,
+		Ballot:  r.currentTerm,
 		CmdId:   CommandId{ClientId: msg.ClientId, SeqNum: msg.CommandId},
 		Rep:     value,
 		Version: version,

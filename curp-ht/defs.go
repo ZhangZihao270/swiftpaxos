@@ -19,6 +19,13 @@ const (
 	RECOVERING
 )
 
+// role
+const (
+	FOLLOWER = iota
+	CANDIDATE
+	LEADER
+)
+
 // phase
 const (
 	START = iota

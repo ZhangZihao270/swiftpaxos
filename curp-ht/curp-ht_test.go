@@ -9,6 +9,7 @@ import (
 
 	cmap "github.com/orcaman/concurrent-map"
 
+	"github.com/imdea-software/swiftpaxos/hook"
 	"github.com/imdea-software/swiftpaxos/replica"
 	"github.com/imdea-software/swiftpaxos/replica/defs"
 	fastrpc "github.com/imdea-software/swiftpaxos/rpc"
@@ -1788,5 +1789,292 @@ func TestSplitMsgGoroutines(t *testing.T) {
 		if strongSet[ch] {
 			t.Errorf("weak channel %d overlaps with a strong channel", i)
 		}
+	}
+}
+
+// ============================================================================
+// Phase 128 Step 1: Role/Term State Management Tests
+// ============================================================================
+
+// TestRoleConstants verifies the role constant values are distinct.
+func TestRoleConstants(t *testing.T) {
+	if FOLLOWER == CANDIDATE || CANDIDATE == LEADER || FOLLOWER == LEADER {
+		t.Error("role constants must be distinct")
+	}
+	// FOLLOWER should be 0 (default iota value)
+	if FOLLOWER != 0 {
+		t.Errorf("FOLLOWER should be 0, got %d", FOLLOWER)
+	}
+}
+
+// TestReplicaInitialState verifies a new Replica starts as FOLLOWER with term 0.
+func TestReplicaInitialState(t *testing.T) {
+	r := &Replica{
+		role:        FOLLOWER,
+		currentTerm: 0,
+		votedFor:    -1,
+	}
+	if r.role != FOLLOWER {
+		t.Errorf("initial role should be FOLLOWER, got %d", r.role)
+	}
+	if r.currentTerm != 0 {
+		t.Errorf("initial term should be 0, got %d", r.currentTerm)
+	}
+	if r.votedFor != -1 {
+		t.Errorf("initial votedFor should be -1, got %d", r.votedFor)
+	}
+	if r.IsLeader() {
+		t.Error("new replica should not be leader")
+	}
+}
+
+// TestBecomeLeader verifies role transition to LEADER.
+func TestBecomeLeader(t *testing.T) {
+	r := &Replica{
+		role:        FOLLOWER,
+		currentTerm: 1,
+		votedFor:    -1,
+	}
+	r.becomeLeader()
+	if r.role != LEADER {
+		t.Errorf("role should be LEADER after becomeLeader, got %d", r.role)
+	}
+	if !r.IsLeader() {
+		t.Error("IsLeader() should return true after becomeLeader")
+	}
+	// becomeLeader should not change term or votedFor
+	if r.currentTerm != 1 {
+		t.Errorf("becomeLeader should not change term, got %d", r.currentTerm)
+	}
+	if r.votedFor != -1 {
+		t.Errorf("becomeLeader should not change votedFor, got %d", r.votedFor)
+	}
+}
+
+// TestBecomeFollowerHigherTerm verifies step-down to FOLLOWER with a higher term.
+func TestBecomeFollowerHigherTerm(t *testing.T) {
+	r := &Replica{
+		role:        LEADER,
+		currentTerm: 3,
+		votedFor:    0,
+	}
+	r.Replica = &replica.Replica{} // Need base replica for Id field
+	r.becomeFollower(5)
+	if r.role != FOLLOWER {
+		t.Errorf("role should be FOLLOWER, got %d", r.role)
+	}
+	if r.currentTerm != 5 {
+		t.Errorf("currentTerm should be 5, got %d", r.currentTerm)
+	}
+	if r.votedFor != -1 {
+		t.Errorf("votedFor should be reset to -1, got %d", r.votedFor)
+	}
+	if r.IsLeader() {
+		t.Error("should not be leader after becomeFollower")
+	}
+}
+
+// TestBecomeFollowerSameTerm verifies step-down without term change keeps votedFor.
+func TestBecomeFollowerSameTerm(t *testing.T) {
+	r := &Replica{
+		role:        CANDIDATE,
+		currentTerm: 3,
+		votedFor:    2,
+	}
+	r.becomeFollower(3) // same term
+	if r.role != FOLLOWER {
+		t.Errorf("role should be FOLLOWER, got %d", r.role)
+	}
+	if r.currentTerm != 3 {
+		t.Errorf("currentTerm should stay 3, got %d", r.currentTerm)
+	}
+	if r.votedFor != 2 {
+		t.Errorf("votedFor should stay 2 for same term, got %d", r.votedFor)
+	}
+}
+
+// TestBecomeCandidate verifies transition to CANDIDATE increments term and self-votes.
+func TestBecomeCandidate(t *testing.T) {
+	r := &Replica{
+		role:        FOLLOWER,
+		currentTerm: 5,
+		votedFor:    -1,
+	}
+	r.Replica = &replica.Replica{}
+	r.Id = 2
+
+	r.becomeCandidate()
+	if r.role != CANDIDATE {
+		t.Errorf("role should be CANDIDATE, got %d", r.role)
+	}
+	if r.currentTerm != 6 {
+		t.Errorf("currentTerm should be 6 (incremented), got %d", r.currentTerm)
+	}
+	if r.votedFor != 2 {
+		t.Errorf("votedFor should be self (2), got %d", r.votedFor)
+	}
+	if r.IsLeader() {
+		t.Error("candidate should not be leader")
+	}
+}
+
+// TestRoleTransitionSequence verifies a full election lifecycle:
+// FOLLOWER -> CANDIDATE -> LEADER -> FOLLOWER (step-down).
+func TestRoleTransitionSequence(t *testing.T) {
+	r := &Replica{
+		role:        FOLLOWER,
+		currentTerm: 0,
+		votedFor:    -1,
+	}
+	r.Replica = &replica.Replica{}
+	r.Id = 1
+
+	// Step 1: Start election
+	r.becomeCandidate()
+	if r.role != CANDIDATE || r.currentTerm != 1 || r.votedFor != 1 {
+		t.Errorf("after becomeCandidate: role=%d term=%d votedFor=%d", r.role, r.currentTerm, r.votedFor)
+	}
+
+	// Step 2: Win election
+	r.becomeLeader()
+	if r.role != LEADER || r.currentTerm != 1 {
+		t.Errorf("after becomeLeader: role=%d term=%d", r.role, r.currentTerm)
+	}
+
+	// Step 3: Discover higher term → step down
+	r.becomeFollower(3)
+	if r.role != FOLLOWER || r.currentTerm != 3 || r.votedFor != -1 {
+		t.Errorf("after becomeFollower(3): role=%d term=%d votedFor=%d", r.role, r.currentTerm, r.votedFor)
+	}
+}
+
+// TestHandleAcceptTermStepDown verifies that handleAccept steps down
+// when receiving a message with a higher ballot/term.
+// After step-down, the handler proceeds (terms match), so we provide
+// a properly initialized afterPayload to avoid nil panic.
+func TestHandleAcceptTermStepDown(t *testing.T) {
+	r := &Replica{
+		role:        LEADER,
+		currentTerm: 2,
+		status:      NORMAL,
+	}
+	r.Replica = &replica.Replica{N: 3}
+	r.delivered = cmap.New()
+
+	msg := &MAccept{
+		Replica: 1,
+		Ballot:  5, // higher term
+		CmdSlot: 0,
+	}
+	desc := &commandDesc{
+		afterPayload: hook.NewOptCondF(func() bool { return false }),
+	}
+
+	r.handleAccept(msg, desc)
+	if r.role != FOLLOWER {
+		t.Errorf("should step down to FOLLOWER, got role=%d", r.role)
+	}
+	if r.currentTerm != 5 {
+		t.Errorf("currentTerm should be updated to 5, got %d", r.currentTerm)
+	}
+}
+
+// TestHandleAcceptAckTermStepDown verifies that handleAcceptAck steps down
+// when receiving a message with a higher ballot/term.
+func TestHandleAcceptAckTermStepDown(t *testing.T) {
+	r := &Replica{
+		role:        LEADER,
+		currentTerm: 2,
+		status:      NORMAL,
+	}
+	r.Replica = &replica.Replica{N: 3}
+
+	msg := &MAcceptAck{
+		Replica: 1,
+		Ballot:  7,
+		CmdSlot: 0,
+	}
+	desc := &commandDesc{
+		acks: replica.NewMsgSet(replica.NewMajorityOf(3), func(_, _ interface{}) bool { return true }, nil, func(_ interface{}, _ []interface{}) {}),
+	}
+
+	r.handleAcceptAck(msg, desc)
+	if r.role != FOLLOWER {
+		t.Errorf("should step down to FOLLOWER, got role=%d", r.role)
+	}
+	if r.currentTerm != 7 {
+		t.Errorf("currentTerm should be updated to 7, got %d", r.currentTerm)
+	}
+}
+
+// TestHandleCommitTermStepDown verifies that handleCommit steps down
+// when receiving a message with a higher ballot/term.
+func TestHandleCommitTermStepDown(t *testing.T) {
+	r := &Replica{
+		role:        LEADER,
+		currentTerm: 2,
+		status:      NORMAL,
+	}
+	r.Replica = &replica.Replica{N: 3}
+	r.delivered = cmap.New()
+
+	msg := &MCommit{
+		Replica: 1,
+		Ballot:  10,
+		CmdSlot: 0,
+	}
+
+	desc := &commandDesc{
+		afterPayload: hook.NewOptCondF(func() bool { return false }),
+	}
+	r.handleCommit(msg, desc)
+	if r.role != FOLLOWER {
+		t.Errorf("should step down to FOLLOWER, got role=%d", r.role)
+	}
+	if r.currentTerm != 10 {
+		t.Errorf("currentTerm should be updated to 10, got %d", r.currentTerm)
+	}
+}
+
+// TestHandleAcceptStaleTerm verifies that messages with lower term are rejected.
+func TestHandleAcceptStaleTerm(t *testing.T) {
+	r := &Replica{
+		role:        LEADER,
+		currentTerm: 5,
+		status:      NORMAL,
+	}
+	r.Replica = &replica.Replica{N: 3}
+	r.delivered = cmap.New()
+
+	msg := &MAccept{
+		Replica: 1,
+		Ballot:  3, // stale term
+		CmdSlot: 0,
+	}
+	desc := &commandDesc{}
+
+	// Should not step down for stale term — returns early before afterPayload
+	r.handleAccept(msg, desc)
+	if r.role != LEADER {
+		t.Errorf("should remain LEADER for stale term, got role=%d", r.role)
+	}
+	if r.currentTerm != 5 {
+		t.Errorf("currentTerm should remain 5, got %d", r.currentTerm)
+	}
+}
+
+// TestIsLeaderMethod verifies the IsLeader() convenience method.
+func TestIsLeaderMethod(t *testing.T) {
+	r := &Replica{role: FOLLOWER}
+	if r.IsLeader() {
+		t.Error("FOLLOWER should not be leader")
+	}
+	r.role = CANDIDATE
+	if r.IsLeader() {
+		t.Error("CANDIDATE should not be leader")
+	}
+	r.role = LEADER
+	if !r.IsLeader() {
+		t.Error("LEADER should be leader")
 	}
 }
