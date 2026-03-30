@@ -9488,6 +9488,45 @@ grep "TPUT" results/exp2.3-test/client*.log | tail -20
 
 **Fix direction**: In `handleReaderDead`, after rotating leader, start `WaitReplies(newLeader)` to read replies from new leader.
 
+#### ⬜ Step 5: Fix, verify, iterate
+After each fix:
+1. Build and deploy:
+```bash
+go build -o swiftpaxos-dist . && go test ./curp-ht/ -count=1 -timeout 120s
+for host in 130.245.173.{101,103,104,125,126}; do scp swiftpaxos-dist $host:~/swiftpaxos/; done
+```
+2. Run kill-leader experiment:
+```bash
+# Clean up
+for host in 130.245.173.{101,103,104,125,126}; do ssh $host "pkill -9 -x swiftpaxos-dist"; done
+sleep 2
+
+# Start benchmark (benchmark.conf has: curpht, t=16, reqs=100000, networkDelay=25)
+REMOTE_WORK_DIR=~/swiftpaxos timeout 300 ./run-multi-client.sh -d -c benchmark.conf -t 16 -o results/exp2.3-test &
+sleep 60
+
+# Kill leader
+ssh 130.245.173.101 "pkill -9 -f 'swiftpaxos-dist.*server'"
+
+# Wait for benchmark to finish
+wait
+```
+3. Check results:
+```bash
+# Extract per-second throughput
+for f in results/exp2.3-test/client*.log; do grep "TPUT " "$f" | awk '$3=="TPUT" {print $5","$4","$6}'; done | \
+  awk -F, '{s[$1]+=$3} END{for(k in s) print k","s[k]}' | sort -t, -k1,1n
+
+# Check election + recovery
+grep "Won election\|Slot sync complete" results/exp2.3-test/replica*.log
+grep "flush" results/exp2.3-test/client*.log | head -5
+
+# Check if client received replies after recovery
+grep "TPUT" results/exp2.3-test/client1.log | tail -10
+```
+4. **Success criteria**: throughput drops to 0 for 2-3s after kill, then recovers to >0 (any amount from client1+client2 counts)
+5. If still broken: add debug logs, re-run, identify next layer of the problem, write plan, fix, repeat
+
 ### Phase 128.7: Client Pipeline Recovery After Failover
 
 **Problem**: After leader kill + election + recovery (all working, <2s), client throughput stays at 0. New leader is ready (status=NORMAL) but clients never send new commands.
