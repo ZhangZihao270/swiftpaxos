@@ -9,12 +9,26 @@ import (
 
 	cmap "github.com/orcaman/concurrent-map"
 
+	"github.com/imdea-software/swiftpaxos/dlog"
 	"github.com/imdea-software/swiftpaxos/hook"
 	"github.com/imdea-software/swiftpaxos/replica"
 	"github.com/imdea-software/swiftpaxos/replica/defs"
 	fastrpc "github.com/imdea-software/swiftpaxos/rpc"
 	"github.com/imdea-software/swiftpaxos/state"
 )
+
+// newTestSender creates a buffered Sender that absorbs messages without blocking.
+func newTestSender() replica.Sender {
+	return replica.Sender(make(chan replica.SendArg, 1000))
+}
+
+// newTestBaseReplica creates a base replica.Replica with a logger for tests.
+func newTestBaseReplica(n int) *replica.Replica {
+	return &replica.Replica{
+		N:      n,
+		Logger: dlog.New("", false),
+	}
+}
 
 // ============================================================================
 // Phase 31.7: Serialization Optimization Tests
@@ -2076,5 +2090,495 @@ func TestIsLeaderMethod(t *testing.T) {
 	r.role = LEADER
 	if !r.IsLeader() {
 		t.Error("LEADER should be leader")
+	}
+}
+
+// ============================================================================
+// Phase 128 Step 2: Leader Election Protocol Tests
+// ============================================================================
+
+// TestMRequestVoteSerialization tests MRequestVote Marshal/Unmarshal round-trip.
+func TestMRequestVoteSerialization(t *testing.T) {
+	original := &MRequestVote{
+		Replica:          2,
+		Term:             5,
+		LastCommittedSlot: 42,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	if buf.Len() != 12 {
+		t.Errorf("MRequestVote should serialize to 12 bytes, got %d", buf.Len())
+	}
+
+	restored := &MRequestVote{}
+	err := restored.Unmarshal(&buf)
+	if err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if restored.Replica != original.Replica {
+		t.Errorf("Replica mismatch: got %d, want %d", restored.Replica, original.Replica)
+	}
+	if restored.Term != original.Term {
+		t.Errorf("Term mismatch: got %d, want %d", restored.Term, original.Term)
+	}
+	if restored.LastCommittedSlot != original.LastCommittedSlot {
+		t.Errorf("LastCommittedSlot mismatch: got %d, want %d", restored.LastCommittedSlot, original.LastCommittedSlot)
+	}
+}
+
+// TestMRequestVoteReplySerialization tests MRequestVoteReply Marshal/Unmarshal round-trip.
+func TestMRequestVoteReplySerialization(t *testing.T) {
+	original := &MRequestVoteReply{
+		Replica:     1,
+		Term:        3,
+		VoteGranted: TRUE,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	if buf.Len() != 9 {
+		t.Errorf("MRequestVoteReply should serialize to 9 bytes, got %d", buf.Len())
+	}
+
+	restored := &MRequestVoteReply{}
+	err := restored.Unmarshal(&buf)
+	if err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if restored.Replica != original.Replica {
+		t.Errorf("Replica mismatch: got %d, want %d", restored.Replica, original.Replica)
+	}
+	if restored.Term != original.Term {
+		t.Errorf("Term mismatch: got %d, want %d", restored.Term, original.Term)
+	}
+	if restored.VoteGranted != original.VoteGranted {
+		t.Errorf("VoteGranted mismatch: got %d, want %d", restored.VoteGranted, original.VoteGranted)
+	}
+}
+
+// TestMHeartbeatSerialization tests MHeartbeat Marshal/Unmarshal round-trip.
+func TestMHeartbeatSerialization(t *testing.T) {
+	original := &MHeartbeat{
+		Replica: 0,
+		Term:    7,
+	}
+
+	var buf bytes.Buffer
+	original.Marshal(&buf)
+
+	if buf.Len() != 8 {
+		t.Errorf("MHeartbeat should serialize to 8 bytes, got %d", buf.Len())
+	}
+
+	restored := &MHeartbeat{}
+	err := restored.Unmarshal(&buf)
+	if err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if restored.Replica != original.Replica {
+		t.Errorf("Replica mismatch: got %d, want %d", restored.Replica, original.Replica)
+	}
+	if restored.Term != original.Term {
+		t.Errorf("Term mismatch: got %d, want %d", restored.Term, original.Term)
+	}
+}
+
+// TestMRequestVoteBinarySize tests BinarySize.
+func TestMRequestVoteBinarySize(t *testing.T) {
+	m := &MRequestVote{}
+	size, known := m.BinarySize()
+	if !known || size != 12 {
+		t.Errorf("BinarySize should be (12, true), got (%d, %v)", size, known)
+	}
+}
+
+// TestMRequestVoteReplyBinarySize tests BinarySize.
+func TestMRequestVoteReplyBinarySize(t *testing.T) {
+	m := &MRequestVoteReply{}
+	size, known := m.BinarySize()
+	if !known || size != 9 {
+		t.Errorf("BinarySize should be (9, true), got (%d, %v)", size, known)
+	}
+}
+
+// TestMHeartbeatBinarySize tests BinarySize.
+func TestMHeartbeatBinarySize(t *testing.T) {
+	m := &MHeartbeat{}
+	size, known := m.BinarySize()
+	if !known || size != 8 {
+		t.Errorf("BinarySize should be (8, true), got (%d, %v)", size, known)
+	}
+}
+
+// TestMRequestVoteCache tests object pool for MRequestVote.
+func TestMRequestVoteCache(t *testing.T) {
+	cache := NewMRequestVoteCache()
+	obj := cache.Get()
+	if obj == nil {
+		t.Fatal("Get returned nil")
+	}
+	obj.Term = 5
+	cache.Put(obj)
+	obj2 := cache.Get()
+	if obj2 == nil {
+		t.Fatal("Get after Put returned nil")
+	}
+}
+
+// TestStartElection verifies that startElection increments term and self-votes.
+func TestStartElection(t *testing.T) {
+	r := &Replica{
+		role:        FOLLOWER,
+		currentTerm: 3,
+		votedFor:    -1,
+	}
+	r.Replica = newTestBaseReplica(5)
+	r.Id = 2
+	r.sender = newTestSender() // No-op sender for tests
+	r.electionTimer = time.NewTimer(time.Hour) // Won't fire
+
+	r.startElection()
+
+	if r.role != CANDIDATE {
+		t.Errorf("role should be CANDIDATE, got %d", r.role)
+	}
+	if r.currentTerm != 4 {
+		t.Errorf("currentTerm should be 4, got %d", r.currentTerm)
+	}
+	if r.votedFor != 2 {
+		t.Errorf("votedFor should be self (2), got %d", r.votedFor)
+	}
+	if r.votesReceived != 1 {
+		t.Errorf("votesReceived should be 1 (self), got %d", r.votesReceived)
+	}
+}
+
+// TestHandleRequestVoteGranted verifies vote is granted for valid request.
+func TestHandleRequestVoteGranted(t *testing.T) {
+	r := &Replica{
+		role:          FOLLOWER,
+		currentTerm:   3,
+		votedFor:      -1,
+		lastCommitted: 10,
+	}
+	r.Replica = newTestBaseReplica(5)
+	r.Id = 1
+	r.sender = newTestSender()
+	r.electionTimer = time.NewTimer(time.Hour)
+
+	msg := &MRequestVote{
+		Replica:          2,
+		Term:             3,
+		LastCommittedSlot: 10,
+	}
+
+	r.handleRequestVote(msg)
+
+	if r.votedFor != 2 {
+		t.Errorf("votedFor should be 2 (granted), got %d", r.votedFor)
+	}
+}
+
+// TestHandleRequestVoteDeniedStaleTerm verifies vote is denied for stale term.
+func TestHandleRequestVoteDeniedStaleTerm(t *testing.T) {
+	r := &Replica{
+		role:          FOLLOWER,
+		currentTerm:   5,
+		votedFor:      -1,
+		lastCommitted: 10,
+	}
+	r.Replica = newTestBaseReplica(5)
+	r.Id = 1
+	r.sender = newTestSender()
+
+	msg := &MRequestVote{
+		Replica:          2,
+		Term:             3, // stale term
+		LastCommittedSlot: 10,
+	}
+
+	r.handleRequestVote(msg)
+
+	if r.votedFor != -1 {
+		t.Errorf("votedFor should remain -1 (denied), got %d", r.votedFor)
+	}
+}
+
+// TestHandleRequestVoteDeniedAlreadyVoted verifies vote is denied if already voted.
+func TestHandleRequestVoteDeniedAlreadyVoted(t *testing.T) {
+	r := &Replica{
+		role:          FOLLOWER,
+		currentTerm:   3,
+		votedFor:      0, // Already voted for replica 0
+		lastCommitted: 10,
+	}
+	r.Replica = newTestBaseReplica(5)
+	r.Id = 1
+	r.sender = newTestSender()
+
+	msg := &MRequestVote{
+		Replica:          2, // Different candidate
+		Term:             3,
+		LastCommittedSlot: 10,
+	}
+
+	r.handleRequestVote(msg)
+
+	if r.votedFor != 0 {
+		t.Errorf("votedFor should remain 0 (already voted), got %d", r.votedFor)
+	}
+}
+
+// TestHandleRequestVoteHigherTerm verifies step-down on higher term request.
+func TestHandleRequestVoteHigherTerm(t *testing.T) {
+	r := &Replica{
+		role:          LEADER,
+		currentTerm:   3,
+		votedFor:      1,
+		lastCommitted: 10,
+	}
+	r.Replica = newTestBaseReplica(5)
+	r.Id = 1
+	r.sender = newTestSender()
+	r.electionTimer = time.NewTimer(time.Hour)
+
+	msg := &MRequestVote{
+		Replica:          2,
+		Term:             5, // Higher term
+		LastCommittedSlot: 10,
+	}
+
+	r.handleRequestVote(msg)
+
+	if r.role != FOLLOWER {
+		t.Errorf("role should be FOLLOWER after higher term, got %d", r.role)
+	}
+	if r.currentTerm != 5 {
+		t.Errorf("currentTerm should be 5, got %d", r.currentTerm)
+	}
+	// Should grant vote since votedFor reset to -1 and log is up-to-date
+	if r.votedFor != 2 {
+		t.Errorf("votedFor should be 2 (granted after step-down), got %d", r.votedFor)
+	}
+}
+
+// TestHandleRequestVoteDeniedStaleLog verifies vote denied when candidate log is behind.
+func TestHandleRequestVoteDeniedStaleLog(t *testing.T) {
+	r := &Replica{
+		role:          FOLLOWER,
+		currentTerm:   3,
+		votedFor:      -1,
+		lastCommitted: 20, // Our log is further ahead
+	}
+	r.Replica = newTestBaseReplica(5)
+	r.Id = 1
+	r.sender = newTestSender()
+
+	msg := &MRequestVote{
+		Replica:          2,
+		Term:             3,
+		LastCommittedSlot: 10, // Candidate is behind
+	}
+
+	r.handleRequestVote(msg)
+
+	if r.votedFor != -1 {
+		t.Errorf("votedFor should remain -1 (candidate log behind), got %d", r.votedFor)
+	}
+}
+
+// TestHandleVoteReplyWinElection verifies a candidate wins with majority votes.
+func TestHandleVoteReplyWinElection(t *testing.T) {
+	r := &Replica{
+		role:          CANDIDATE,
+		currentTerm:   5,
+		votedFor:      1,
+		votesReceived: 1, // Self vote
+	}
+	r.Replica = newTestBaseReplica(5)
+	r.Id = 1
+	r.sender = newTestSender()
+	r.electionTimer = time.NewTimer(time.Hour)
+
+	// Receive 2 more votes (need 3 total = majority of 5)
+	r.handleRequestVoteReply(&MRequestVoteReply{Replica: 2, Term: 5, VoteGranted: TRUE})
+	if r.role == LEADER {
+		t.Error("should not be leader after 2 votes (need 3)")
+	}
+
+	r.handleRequestVoteReply(&MRequestVoteReply{Replica: 3, Term: 5, VoteGranted: TRUE})
+	if r.role != LEADER {
+		t.Errorf("should be LEADER after 3 votes, got role=%d", r.role)
+	}
+	if r.votesReceived != 3 {
+		t.Errorf("votesReceived should be 3, got %d", r.votesReceived)
+	}
+}
+
+// TestHandleVoteReplyDenied verifies denied votes don't count.
+func TestHandleVoteReplyDenied(t *testing.T) {
+	r := &Replica{
+		role:          CANDIDATE,
+		currentTerm:   5,
+		votedFor:      1,
+		votesReceived: 1,
+	}
+	r.Replica = newTestBaseReplica(5)
+	r.Id = 1
+	r.sender = newTestSender()
+
+	r.handleRequestVoteReply(&MRequestVoteReply{Replica: 2, Term: 5, VoteGranted: FALSE})
+	if r.votesReceived != 1 {
+		t.Errorf("votesReceived should remain 1 after denied vote, got %d", r.votesReceived)
+	}
+}
+
+// TestHandleVoteReplyHigherTerm verifies step-down on higher term reply.
+func TestHandleVoteReplyHigherTerm(t *testing.T) {
+	r := &Replica{
+		role:          CANDIDATE,
+		currentTerm:   5,
+		votedFor:      1,
+		votesReceived: 1,
+	}
+	r.Replica = newTestBaseReplica(5)
+	r.Id = 1
+	r.sender = newTestSender()
+
+	r.handleRequestVoteReply(&MRequestVoteReply{Replica: 2, Term: 8, VoteGranted: FALSE})
+	if r.role != FOLLOWER {
+		t.Errorf("should step down to FOLLOWER, got role=%d", r.role)
+	}
+	if r.currentTerm != 8 {
+		t.Errorf("currentTerm should be 8, got %d", r.currentTerm)
+	}
+}
+
+// TestHandleHeartbeatResetTimer verifies heartbeat resets election timer.
+func TestHandleHeartbeatResetTimer(t *testing.T) {
+	r := &Replica{
+		role:        FOLLOWER,
+		currentTerm: 3,
+		votedFor:    -1,
+	}
+	r.Replica = newTestBaseReplica(5)
+	r.electionTimer = time.NewTimer(time.Hour)
+
+	msg := &MHeartbeat{Replica: 0, Term: 3}
+	r.handleHeartbeat(msg)
+
+	// After handling heartbeat, role should still be follower
+	if r.role != FOLLOWER {
+		t.Errorf("role should be FOLLOWER, got %d", r.role)
+	}
+}
+
+// TestHandleHeartbeatHigherTerm verifies step-down on higher term heartbeat.
+func TestHandleHeartbeatHigherTerm(t *testing.T) {
+	r := &Replica{
+		role:        CANDIDATE,
+		currentTerm: 3,
+		votedFor:    1,
+	}
+	r.Replica = newTestBaseReplica(5)
+	r.electionTimer = time.NewTimer(time.Hour)
+
+	msg := &MHeartbeat{Replica: 0, Term: 5}
+	r.handleHeartbeat(msg)
+
+	if r.role != FOLLOWER {
+		t.Errorf("should step down to FOLLOWER, got role=%d", r.role)
+	}
+	if r.currentTerm != 5 {
+		t.Errorf("currentTerm should be 5, got %d", r.currentTerm)
+	}
+}
+
+// TestHandleHeartbeatStale verifies stale heartbeats are ignored.
+func TestHandleHeartbeatStale(t *testing.T) {
+	r := &Replica{
+		role:        FOLLOWER,
+		currentTerm: 5,
+		votedFor:    -1,
+	}
+	r.Replica = newTestBaseReplica(5)
+
+	msg := &MHeartbeat{Replica: 0, Term: 3} // stale
+	r.handleHeartbeat(msg)
+
+	if r.currentTerm != 5 {
+		t.Errorf("currentTerm should remain 5, got %d", r.currentTerm)
+	}
+}
+
+// TestHandleHeartbeatCandidateStepDown verifies candidate steps down on same-term heartbeat.
+func TestHandleHeartbeatCandidateStepDown(t *testing.T) {
+	r := &Replica{
+		role:        CANDIDATE,
+		currentTerm: 3,
+		votedFor:    1,
+	}
+	r.Replica = newTestBaseReplica(5)
+	r.electionTimer = time.NewTimer(time.Hour)
+
+	// Same-term heartbeat from another leader
+	msg := &MHeartbeat{Replica: 0, Term: 3}
+	r.handleHeartbeat(msg)
+
+	if r.role != FOLLOWER {
+		t.Errorf("candidate should step down on same-term heartbeat, got role=%d", r.role)
+	}
+}
+
+// TestRandomElectionTimeout verifies timeout is in expected range.
+func TestRandomElectionTimeout(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		d := randomElectionTimeout()
+		if d < ElectionTimeoutMin || d > ElectionTimeoutMax {
+			t.Errorf("timeout %v outside range [%v, %v]", d, ElectionTimeoutMin, ElectionTimeoutMax)
+		}
+	}
+}
+
+// TestElectionConstants verifies election timing constants.
+func TestElectionConstants(t *testing.T) {
+	if ElectionTimeoutMin >= ElectionTimeoutMax {
+		t.Error("ElectionTimeoutMin should be less than ElectionTimeoutMax")
+	}
+	if HeartbeatInterval >= ElectionTimeoutMin {
+		t.Error("HeartbeatInterval should be less than ElectionTimeoutMin")
+	}
+}
+
+// TestElectionChannelRegistration verifies election channels are registered.
+func TestElectionChannelRegistration(t *testing.T) {
+	var cs CommunicationSupply
+	tbl := fastrpc.NewTableId(defs.RPC_TABLE)
+	initCs(&cs, tbl)
+
+	if cs.requestVoteChan == nil {
+		t.Error("requestVoteChan should not be nil")
+	}
+	if cs.requestVoteReplyChan == nil {
+		t.Error("requestVoteReplyChan should not be nil")
+	}
+	if cs.heartbeatChan == nil {
+		t.Error("heartbeatChan should not be nil")
+	}
+	// RPC codes should be non-zero (registered)
+	if cs.requestVoteRPC == 0 {
+		t.Error("requestVoteRPC should be registered")
+	}
+	if cs.requestVoteReplyRPC == 0 {
+		t.Error("requestVoteReplyRPC should be registered")
+	}
+	if cs.heartbeatRPC == 0 {
+		t.Error("heartbeatRPC should be registered")
 	}
 }

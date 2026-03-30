@@ -9304,17 +9304,17 @@ beyond what strong-strong conflicts already cause.
 - [x] Added term step-down to handleAccept, handleAcceptAck, handleCommit: if msg.Ballot > currentTerm → becomeFollower
 - [x] 12 new tests: role constants, initial state, becomeX transitions, full lifecycle, handler step-down, stale term rejection
 
-#### ⬜ Step 2: Leader election protocol
-- Add `MRequestVote` / `MRequestVoteReply` messages + serialization
-- Add election timer (random 150-300ms) — reset on receiving leader heartbeat or granting vote
-- `startElection()`: increment term, vote for self, broadcast MRequestVote
-- `handleRequestVote()`: grant vote if term >= currentTerm and haven't voted yet, compare LastCommittedSlot
-- `handleRequestVoteReply()`: collect votes, become leader when majority reached
-
-#### ⬜ Step 3: Leader heartbeat
-- Leader sends periodic heartbeat (e.g., empty MCommit or new MHeartbeat) every 50ms
-- Followers reset election timer on receiving heartbeat
-- If no heartbeat for election timeout → start election
+#### ✅ Step 2: Leader election protocol + heartbeat [26:03:30]
+- [x] Added `MRequestVote` (12 bytes), `MRequestVoteReply` (9 bytes), `MHeartbeat` (8 bytes) + serialization + caches
+- [x] Added election channels + RPC registration (requestVoteChan, requestVoteReplyChan, heartbeatChan)
+- [x] Added election timer (random 150-300ms), heartbeat ticker (50ms), election state fields
+- [x] `startElection()`: becomeCandidate, self-vote, broadcast MRequestVote, reset timer
+- [x] `handleRequestVote()`: term check + step-down, grant vote if valid (term match, not voted, log up-to-date)
+- [x] `handleRequestVoteReply()`: count votes, becomeLeader on majority, step down on higher term
+- [x] `handleHeartbeat()`: step down on higher/same term (if candidate), reset election timer
+- [x] Leader sends heartbeat on ticker; follower starts election on timer expiry
+- [x] Integrated all into event loop select (election timer, heartbeat tick, 3 message channels)
+- [x] 22 new tests: serialization (3), binary size (3), cache (1), election logic (7), vote handling (5), heartbeat (4), constants/channels (2)
 
 #### ⬜ Step 4: Log recovery on new leader
 - New leader broadcasts `MLogSync` to all replicas requesting committed entries

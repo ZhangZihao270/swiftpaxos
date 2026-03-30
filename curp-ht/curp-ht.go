@@ -3,6 +3,7 @@ package curpht
 import (
 	"encoding/binary"
 	"log"
+	"math/rand"
 	"strconv"
 	"sync"
 	"time"
@@ -80,6 +81,12 @@ type Replica struct {
 	// Channel-based causal dep notification (replaces spin-wait in waitForWeakDep)
 	weakDepNotify map[int32]chan struct{}
 	weakDepMu     sync.Mutex
+
+	// Election state (Phase 128)
+	electionTimer  *time.Timer   // Fires when election timeout expires
+	heartbeatTimer *time.Ticker  // Leader sends periodic heartbeats
+	votesReceived  int           // Votes received in current election
+	lastCommitted  int32         // Highest committed slot (for log comparison in votes)
 }
 
 type commandDesc struct {
@@ -266,6 +273,151 @@ func (r *Replica) IsLeader() bool {
 	return r.role == LEADER
 }
 
+// Election timeout constants
+const (
+	ElectionTimeoutMin = 150 * time.Millisecond
+	ElectionTimeoutMax = 300 * time.Millisecond
+	HeartbeatInterval  = 50 * time.Millisecond
+)
+
+// randomElectionTimeout returns a random duration between ElectionTimeoutMin and ElectionTimeoutMax.
+func randomElectionTimeout() time.Duration {
+	spread := ElectionTimeoutMax - ElectionTimeoutMin
+	return ElectionTimeoutMin + time.Duration(rand.Int63n(int64(spread)))
+}
+
+// resetElectionTimer resets the election timer with a new random timeout.
+func (r *Replica) resetElectionTimer() {
+	if r.electionTimer != nil {
+		r.electionTimer.Reset(randomElectionTimeout())
+	}
+}
+
+// stopElectionTimer stops the election timer (used when becoming leader).
+func (r *Replica) stopElectionTimer() {
+	if r.electionTimer != nil {
+		r.electionTimer.Stop()
+	}
+}
+
+// startHeartbeat starts the periodic heartbeat ticker (leader only).
+func (r *Replica) startHeartbeat() {
+	if r.heartbeatTimer != nil {
+		r.heartbeatTimer.Stop()
+	}
+	r.heartbeatTimer = time.NewTicker(HeartbeatInterval)
+}
+
+// stopHeartbeat stops the heartbeat ticker (when stepping down from leader).
+func (r *Replica) stopHeartbeat() {
+	if r.heartbeatTimer != nil {
+		r.heartbeatTimer.Stop()
+		r.heartbeatTimer = nil
+	}
+}
+
+// sendHeartbeat broadcasts a heartbeat to all peers.
+func (r *Replica) sendHeartbeat() {
+	hb := &MHeartbeat{
+		Replica: r.Id,
+		Term:    r.currentTerm,
+	}
+	r.sender.SendToAll(hb, r.cs.heartbeatRPC)
+}
+
+// startElection begins a new leader election.
+func (r *Replica) startElection() {
+	r.becomeCandidate()
+	r.votesReceived = 1 // vote for self
+
+	r.Printf("Starting election for term %d\n", r.currentTerm)
+
+	msg := &MRequestVote{
+		Replica:          r.Id,
+		Term:             r.currentTerm,
+		LastCommittedSlot: r.lastCommitted,
+	}
+	r.sender.SendToAll(msg, r.cs.requestVoteRPC)
+
+	// Reset election timer in case we don't win
+	r.resetElectionTimer()
+}
+
+// handleRequestVote processes a vote request from a candidate.
+func (r *Replica) handleRequestVote(msg *MRequestVote) {
+	reply := &MRequestVoteReply{
+		Replica:     r.Id,
+		Term:        r.currentTerm,
+		VoteGranted: FALSE,
+	}
+
+	if msg.Term < r.currentTerm {
+		// Stale term — reject
+		r.sender.SendTo(msg.Replica, reply, r.cs.requestVoteReplyRPC)
+		return
+	}
+
+	if msg.Term > r.currentTerm {
+		r.becomeFollower(msg.Term)
+		r.stopHeartbeat()
+		reply.Term = r.currentTerm
+	}
+
+	// Grant vote if: haven't voted in this term (or already voted for this candidate)
+	// AND candidate's log is at least as up-to-date
+	if (r.votedFor == -1 || r.votedFor == msg.Replica) &&
+		msg.LastCommittedSlot >= r.lastCommitted {
+		r.votedFor = msg.Replica
+		reply.VoteGranted = TRUE
+		r.resetElectionTimer() // Reset timer when granting vote
+	}
+
+	r.sender.SendTo(msg.Replica, reply, r.cs.requestVoteReplyRPC)
+}
+
+// handleRequestVoteReply processes a vote reply from a peer.
+func (r *Replica) handleRequestVoteReply(msg *MRequestVoteReply) {
+	if msg.Term > r.currentTerm {
+		r.becomeFollower(msg.Term)
+		r.stopHeartbeat()
+		return
+	}
+
+	// Only process if we're still a candidate in this term
+	if r.role != CANDIDATE || msg.Term != r.currentTerm {
+		return
+	}
+
+	if msg.VoteGranted == TRUE {
+		r.votesReceived++
+		// Check if we have majority
+		if r.votesReceived > r.N/2 {
+			r.Printf("Won election for term %d with %d votes\n", r.currentTerm, r.votesReceived)
+			r.becomeLeader()
+			r.stopElectionTimer()
+			r.startHeartbeat()
+			r.sendHeartbeat() // Immediately announce leadership
+		}
+	}
+}
+
+// handleHeartbeat processes a heartbeat from the leader.
+func (r *Replica) handleHeartbeat(msg *MHeartbeat) {
+	if msg.Term < r.currentTerm {
+		return // Stale heartbeat
+	}
+
+	if msg.Term > r.currentTerm {
+		r.becomeFollower(msg.Term)
+		r.stopHeartbeat()
+	} else if r.role == CANDIDATE {
+		// Another leader exists for this term — step down
+		r.becomeFollower(msg.Term)
+	}
+
+	r.resetElectionTimer()
+}
+
 func (r *Replica) run() {
 	r.ConnectToPeers()
 	latencies := r.ComputeClosestPeers()
@@ -276,10 +428,25 @@ func (r *Replica) run() {
 		}
 	}
 
+	// Initialize election timer for followers; leader starts heartbeat
+	if r.IsLeader() {
+		r.electionTimer = time.NewTimer(randomElectionTimeout())
+		r.electionTimer.Stop() // Leader doesn't need election timer
+		r.startHeartbeat()
+	} else {
+		r.electionTimer = time.NewTimer(randomElectionTimeout())
+	}
+
 	go r.WaitForClientConnections()
 
 	var cmdId CommandId
 	for !r.Shutdown {
+		// Use nil channel pattern: heartbeat tick is nil when not leader
+		var heartbeatCh <-chan time.Time
+		if r.heartbeatTimer != nil {
+			heartbeatCh = r.heartbeatTimer.C
+		}
+
 		select {
 		case int := <-r.deliverChan:
 			r.getCmdDesc(int, "deliver", -1)
@@ -377,6 +544,28 @@ func (r *Replica) run() {
 		case m := <-r.cs.weakReadChan:
 			weakRead := m.(*MWeakRead)
 			r.handleWeakRead(weakRead)
+
+		case <-r.electionTimer.C:
+			if r.role != LEADER {
+				r.startElection()
+			}
+
+		case m := <-r.cs.requestVoteChan:
+			rv := m.(*MRequestVote)
+			r.handleRequestVote(rv)
+
+		case m := <-r.cs.requestVoteReplyChan:
+			rvr := m.(*MRequestVoteReply)
+			r.handleRequestVoteReply(rvr)
+
+		case m := <-r.cs.heartbeatChan:
+			hb := m.(*MHeartbeat)
+			r.handleHeartbeat(hb)
+
+		case <-heartbeatCh:
+			if r.IsLeader() {
+				r.sendHeartbeat()
+			}
 		}
 	}
 }

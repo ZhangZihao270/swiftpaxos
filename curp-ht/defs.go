@@ -152,6 +152,26 @@ type MWeakReadReply struct {
 	Version int32
 }
 
+// MRequestVote - Candidate requests vote from peers during leader election
+type MRequestVote struct {
+	Replica          int32 // Candidate's replica ID
+	Term             int32 // Candidate's term
+	LastCommittedSlot int32 // Candidate's highest committed slot (for log comparison)
+}
+
+// MRequestVoteReply - Reply to vote request
+type MRequestVoteReply struct {
+	Replica     int32 // Voter's replica ID
+	Term        int32 // Voter's current term (may be updated)
+	VoteGranted uint8 // 1 = granted, 0 = denied
+}
+
+// MHeartbeat - Leader sends periodic heartbeats to prevent elections
+type MHeartbeat struct {
+	Replica int32 // Leader's replica ID
+	Term    int32 // Leader's term
+}
+
 func (m *MReply) New() fastrpc.Serializable {
 	return new(MReply)
 }
@@ -200,6 +220,18 @@ func (m *MWeakReadReply) New() fastrpc.Serializable {
 	return new(MWeakReadReply)
 }
 
+func (m *MRequestVote) New() fastrpc.Serializable {
+	return new(MRequestVote)
+}
+
+func (m *MRequestVoteReply) New() fastrpc.Serializable {
+	return new(MRequestVoteReply)
+}
+
+func (m *MHeartbeat) New() fastrpc.Serializable {
+	return new(MHeartbeat)
+}
+
 type CommunicationSupply struct {
 	maxLatency time.Duration
 
@@ -218,6 +250,11 @@ type CommunicationSupply struct {
 	weakReadChan      chan fastrpc.Serializable
 	weakReadReplyChan chan fastrpc.Serializable
 
+	// Election channels
+	requestVoteChan      chan fastrpc.Serializable
+	requestVoteReplyChan chan fastrpc.Serializable
+	heartbeatChan        chan fastrpc.Serializable
+
 	replyRPC     uint8
 	acceptRPC    uint8
 	acceptAckRPC uint8
@@ -232,6 +269,11 @@ type CommunicationSupply struct {
 	weakReplyRPC     uint8
 	weakReadRPC      uint8
 	weakReadReplyRPC uint8
+
+	// Election RPCs
+	requestVoteRPC      uint8
+	requestVoteReplyRPC uint8
+	heartbeatRPC        uint8
 }
 
 func initCs(cs *CommunicationSupply, t *fastrpc.Table) {
@@ -266,6 +308,16 @@ func initCs(cs *CommunicationSupply, t *fastrpc.Table) {
 	cs.weakReplyRPC = t.Register(new(MWeakReply), cs.weakReplyChan)
 	cs.weakReadRPC = t.Register(new(MWeakRead), cs.weakReadChan)
 	cs.weakReadReplyRPC = t.Register(new(MWeakReadReply), cs.weakReadReplyChan)
+
+	// Initialize election channels
+	cs.requestVoteChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
+	cs.requestVoteReplyChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
+	cs.heartbeatChan = make(chan fastrpc.Serializable, defs.CHAN_BUFFER_SIZE)
+
+	// Register election RPCs
+	cs.requestVoteRPC = t.Register(new(MRequestVote), cs.requestVoteChan)
+	cs.requestVoteReplyRPC = t.Register(new(MRequestVoteReply), cs.requestVoteReplyChan)
+	cs.heartbeatRPC = t.Register(new(MHeartbeat), cs.heartbeatChan)
 }
 
 type byteReader interface {
@@ -1443,5 +1495,211 @@ func (t *MWeakReadReply) Unmarshal(rr io.Reader) error {
 		return err
 	}
 	t.Version = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
+	return nil
+}
+
+// MRequestVote serialization (fixed size: 12 bytes)
+
+func (t *MRequestVote) BinarySize() (nbytes int, sizeKnown bool) {
+	return 12, true
+}
+
+type MRequestVoteCache struct {
+	mu    sync.Mutex
+	cache []*MRequestVote
+}
+
+func NewMRequestVoteCache() *MRequestVoteCache {
+	c := &MRequestVoteCache{}
+	c.cache = make([]*MRequestVote, 0)
+	return c
+}
+
+func (p *MRequestVoteCache) Get() *MRequestVote {
+	var t *MRequestVote
+	p.mu.Lock()
+	if len(p.cache) > 0 {
+		t = p.cache[len(p.cache)-1]
+		p.cache = p.cache[0:(len(p.cache) - 1)]
+	}
+	p.mu.Unlock()
+	if t == nil {
+		t = &MRequestVote{}
+	}
+	return t
+}
+
+func (p *MRequestVoteCache) Put(t *MRequestVote) {
+	p.mu.Lock()
+	p.cache = append(p.cache, t)
+	p.mu.Unlock()
+}
+
+func (t *MRequestVote) Marshal(wire io.Writer) {
+	var b [12]byte
+	var bs []byte
+	bs = b[:12]
+	tmp32 := t.Replica
+	bs[0] = byte(tmp32)
+	bs[1] = byte(tmp32 >> 8)
+	bs[2] = byte(tmp32 >> 16)
+	bs[3] = byte(tmp32 >> 24)
+	tmp32 = t.Term
+	bs[4] = byte(tmp32)
+	bs[5] = byte(tmp32 >> 8)
+	bs[6] = byte(tmp32 >> 16)
+	bs[7] = byte(tmp32 >> 24)
+	tmp32 = t.LastCommittedSlot
+	bs[8] = byte(tmp32)
+	bs[9] = byte(tmp32 >> 8)
+	bs[10] = byte(tmp32 >> 16)
+	bs[11] = byte(tmp32 >> 24)
+	wire.Write(bs)
+}
+
+func (t *MRequestVote) Unmarshal(wire io.Reader) error {
+	var b [12]byte
+	var bs []byte
+	bs = b[:12]
+	if _, err := io.ReadAtLeast(wire, bs, 12); err != nil {
+		return err
+	}
+	t.Replica = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
+	t.Term = int32((uint32(bs[4]) | (uint32(bs[5]) << 8) | (uint32(bs[6]) << 16) | (uint32(bs[7]) << 24)))
+	t.LastCommittedSlot = int32((uint32(bs[8]) | (uint32(bs[9]) << 8) | (uint32(bs[10]) << 16) | (uint32(bs[11]) << 24)))
+	return nil
+}
+
+// MRequestVoteReply serialization (fixed size: 9 bytes)
+
+func (t *MRequestVoteReply) BinarySize() (nbytes int, sizeKnown bool) {
+	return 9, true
+}
+
+type MRequestVoteReplyCache struct {
+	mu    sync.Mutex
+	cache []*MRequestVoteReply
+}
+
+func NewMRequestVoteReplyCache() *MRequestVoteReplyCache {
+	c := &MRequestVoteReplyCache{}
+	c.cache = make([]*MRequestVoteReply, 0)
+	return c
+}
+
+func (p *MRequestVoteReplyCache) Get() *MRequestVoteReply {
+	var t *MRequestVoteReply
+	p.mu.Lock()
+	if len(p.cache) > 0 {
+		t = p.cache[len(p.cache)-1]
+		p.cache = p.cache[0:(len(p.cache) - 1)]
+	}
+	p.mu.Unlock()
+	if t == nil {
+		t = &MRequestVoteReply{}
+	}
+	return t
+}
+
+func (p *MRequestVoteReplyCache) Put(t *MRequestVoteReply) {
+	p.mu.Lock()
+	p.cache = append(p.cache, t)
+	p.mu.Unlock()
+}
+
+func (t *MRequestVoteReply) Marshal(wire io.Writer) {
+	var b [9]byte
+	var bs []byte
+	bs = b[:9]
+	tmp32 := t.Replica
+	bs[0] = byte(tmp32)
+	bs[1] = byte(tmp32 >> 8)
+	bs[2] = byte(tmp32 >> 16)
+	bs[3] = byte(tmp32 >> 24)
+	tmp32 = t.Term
+	bs[4] = byte(tmp32)
+	bs[5] = byte(tmp32 >> 8)
+	bs[6] = byte(tmp32 >> 16)
+	bs[7] = byte(tmp32 >> 24)
+	bs[8] = byte(t.VoteGranted)
+	wire.Write(bs)
+}
+
+func (t *MRequestVoteReply) Unmarshal(wire io.Reader) error {
+	var b [9]byte
+	var bs []byte
+	bs = b[:9]
+	if _, err := io.ReadAtLeast(wire, bs, 9); err != nil {
+		return err
+	}
+	t.Replica = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
+	t.Term = int32((uint32(bs[4]) | (uint32(bs[5]) << 8) | (uint32(bs[6]) << 16) | (uint32(bs[7]) << 24)))
+	t.VoteGranted = uint8(bs[8])
+	return nil
+}
+
+// MHeartbeat serialization (fixed size: 8 bytes)
+
+func (t *MHeartbeat) BinarySize() (nbytes int, sizeKnown bool) {
+	return 8, true
+}
+
+type MHeartbeatCache struct {
+	mu    sync.Mutex
+	cache []*MHeartbeat
+}
+
+func NewMHeartbeatCache() *MHeartbeatCache {
+	c := &MHeartbeatCache{}
+	c.cache = make([]*MHeartbeat, 0)
+	return c
+}
+
+func (p *MHeartbeatCache) Get() *MHeartbeat {
+	var t *MHeartbeat
+	p.mu.Lock()
+	if len(p.cache) > 0 {
+		t = p.cache[len(p.cache)-1]
+		p.cache = p.cache[0:(len(p.cache) - 1)]
+	}
+	p.mu.Unlock()
+	if t == nil {
+		t = &MHeartbeat{}
+	}
+	return t
+}
+
+func (p *MHeartbeatCache) Put(t *MHeartbeat) {
+	p.mu.Lock()
+	p.cache = append(p.cache, t)
+	p.mu.Unlock()
+}
+
+func (t *MHeartbeat) Marshal(wire io.Writer) {
+	var b [8]byte
+	var bs []byte
+	bs = b[:8]
+	tmp32 := t.Replica
+	bs[0] = byte(tmp32)
+	bs[1] = byte(tmp32 >> 8)
+	bs[2] = byte(tmp32 >> 16)
+	bs[3] = byte(tmp32 >> 24)
+	tmp32 = t.Term
+	bs[4] = byte(tmp32)
+	bs[5] = byte(tmp32 >> 8)
+	bs[6] = byte(tmp32 >> 16)
+	bs[7] = byte(tmp32 >> 24)
+	wire.Write(bs)
+}
+
+func (t *MHeartbeat) Unmarshal(wire io.Reader) error {
+	var b [8]byte
+	var bs []byte
+	bs = b[:8]
+	if _, err := io.ReadAtLeast(wire, bs, 8); err != nil {
+		return err
+	}
+	t.Replica = int32((uint32(bs[0]) | (uint32(bs[1]) << 8) | (uint32(bs[2]) << 16) | (uint32(bs[3]) << 24)))
+	t.Term = int32((uint32(bs[4]) | (uint32(bs[5]) << 8) | (uint32(bs[6]) << 16) | (uint32(bs[7]) << 24)))
 	return nil
 }
