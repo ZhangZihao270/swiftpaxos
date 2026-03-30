@@ -9380,11 +9380,11 @@ beyond what strong-strong conflicts already cause.
 7. **Client SendProposal to dead replica**: `SendProposal` with `Fast=true` broadcasts to all replicas including dead ones, blocking on broken writer. Fixed: `sendProposeSafe()` skips dead replicas.
 
 **Remaining issues (throughput doesn't recover after kill):**
-- ⬜ Election still unstable: 4 replicas each win 1 election before stabilizing. Need longer random timeout spread or pre-vote protocol.
+- ✅ Election still unstable: 4 replicas each win 1 election before stabilizing → **Fixed in Phase 128.2**: widened timeout spread from 150-300ms to 300-500ms (matching Raft-HT), added 3s initial election delay to let leader establish heartbeats.
 - ⬜ Client failover incomplete: client rotates leader and sends to new leader, but doesn't receive replies. Possible causes:
   - New leader's `delivered` map blocks new proposals (slot ordering waits for old delivered slots)
-  - Multiple leaders during election instability → commands processed by wrong leader → no reply
+  - Multiple leaders during election instability → commands processed by wrong leader → no reply — **mitigated by election stability fix**
   - Client0 on dead replica machine (.101) can never recover
-  - `MSync` timer may not work correctly after leader rotation
+  - ~~`MSync` timer may not work correctly after leader rotation~~ → **Fixed in Phase 128.2**: MSync now skips dead replicas
 - ⬜ Need to verify: does new leader correctly handle `ProposeChan` after recovery? Does `deliver()` work with the recovered slot state?
 - ⬜ Consider: skip log recovery entirely — new leader starts fresh from current state (followers already have state). Only need to set `lastCmdSlot` correctly.

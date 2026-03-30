@@ -220,6 +220,9 @@ func (c *Client) handleStrongMsgs() {
 					CmdId: CommandId{ClientId: clientId, SeqNum: seqnum},
 				}
 				for r := int32(0); r < int32(n); r++ {
+					if c.deadReplicas[r] {
+						continue // Skip dead replicas
+					}
 					c.sendMsgSafe(r, c.cs.syncRPC, sync)
 				}
 			}

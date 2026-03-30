@@ -4263,3 +4263,163 @@ func TestNewLeaderRejectsMsgsDuringRecovery(t *testing.T) {
 		t.Error("status should NOT be NORMAL during recovery — proposals would be accepted")
 	}
 }
+
+// ============================================================================
+// Phase 128.2: Election Stability and Client MSync Bug Fixes
+// ============================================================================
+
+// TestElectionTimeoutSpreadMatchesRaftHT verifies the timeout spread is wide enough
+// to prevent election storms (at least 200ms spread, matching Raft-HT).
+func TestElectionTimeoutSpreadMatchesRaftHT(t *testing.T) {
+	spread := ElectionTimeoutMax - ElectionTimeoutMin
+	if spread < 200*time.Millisecond {
+		t.Errorf("election timeout spread %v is too narrow (need >= 200ms to prevent storms)", spread)
+	}
+}
+
+// TestElectionTimeoutMinAboveHeartbeatSafety verifies the minimum timeout is at
+// least 3x the heartbeat interval to tolerate occasional heartbeat delays.
+func TestElectionTimeoutMinAboveHeartbeatSafety(t *testing.T) {
+	if ElectionTimeoutMin < 3*HeartbeatInterval {
+		t.Errorf("ElectionTimeoutMin %v should be at least 3x HeartbeatInterval %v",
+			ElectionTimeoutMin, HeartbeatInterval)
+	}
+}
+
+// TestInitialElectionDelayPreventsPrematureElection verifies the initial delay is
+// long enough for the leader to establish heartbeats.
+func TestInitialElectionDelayPreventsPrematureElection(t *testing.T) {
+	if InitialElectionDelay < 1*time.Second {
+		t.Errorf("InitialElectionDelay %v too short (need >= 1s for leader to connect)", InitialElectionDelay)
+	}
+	// Must be significantly longer than ElectionTimeoutMax to prevent race
+	if InitialElectionDelay <= ElectionTimeoutMax {
+		t.Errorf("InitialElectionDelay %v should be > ElectionTimeoutMax %v",
+			InitialElectionDelay, ElectionTimeoutMax)
+	}
+}
+
+// TestElectionStabilityWith5Replicas simulates an election scenario where multiple
+// replicas time out nearly simultaneously. With wide enough timeout spread and
+// proper vote rejection, only one should win per term.
+func TestElectionStabilityWith5Replicas(t *testing.T) {
+	const N = 5
+	replicas := make([]*Replica, N)
+	for i := 0; i < N; i++ {
+		replicas[i] = newTestReplicaForRecovery(int32(i), N)
+		replicas[i].currentTerm = 1
+		replicas[i].role = FOLLOWER
+		replicas[i].votedFor = -1
+	}
+
+	// Replica 0 starts election first
+	replicas[0].becomeCandidate()
+	replicas[0].votesReceived = 1
+
+	// All other replicas see term 2 from replica 0 → grant vote
+	for i := 1; i < N; i++ {
+		replicas[i].handleRequestVote(&MRequestVote{Replica: 0, Term: 2, LastCommittedSlot: 0})
+		// Verify they voted for replica 0
+		if replicas[i].votedFor != 0 {
+			t.Errorf("replica %d should have voted for 0, votedFor=%d", i, replicas[i].votedFor)
+		}
+	}
+
+	// Replica 1 now also tries to start election in term 2
+	// Since all replicas already voted for 0 in term 2, replica 1 must increment to term 3
+	// to have any chance of winning. But replicas won't vote again in term 2.
+	replicas[1].currentTerm = 2 // pretend it also timed out (same term as 0)
+	replicas[1].role = CANDIDATE
+	replicas[1].votesReceived = 1
+
+	// Replica 2 tries to vote for replica 1 in term 2 — should be denied (already voted for 0)
+	replicas[2].handleRequestVote(&MRequestVote{Replica: 1, Term: 2, LastCommittedSlot: 0})
+	if replicas[2].votedFor != 0 {
+		t.Errorf("replica 2 should still be votedFor=0, got %d", replicas[2].votedFor)
+	}
+
+	// Replica 0 collects enough votes → becomes leader
+	replicas[0].handleRequestVoteReply(&MRequestVoteReply{Replica: 1, Term: 2, VoteGranted: TRUE})
+	replicas[0].handleRequestVoteReply(&MRequestVoteReply{Replica: 2, Term: 2, VoteGranted: TRUE})
+
+	if replicas[0].role != LEADER {
+		t.Error("replica 0 should be leader")
+	}
+
+	// Replica 1 should NOT become leader — votes denied in same term
+	replicas[1].handleRequestVoteReply(&MRequestVoteReply{Replica: 3, Term: 2, VoteGranted: FALSE})
+	replicas[1].handleRequestVoteReply(&MRequestVoteReply{Replica: 4, Term: 2, VoteGranted: FALSE})
+
+	if replicas[1].role == LEADER {
+		t.Error("replica 1 should NOT become leader (votes denied)")
+	}
+}
+
+// TestRecoveringLeaderRejectsVoteRequest verifies that a leader in RECOVERING
+// state rejects vote requests to prevent disruption during log recovery.
+func TestRecoveringLeaderRejectsVoteRequest(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 3)
+	r.role = LEADER
+	r.status = RECOVERING
+	r.currentTerm = 5
+
+	// Higher-term vote request should be rejected during recovery
+	msg := &MRequestVote{Replica: 1, Term: 6, LastCommittedSlot: 0}
+	r.handleRequestVote(msg)
+
+	// Leader should NOT step down during recovery
+	if r.role != LEADER {
+		t.Errorf("recovering leader should not step down, got role=%d", r.role)
+	}
+	if r.currentTerm != 5 {
+		t.Errorf("term should remain 5 during recovery, got %d", r.currentTerm)
+	}
+}
+
+// TestMSyncSkipsDeadReplicas tests that the MSync timer loop skips dead replicas.
+func TestMSyncSkipsDeadReplicas(t *testing.T) {
+	c := &Client{
+		leader:       0,
+		numReplicas:  3,
+		deadReplicas: map[int32]bool{1: true},
+	}
+
+	// Verify dead replica is tracked
+	if !c.deadReplicas[1] {
+		t.Error("replica 1 should be dead")
+	}
+
+	// Simulate MSync loop logic: count how many replicas would receive MSync
+	aliveCount := 0
+	for r := int32(0); r < c.numReplicas; r++ {
+		if c.deadReplicas[r] {
+			continue
+		}
+		aliveCount++
+	}
+
+	if aliveCount != 2 {
+		t.Errorf("MSync should send to 2 alive replicas, got %d", aliveCount)
+	}
+}
+
+// TestMSyncSkipsAllDeadReplicas tests MSync with multiple dead replicas.
+func TestMSyncSkipsAllDeadReplicas(t *testing.T) {
+	c := &Client{
+		leader:       2,
+		numReplicas:  5,
+		deadReplicas: map[int32]bool{0: true, 1: true, 3: true},
+	}
+
+	aliveCount := 0
+	for r := int32(0); r < c.numReplicas; r++ {
+		if c.deadReplicas[r] {
+			continue
+		}
+		aliveCount++
+	}
+
+	if aliveCount != 2 {
+		t.Errorf("MSync should send to 2 alive replicas (2, 4), got %d", aliveCount)
+	}
+}

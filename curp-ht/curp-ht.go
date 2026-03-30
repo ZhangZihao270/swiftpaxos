@@ -282,9 +282,10 @@ func (r *Replica) IsLeader() bool {
 
 // Election timeout constants
 const (
-	ElectionTimeoutMin = 150 * time.Millisecond
-	ElectionTimeoutMax = 300 * time.Millisecond
-	HeartbeatInterval  = 50 * time.Millisecond
+	ElectionTimeoutMin    = 300 * time.Millisecond
+	ElectionTimeoutMax    = 500 * time.Millisecond
+	HeartbeatInterval     = 50 * time.Millisecond
+	InitialElectionDelay  = 3 * time.Second // Long initial delay to let leader establish heartbeats
 )
 
 // randomElectionTimeout returns a random duration between ElectionTimeoutMin and ElectionTimeoutMax.
@@ -635,13 +636,15 @@ func (r *Replica) run() {
 		}
 	}
 
-	// Initialize election timer for followers; leader starts heartbeat
+	// Initialize election timer for followers; leader starts heartbeat.
+	// Followers use a long initial delay to let the designated leader finish
+	// ConnectToPeers and send its first heartbeat before any follower starts an election.
 	if r.IsLeader() {
-		r.electionTimer = time.NewTimer(randomElectionTimeout())
+		r.electionTimer = time.NewTimer(InitialElectionDelay)
 		r.electionTimer.Stop() // Leader doesn't need election timer
 		r.startHeartbeat()
 	} else {
-		r.electionTimer = time.NewTimer(randomElectionTimeout())
+		r.electionTimer = time.NewTimer(InitialElectionDelay)
 	}
 
 	go r.WaitForClientConnections()
