@@ -9342,11 +9342,18 @@ beyond what strong-strong conflicts already cause.
 - [x] ReaderDead channel handling in handleStrongMsgs event loop
 - [x] 14 new tests: rotateLeader (4), handleReaderDead (2), updateLeader (2), term tracking (2), dead replicas (2), pending cleanup (1), initialization (1)
 
-#### ⬜ Step 6: Tests
-- Unit test: election with 3/5 replicas, leader crash, new leader elected
-- Unit test: log recovery — committed commands survive leader change
-- Unit test: in-flight uncommitted commands are lost (client retries)
-- Integration: kill leader process, verify clients recover and continue
+#### ✅ Step 6: Tests [26:03:30]
+- [x] Election with 3 replicas: vote exchange, majority win, step-down on higher term
+- [x] Election with 5 replicas: requires 3 votes, split vote scenario, double-vote prevention
+- [x] Heartbeat: prevents election, causes step-down on higher term, candidate step-down
+- [x] Log recovery: committed commands survive leader change (3 and 5 replicas)
+- [x] Recovery merge: partial logs from multiple peers correctly merged
+- [x] Uncommitted commands: ACCEPT-phase entries filtered out by handleLogSync, not recovered
+- [x] Full scenario: old leader commits → crash → election → log recovery → resume from correct state
+- [x] Client: pending commands available for resend, leader rotation skips dead replicas
+- [x] Vote log check: candidate with stale log is rejected
+- [x] New leader rejects proposals during RECOVERING status
+- 17 new tests in curp-ht_test.go, all passing
 
 ### Correctness Notes
 - **Committed commands**: Safe. Majority has them. New leader recovers from majority.

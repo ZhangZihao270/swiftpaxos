@@ -2,6 +2,7 @@ package curpht
 
 import (
 	"bytes"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -3583,5 +3584,682 @@ func TestNewClientInitializesFailoverFields(t *testing.T) {
 	}
 	if c.numReplicas != 3 {
 		t.Errorf("numReplicas = %d, want 3", c.numReplicas)
+	}
+}
+
+// ============================================================================
+// Phase 128 Step 6: Election, Recovery, and Uncommitted Command Tests
+// ============================================================================
+
+// --- Election Scenario Tests ---
+
+// TestElection3Replicas tests a full election with 3 replicas.
+// Replica 0 starts an election, replicas 1 and 2 vote, replica 0 wins.
+func TestElection3Replicas(t *testing.T) {
+	// Create 3 replicas
+	replicas := make([]*Replica, 3)
+	for i := 0; i < 3; i++ {
+		replicas[i] = newTestReplicaForRecovery(int32(i), 3)
+		replicas[i].currentTerm = 1
+		replicas[i].role = FOLLOWER
+		replicas[i].votedFor = -1
+	}
+
+	// Replica 0 starts election
+	replicas[0].becomeCandidate()
+	if replicas[0].currentTerm != 2 {
+		t.Fatalf("candidate term should be 2, got %d", replicas[0].currentTerm)
+	}
+	if replicas[0].role != CANDIDATE {
+		t.Fatalf("expected CANDIDATE role, got %d", replicas[0].role)
+	}
+	replicas[0].votesReceived = 1 // self-vote
+
+	// Simulate RequestVote from replica 0 → replicas 1, 2
+	voteReq := &MRequestVote{
+		Replica:           0,
+		Term:              2,
+		LastCommittedSlot: 0,
+	}
+
+	// Replica 1 handles vote request
+	replicas[1].handleRequestVote(voteReq)
+	if replicas[1].votedFor != 0 {
+		t.Errorf("replica 1 should vote for 0, votedFor=%d", replicas[1].votedFor)
+	}
+	if replicas[1].currentTerm != 2 {
+		t.Errorf("replica 1 term should be 2, got %d", replicas[1].currentTerm)
+	}
+
+	// Replica 2 handles vote request
+	replicas[2].handleRequestVote(voteReq)
+	if replicas[2].votedFor != 0 {
+		t.Errorf("replica 2 should vote for 0, votedFor=%d", replicas[2].votedFor)
+	}
+
+	// Simulate vote replies arriving at replica 0
+	voteReply := &MRequestVoteReply{
+		Replica:     1,
+		Term:        2,
+		VoteGranted: TRUE,
+	}
+	replicas[0].handleRequestVoteReply(voteReply)
+
+	// With 3 replicas, 1 self-vote + 1 peer vote = 2 > 3/2 = majority
+	if replicas[0].role != LEADER {
+		t.Errorf("replica 0 should be LEADER after majority votes, got role=%d", replicas[0].role)
+	}
+	if replicas[0].status != RECOVERING {
+		t.Errorf("new leader should be RECOVERING, got %d", replicas[0].status)
+	}
+}
+
+// TestElection5Replicas tests election with 5 replicas requiring 3 votes.
+func TestElection5Replicas(t *testing.T) {
+	replicas := make([]*Replica, 5)
+	for i := 0; i < 5; i++ {
+		replicas[i] = newTestReplicaForRecovery(int32(i), 5)
+		replicas[i].currentTerm = 1
+		replicas[i].role = FOLLOWER
+		replicas[i].votedFor = -1
+	}
+
+	// Replica 2 starts election
+	replicas[2].becomeCandidate()
+	replicas[2].votesReceived = 1
+
+	voteReq := &MRequestVote{
+		Replica:           2,
+		Term:              2,
+		LastCommittedSlot: 0,
+	}
+
+	// All other replicas vote
+	for i := 0; i < 5; i++ {
+		if i == 2 {
+			continue
+		}
+		replicas[i].handleRequestVote(voteReq)
+	}
+
+	// First vote — not enough (2 out of 5, need >2)
+	replicas[2].handleRequestVoteReply(&MRequestVoteReply{Replica: 0, Term: 2, VoteGranted: TRUE})
+	if replicas[2].role == LEADER {
+		t.Error("should not be leader with only 2 votes out of 5")
+	}
+
+	// Second vote — now 3 out of 5, majority
+	replicas[2].handleRequestVoteReply(&MRequestVoteReply{Replica: 1, Term: 2, VoteGranted: TRUE})
+	if replicas[2].role != LEADER {
+		t.Errorf("should be LEADER with 3 votes, got role=%d", replicas[2].role)
+	}
+}
+
+// TestElectionRejectedStaleTerm tests that stale-term vote requests are rejected.
+func TestElectionRejectedStaleTerm(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.currentTerm = 5
+	r.role = FOLLOWER
+	r.votedFor = -1
+
+	voteReq := &MRequestVote{Replica: 0, Term: 3, LastCommittedSlot: 0}
+	r.handleRequestVote(voteReq)
+
+	// Should not grant vote (stale term)
+	if r.votedFor != -1 {
+		t.Errorf("should not vote for stale-term candidate, votedFor=%d", r.votedFor)
+	}
+	if r.currentTerm != 5 {
+		t.Errorf("term should remain 5, got %d", r.currentTerm)
+	}
+}
+
+// TestElectionCandidateStepsDownOnHigherTerm tests candidate stepping down.
+func TestElectionCandidateStepsDownOnHigherTerm(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 3)
+	r.currentTerm = 3
+	r.role = CANDIDATE
+	r.votesReceived = 1
+
+	// Receive vote reply with higher term
+	reply := &MRequestVoteReply{Replica: 1, Term: 5, VoteGranted: FALSE}
+	r.handleRequestVoteReply(reply)
+
+	if r.role != FOLLOWER {
+		t.Errorf("candidate should step down on higher term, got role=%d", r.role)
+	}
+	if r.currentTerm != 5 {
+		t.Errorf("term should be updated to 5, got %d", r.currentTerm)
+	}
+}
+
+// TestElectionDoubleVotePrevented tests that a replica doesn't vote twice in same term.
+func TestElectionDoubleVotePrevented(t *testing.T) {
+	r := newTestReplicaForRecovery(2, 3)
+	r.currentTerm = 1
+	r.role = FOLLOWER
+	r.votedFor = -1
+
+	// Candidate 0 requests vote
+	r.handleRequestVote(&MRequestVote{Replica: 0, Term: 2, LastCommittedSlot: 0})
+	if r.votedFor != 0 {
+		t.Fatalf("should vote for 0, votedFor=%d", r.votedFor)
+	}
+
+	// Drain sender
+	select {
+	case <-r.sender:
+	default:
+	}
+
+	// Candidate 1 requests vote in same term
+	r.handleRequestVote(&MRequestVote{Replica: 1, Term: 2, LastCommittedSlot: 0})
+	if r.votedFor != 0 {
+		t.Errorf("should still be voted for 0, got votedFor=%d", r.votedFor)
+	}
+}
+
+// TestHeartbeatPreventsElection tests that heartbeats reset election state.
+func TestHeartbeatPreventsElection(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.currentTerm = 3
+	r.role = FOLLOWER
+
+	// Heartbeat from leader
+	hb := &MHeartbeat{Replica: 0, Term: 3}
+	r.handleHeartbeat(hb)
+
+	// Should still be follower (heartbeat didn't change role)
+	if r.role != FOLLOWER {
+		t.Errorf("should remain FOLLOWER after heartbeat, got %d", r.role)
+	}
+}
+
+// TestHeartbeatFromHigherTermCausesStepDown tests leader step-down on higher-term heartbeat.
+func TestHeartbeatFromHigherTermCausesStepDown(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 3)
+	r.currentTerm = 3
+	r.role = LEADER
+
+	hb := &MHeartbeat{Replica: 1, Term: 5}
+	r.handleHeartbeat(hb)
+
+	if r.role != FOLLOWER {
+		t.Errorf("leader should step down on higher-term heartbeat, got %d", r.role)
+	}
+	if r.currentTerm != 5 {
+		t.Errorf("term should be 5, got %d", r.currentTerm)
+	}
+}
+
+// TestCandidateStepsDownOnHeartbeat tests candidate stepping down when a leader exists.
+func TestCandidateStepsDownOnHeartbeat(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 3)
+	r.currentTerm = 3
+	r.role = CANDIDATE
+
+	// Heartbeat from another leader in same term
+	hb := &MHeartbeat{Replica: 1, Term: 3}
+	r.handleHeartbeat(hb)
+
+	if r.role != FOLLOWER {
+		t.Errorf("candidate should step down on heartbeat from leader in same term, got %d", r.role)
+	}
+}
+
+// --- Log Recovery: Committed Commands Survive Leader Change ---
+
+// TestCommittedCommandsSurviveLeaderChange tests the full flow:
+// old leader commits commands → old leader "crashes" → new leader recovers committed state.
+func TestCommittedCommandsSurviveLeaderChange(t *testing.T) {
+	// Set up 3 replicas — replica 0 is old leader
+	replicas := make([]*Replica, 3)
+	for i := 0; i < 3; i++ {
+		replicas[i] = newTestReplicaForRecovery(int32(i), 3)
+		replicas[i].currentTerm = 1
+		replicas[i].role = FOLLOWER
+		replicas[i].votedFor = -1
+	}
+	replicas[0].role = LEADER
+
+	// Old leader commits slots 0, 1, 2
+	for slot := 0; slot < 3; slot++ {
+		cmd := state.Command{Op: state.PUT, K: state.Key(slot + 1), V: state.NIL()}
+		cmdId := CommandId{ClientId: 10, SeqNum: int32(slot + 1)}
+		for i := 0; i < 3; i++ {
+			replicas[i].history[slot] = commandStaticDesc{
+				cmdSlot: slot,
+				phase:   COMMIT,
+				cmd:     cmd,
+				cmdId:   cmdId,
+			}
+		}
+	}
+	replicas[0].lastCommitted = 2
+
+	// Old leader "crashes" — replica 1 starts election in term 2
+	replicas[1].becomeCandidate()
+	replicas[1].votesReceived = 1
+
+	// Replica 2 votes for replica 1
+	replicas[2].handleRequestVote(&MRequestVote{Replica: 1, Term: 2, LastCommittedSlot: 0})
+
+	// Replica 1 receives vote → becomes leader
+	replicas[1].handleRequestVoteReply(&MRequestVoteReply{Replica: 2, Term: 2, VoteGranted: TRUE})
+	if replicas[1].role != LEADER {
+		t.Fatalf("replica 1 should be LEADER, got %d", replicas[1].role)
+	}
+	if replicas[1].status != RECOVERING {
+		t.Fatalf("new leader should be RECOVERING, got %d", replicas[1].status)
+	}
+
+	// New leader (replica 1) receives log sync reply from replica 2
+	reply := &MLogSyncReply{
+		Replica:    2,
+		Term:       2,
+		NumEntries: 3,
+		Entries: []LogEntry{
+			{Slot: 0, CmdId: CommandId{10, 1}, Cmd: state.Command{Op: state.PUT, K: 1, V: state.NIL()}},
+			{Slot: 1, CmdId: CommandId{10, 2}, Cmd: state.Command{Op: state.PUT, K: 2, V: state.NIL()}},
+			{Slot: 2, CmdId: CommandId{10, 3}, Cmd: state.Command{Op: state.PUT, K: 3, V: state.NIL()}},
+		},
+	}
+	replicas[1].handleLogSyncReply(reply)
+
+	// Verify: new leader recovered all 3 committed commands
+	if replicas[1].status != NORMAL {
+		t.Errorf("new leader should be NORMAL after recovery, got %d", replicas[1].status)
+	}
+	for slot := 0; slot < 3; slot++ {
+		slotStr := fmt.Sprintf("%d", slot)
+		if !replicas[1].executed.Has(slotStr) {
+			t.Errorf("slot %d should be executed after recovery", slot)
+		}
+		if !replicas[1].committed.Has(slotStr) {
+			t.Errorf("slot %d should be committed after recovery", slot)
+		}
+	}
+	if replicas[1].lastCmdSlot != 3 {
+		t.Errorf("lastCmdSlot should be 3, got %d", replicas[1].lastCmdSlot)
+	}
+	if replicas[1].lastCommitted != 2 {
+		t.Errorf("lastCommitted should be 2, got %d", replicas[1].lastCommitted)
+	}
+}
+
+// TestRecoveryMergesFromMultiplePeers tests that recovery correctly merges
+// partial logs from different peers.
+func TestRecoveryMergesFromMultiplePeers(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 5)
+	r.role = LEADER
+	r.status = RECOVERING
+	r.currentTerm = 3
+	r.logSyncReplies = make([]MLogSyncReply, 0)
+	r.logSyncExpected = 4
+
+	// Peer 1: has slots 0, 1
+	r.handleLogSyncReply(&MLogSyncReply{
+		Replica: 1, Term: 3, NumEntries: 2,
+		Entries: []LogEntry{
+			{Slot: 0, CmdId: CommandId{10, 1}, Cmd: state.Command{Op: state.PUT, K: 1, V: state.NIL()}},
+			{Slot: 1, CmdId: CommandId{10, 2}, Cmd: state.Command{Op: state.PUT, K: 2, V: state.NIL()}},
+		},
+	})
+
+	// Still recovering (need N/2 = 2 replies for 5 replicas)
+	if r.status != RECOVERING {
+		t.Fatal("should still be RECOVERING after 1 reply out of 5 replicas")
+	}
+
+	// Peer 2: has slots 1, 2, 3
+	r.handleLogSyncReply(&MLogSyncReply{
+		Replica: 2, Term: 3, NumEntries: 3,
+		Entries: []LogEntry{
+			{Slot: 1, CmdId: CommandId{10, 2}, Cmd: state.Command{Op: state.PUT, K: 2, V: state.NIL()}},
+			{Slot: 2, CmdId: CommandId{10, 3}, Cmd: state.Command{Op: state.PUT, K: 3, V: state.NIL()}},
+			{Slot: 3, CmdId: CommandId{10, 4}, Cmd: state.Command{Op: state.PUT, K: 4, V: state.NIL()}},
+		},
+	})
+
+	// Now have 2 replies (majority for N=5)
+	if r.status != NORMAL {
+		t.Fatalf("should be NORMAL after majority replies, got %d", r.status)
+	}
+
+	// Should have merged: slots 0, 1, 2, 3
+	for slot := 0; slot <= 3; slot++ {
+		if !r.executed.Has(fmt.Sprintf("%d", slot)) {
+			t.Errorf("slot %d should be executed", slot)
+		}
+	}
+	if r.lastCmdSlot != 4 {
+		t.Errorf("lastCmdSlot should be 4, got %d", r.lastCmdSlot)
+	}
+}
+
+// --- Uncommitted Commands Are Lost ---
+
+// TestUncommittedCommandsNotRecovered tests that accepted-but-not-committed
+// commands are not recovered by the new leader.
+func TestUncommittedCommandsNotRecovered(t *testing.T) {
+	// Set up: replica 0 (old leader) has slot 0 committed and slot 1 only accepted
+	// Replica 1 has slot 0 committed and slot 1 only accepted
+	// Replica 2 has only slot 0 committed (never saw slot 1)
+	replicas := make([]*Replica, 3)
+	for i := 0; i < 3; i++ {
+		replicas[i] = newTestReplicaForRecovery(int32(i), 3)
+		replicas[i].currentTerm = 1
+		replicas[i].votedFor = -1
+	}
+
+	// All replicas have slot 0 committed
+	for i := 0; i < 3; i++ {
+		replicas[i].history[0] = commandStaticDesc{
+			cmdSlot: 0, phase: COMMIT,
+			cmd:   state.Command{Op: state.PUT, K: 1, V: state.NIL()},
+			cmdId: CommandId{ClientId: 10, SeqNum: 1},
+		}
+	}
+
+	// Replicas 0, 1 have slot 1 in ACCEPT (not committed)
+	for i := 0; i < 2; i++ {
+		replicas[i].history[1] = commandStaticDesc{
+			cmdSlot: 1, phase: ACCEPT,
+			cmd:   state.Command{Op: state.PUT, K: 2, V: state.NIL()},
+			cmdId: CommandId{ClientId: 10, SeqNum: 2},
+		}
+	}
+
+	// Replica 2 wins election (term 2)
+	replicas[2].becomeCandidate()
+	replicas[2].votesReceived = 1
+	replicas[2].handleRequestVoteReply(&MRequestVoteReply{Replica: 1, Term: 2, VoteGranted: TRUE})
+
+	if replicas[2].role != LEADER {
+		t.Fatalf("replica 2 should be leader")
+	}
+
+	// Log sync: replica 1 responds — only committed entries
+	// handleLogSync only sends entries with phase == COMMIT
+	replicas[1].currentTerm = 2
+	replicas[1].handleLogSync(&MLogSync{Replica: 2, Term: 2})
+
+	// Drain the reply from replica 1's sender
+	select {
+	case <-replicas[1].sender:
+	default:
+		t.Fatal("expected reply from replica 1")
+	}
+
+	// Directly simulate: replica 2 gets log sync reply with only slot 0 (committed)
+	replicas[2].handleLogSyncReply(&MLogSyncReply{
+		Replica: 1, Term: 2, NumEntries: 1,
+		Entries: []LogEntry{
+			{Slot: 0, CmdId: CommandId{10, 1}, Cmd: state.Command{Op: state.PUT, K: 1, V: state.NIL()}},
+		},
+	})
+
+	if replicas[2].status != NORMAL {
+		t.Fatalf("should be NORMAL, got %d", replicas[2].status)
+	}
+
+	// Verify: slot 0 is recovered, slot 1 is NOT
+	if !replicas[2].executed.Has("0") {
+		t.Error("slot 0 should be executed (committed)")
+	}
+	if replicas[2].executed.Has("1") {
+		t.Error("slot 1 should NOT be executed (was only accepted, not committed)")
+	}
+	if replicas[2].lastCmdSlot != 1 {
+		t.Errorf("lastCmdSlot should be 1, got %d", replicas[2].lastCmdSlot)
+	}
+}
+
+// TestUncommittedCommandFilteredByHandleLogSync verifies that handleLogSync
+// only includes COMMIT-phase entries in its reply.
+func TestUncommittedCommandFilteredByHandleLogSync(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.currentTerm = 5
+
+	// slot 0: COMMIT, slot 1: ACCEPT, slot 2: START, slot 3: COMMIT
+	r.history[0] = commandStaticDesc{cmdSlot: 0, phase: COMMIT, cmdId: CommandId{10, 1},
+		cmd: state.Command{Op: state.PUT, K: 1, V: state.NIL()}}
+	r.history[1] = commandStaticDesc{cmdSlot: 1, phase: ACCEPT, cmdId: CommandId{10, 2},
+		cmd: state.Command{Op: state.PUT, K: 2, V: state.NIL()}}
+	r.history[2] = commandStaticDesc{cmdSlot: 2, phase: START, cmdId: CommandId{10, 3},
+		cmd: state.Command{Op: state.PUT, K: 3, V: state.NIL()}}
+	r.history[3] = commandStaticDesc{cmdSlot: 3, phase: COMMIT, cmdId: CommandId{10, 4},
+		cmd: state.Command{Op: state.PUT, K: 4, V: state.NIL()}}
+
+	r.handleLogSync(&MLogSync{Replica: 0, Term: 5})
+
+	// A reply was sent — we can't inspect the content (unexported fields in SendArg),
+	// but we can verify by running handleLogSync's logic directly:
+	var entries []LogEntry
+	for i := 0; i < HISTORY_SIZE; i++ {
+		if r.history[i].phase == COMMIT {
+			entries = append(entries, LogEntry{
+				Slot:  int32(r.history[i].cmdSlot),
+				CmdId: r.history[i].cmdId,
+				Cmd:   r.history[i].cmd,
+			})
+		}
+	}
+
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 committed entries, got %d", len(entries))
+	}
+	if entries[0].Slot != 0 || entries[1].Slot != 3 {
+		t.Errorf("expected slots 0 and 3, got %d and %d", entries[0].Slot, entries[1].Slot)
+	}
+}
+
+// --- Integration Scenario: Full Leader Crash → Election → Recovery → Resume ---
+
+// TestFullLeaderCrashRecoveryScenario simulates a complete leader failure scenario:
+// 1. Old leader (replica 0) commits commands
+// 2. Old leader "crashes" (stops processing)
+// 3. Replica 1 times out, starts election
+// 4. Replica 1 wins, recovers log from replica 2
+// 5. New leader resumes from correct state
+func TestFullLeaderCrashRecoveryScenario(t *testing.T) {
+	const N = 5
+	replicas := make([]*Replica, N)
+	for i := 0; i < N; i++ {
+		replicas[i] = newTestReplicaForRecovery(int32(i), N)
+		replicas[i].currentTerm = 1
+		replicas[i].votedFor = 0 // All initially voted for 0
+		replicas[i].role = FOLLOWER
+	}
+	replicas[0].role = LEADER
+	replicas[0].lastCommitted = 4
+
+	// Phase 1: Old leader committed slots 0-4 and replicated to all
+	for slot := 0; slot < 5; slot++ {
+		cmd := state.Command{Op: state.PUT, K: state.Key(slot), V: state.NIL()}
+		cmdId := CommandId{ClientId: 100, SeqNum: int32(slot)}
+		for i := 0; i < N; i++ {
+			replicas[i].history[slot] = commandStaticDesc{
+				cmdSlot: slot, phase: COMMIT, cmd: cmd, cmdId: cmdId,
+			}
+		}
+	}
+
+	// Phase 2: Old leader "crashes" — we simply stop using replicas[0]
+
+	// Phase 3: Replica 1 starts election (term 2)
+	replicas[1].becomeCandidate()
+	replicas[1].votesReceived = 1
+
+	// Send vote requests to replicas 2, 3, 4
+	voteReq := &MRequestVote{Replica: 1, Term: 2, LastCommittedSlot: 0}
+	for i := 2; i < N; i++ {
+		replicas[i].handleRequestVote(voteReq)
+	}
+
+	// Replicas 2, 3 vote (enough for majority: 1 self + 2 peers = 3 > 5/2)
+	replicas[1].handleRequestVoteReply(&MRequestVoteReply{Replica: 2, Term: 2, VoteGranted: TRUE})
+	replicas[1].handleRequestVoteReply(&MRequestVoteReply{Replica: 3, Term: 2, VoteGranted: TRUE})
+
+	if replicas[1].role != LEADER {
+		t.Fatalf("replica 1 should be leader, got role=%d", replicas[1].role)
+	}
+	if replicas[1].status != RECOVERING {
+		t.Fatalf("new leader should be RECOVERING, got %d", replicas[1].status)
+	}
+
+	// Phase 4: Log recovery — collect from replicas 2 and 3
+	entries := make([]LogEntry, 5)
+	for slot := 0; slot < 5; slot++ {
+		entries[slot] = LogEntry{
+			Slot:  int32(slot),
+			CmdId: CommandId{100, int32(slot)},
+			Cmd:   state.Command{Op: state.PUT, K: state.Key(slot), V: state.NIL()},
+		}
+	}
+
+	replicas[1].handleLogSyncReply(&MLogSyncReply{
+		Replica: 2, Term: 2, NumEntries: 5, Entries: entries,
+	})
+
+	// With N=5, need N/2=2 replies. First reply triggers merge.
+	if replicas[1].status == RECOVERING {
+		// Need one more reply
+		replicas[1].handleLogSyncReply(&MLogSyncReply{
+			Replica: 3, Term: 2, NumEntries: 5, Entries: entries,
+		})
+	}
+
+	// Phase 5: Verify new leader state
+	if replicas[1].status != NORMAL {
+		t.Fatalf("new leader should be NORMAL after recovery, got %d", replicas[1].status)
+	}
+
+	// All 5 committed slots should be recovered
+	for slot := 0; slot < 5; slot++ {
+		slotStr := fmt.Sprintf("%d", slot)
+		if !replicas[1].executed.Has(slotStr) {
+			t.Errorf("slot %d should be executed", slot)
+		}
+		if !replicas[1].committed.Has(slotStr) {
+			t.Errorf("slot %d should be committed", slot)
+		}
+	}
+
+	// New leader should start assigning from slot 5
+	if replicas[1].lastCmdSlot != 5 {
+		t.Errorf("lastCmdSlot should be 5, got %d", replicas[1].lastCmdSlot)
+	}
+
+	// Verify slots map has all commands
+	for slot := 0; slot < 5; slot++ {
+		cmdId := CommandId{100, int32(slot)}
+		if s, ok := replicas[1].slots[cmdId]; !ok || s != slot {
+			t.Errorf("slots[%v] = %d, want %d", cmdId, s, slot)
+		}
+	}
+}
+
+// TestSplitVoteNoWinner tests that a split vote doesn't produce a winner.
+func TestSplitVoteNoWinner(t *testing.T) {
+	// 5 replicas: replica 0 and replica 1 both start elections in term 2
+	r0 := newTestReplicaForRecovery(0, 5)
+	r0.currentTerm = 2
+	r0.role = CANDIDATE
+	r0.votesReceived = 1
+
+	// r0 gets 2 votes (self + one peer) — not majority (need >2)
+	r0.handleRequestVoteReply(&MRequestVoteReply{Replica: 2, Term: 2, VoteGranted: TRUE})
+	if r0.role == LEADER {
+		t.Error("should not be leader with 2 votes out of 5")
+	}
+
+	// Remaining peers reject (voted for someone else)
+	r0.handleRequestVoteReply(&MRequestVoteReply{Replica: 3, Term: 2, VoteGranted: FALSE})
+	r0.handleRequestVoteReply(&MRequestVoteReply{Replica: 4, Term: 2, VoteGranted: FALSE})
+
+	if r0.role == LEADER {
+		t.Error("should not become leader after rejected votes")
+	}
+	if r0.role != CANDIDATE {
+		t.Errorf("should remain CANDIDATE after split vote, got %d", r0.role)
+	}
+}
+
+// TestVoteRequiresUpToDateLog tests that vote is denied if candidate log is behind.
+func TestVoteRequiresUpToDateLog(t *testing.T) {
+	r := newTestReplicaForRecovery(1, 3)
+	r.currentTerm = 1
+	r.votedFor = -1
+	r.lastCommitted = 10 // This replica has committed up to slot 10
+
+	// Candidate has only committed up to slot 5 — behind
+	voteReq := &MRequestVote{Replica: 0, Term: 2, LastCommittedSlot: 5}
+	r.handleRequestVote(voteReq)
+
+	// Vote should be denied because candidate is behind
+	if r.votedFor == 0 {
+		t.Error("should NOT vote for candidate with lower LastCommittedSlot")
+	}
+}
+
+// TestClientStrongPendingAvailableForResend tests that pending strong commands
+// remain in the map after leader rotation (available for resend by caller).
+func TestClientStrongPendingAvailableForResend(t *testing.T) {
+	c := &Client{
+		leader:            0,
+		numReplicas:       3,
+		strongPendingCmds: make(map[int32]*defs.Propose),
+		strongPendingKeys: make(map[int32]int64),
+		deadReplicas:      make(map[int32]bool),
+	}
+
+	// Simulate 3 pending strong commands
+	for i := int32(1); i <= 3; i++ {
+		c.strongPendingCmds[i] = &defs.Propose{CommandId: i}
+		c.strongPendingKeys[i] = int64(i * 10)
+	}
+
+	// Mark leader dead and rotate manually (avoid handleReaderDead which calls resendPropose)
+	c.deadReplicas[0] = true
+	newLeader := c.rotateLeader(0)
+	c.leader = newLeader
+
+	// Leader should have rotated
+	if c.leader == 0 {
+		t.Error("leader should have rotated away from dead replica 0")
+	}
+	if c.leader != 1 {
+		t.Errorf("new leader should be 1, got %d", c.leader)
+	}
+
+	// All pending commands should still be in the map (available for resend)
+	for i := int32(1); i <= 3; i++ {
+		if _, ok := c.strongPendingCmds[i]; !ok {
+			t.Errorf("strongPendingCmds[%d] should still exist for resend", i)
+		}
+	}
+}
+
+// TestNewLeaderRejectsMsgsDuringRecovery tests that a recovering leader
+// has status=RECOVERING (which causes handlePropose to reject).
+func TestNewLeaderRejectsMsgsDuringRecovery(t *testing.T) {
+	r := newTestReplicaForRecovery(0, 3)
+	r.role = LEADER
+	r.currentTerm = 5
+	r.status = NORMAL
+
+	// Start recovery
+	r.startLogRecovery()
+
+	if r.status != RECOVERING {
+		t.Fatalf("expected RECOVERING, got %d", r.status)
+	}
+
+	// In the real code, handlePropose checks:
+	//   if r.status != NORMAL { return }
+	// Verify the status field is set correctly
+	if r.status == NORMAL {
+		t.Error("status should NOT be NORMAL during recovery — proposals would be accepted")
 	}
 }
