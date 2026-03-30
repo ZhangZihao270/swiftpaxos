@@ -1,7 +1,9 @@
 package client
 
 import (
+	"bufio"
 	"math/rand"
+	"net"
 	"sync"
 	"time"
 
@@ -38,6 +40,27 @@ type BufferClient struct {
 
 	// KeyGenerator for Zipf/uniform key distribution
 	keyGen KeyGenerator
+}
+
+// NewBufferClientWithConns creates a minimal BufferClient backed by the given
+// TCP connections. Used in tests to verify writer nil-out and write deadline behavior.
+func NewBufferClientWithConns(conns []net.Conn, n int, replyBufSize int) *BufferClient {
+	c := &Client{
+		servers: conns,
+		writers: make([]*bufio.Writer, n),
+		readers: make([]*bufio.Reader, n),
+	}
+	for i := 0; i < n; i++ {
+		if conns[i] != nil {
+			c.writers[i] = bufio.NewWriter(conns[i])
+			c.readers[i] = bufio.NewReader(conns[i])
+		}
+	}
+	return &BufferClient{
+		Client:  c,
+		Reply:   make(chan *ReqReply, replyBufSize),
+		reqTime: make([]time.Time, replyBufSize),
+	}
 }
 
 func NewBufferClient(c *Client, reqNum, psize, conflict, writes int, conflictKey int64) *BufferClient {

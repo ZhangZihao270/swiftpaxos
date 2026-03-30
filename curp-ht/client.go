@@ -572,9 +572,33 @@ func (c *Client) sendProposeSafe(p defs.Propose) {
 			continue
 		}
 		c.writerMu[rep].Lock()
+		// Re-check writer after acquiring lock — handleReaderDead may have nil'd it.
+		w = c.GetWriter(rep)
+		if w == nil {
+			c.writerMu[rep].Unlock()
+			continue
+		}
+		// Set write deadline as safety net: if the peer is dead but not yet
+		// detected, Flush will fail after 500ms instead of blocking for the
+		// full TCP timeout (15-60s).
+		if conn := c.GetConn(rep); conn != nil {
+			conn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
+		}
 		w.WriteByte(defs.PROPOSE)
 		p.Marshal(w)
-		w.Flush()
+		if err := w.Flush(); err != nil {
+			// Write failed — mark replica as dead and nil out the writer.
+			c.mu.Lock()
+			c.deadReplicas[rep] = true
+			c.mu.Unlock()
+			c.NilWriter(rep)
+			c.writerMu[rep].Unlock()
+			continue
+		}
+		// Clear deadline on success
+		if conn := c.GetConn(rep); conn != nil {
+			conn.SetWriteDeadline(time.Time{})
+		}
 		c.writerMu[rep].Unlock()
 	}
 }
@@ -637,6 +661,16 @@ func (c *Client) updateLeader(newLeader int32) {
 func (c *Client) handleReaderDead(deadReplica int32) {
 	c.mu.Lock()
 	c.deadReplicas[deadReplica] = true
+
+	// Nil out the writer for the dead replica so sendProposeSafe skips it
+	// immediately (GetWriter returns nil). Also closes the TCP connection
+	// to unblock any goroutine stuck on writerMu[deadReplica].Lock() → Flush().
+	if c.BufferClient != nil && c.BufferClient.Client != nil {
+		c.writerMu[deadReplica].Lock()
+		c.NilWriter(deadReplica)
+		c.writerMu[deadReplica].Unlock()
+	}
+
 	if deadReplica != c.leader {
 		c.mu.Unlock()
 		return
@@ -729,14 +763,28 @@ func (c *Client) resendPropose(rid int32, cmd *defs.Propose) {
 	if c.BufferClient == nil || c.BufferClient.Client == nil {
 		return
 	}
+	c.writerMu[rid].Lock()
 	w := c.GetWriter(rid)
 	if w == nil {
+		c.writerMu[rid].Unlock()
 		return
 	}
-	c.writerMu[rid].Lock()
+	if conn := c.GetConn(rid); conn != nil {
+		conn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
+	}
 	w.WriteByte(defs.PROPOSE)
 	cmd.Marshal(w)
-	w.Flush()
+	if err := w.Flush(); err != nil {
+		c.mu.Lock()
+		c.deadReplicas[rid] = true
+		c.mu.Unlock()
+		c.NilWriter(rid)
+		c.writerMu[rid].Unlock()
+		return
+	}
+	if conn := c.GetConn(rid); conn != nil {
+		conn.SetWriteDeadline(time.Time{})
+	}
 	c.writerMu[rid].Unlock()
 }
 
@@ -748,6 +796,17 @@ func (c *Client) sendMsgSafe(rid int32, code uint8, msg fastrpc.Serializable) {
 		return
 	}
 	c.writerMu[rid].Lock()
+	w := c.GetWriter(rid)
+	if w == nil {
+		c.writerMu[rid].Unlock()
+		return
+	}
+	if conn := c.GetConn(rid); conn != nil {
+		conn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
+	}
 	c.SendMsg(rid, code, msg)
+	if conn := c.GetConn(rid); conn != nil {
+		conn.SetWriteDeadline(time.Time{})
+	}
 	c.writerMu[rid].Unlock()
 }

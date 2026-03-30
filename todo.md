@@ -9465,16 +9465,18 @@ grep "TPUT" results/exp2.3-test/client*.log | tail -20
 1. `sendProposeSafe` blocks on dead writer (client-side head-of-line blocking)
 2. Followers forward to dead leader 0 before heartbeat updates `currentLeader`
 
-#### ⬜ Step 1: Nil out dead writer in handleReaderDead
-- In `curp-ht/client.go` `handleReaderDead()`: after setting `deadReplicas[deadReplica]=true`, also nil out the base client writer: `c.SetWriter(deadReplica, nil)`
-- Need to add `SetWriter` method to base `client.Client` if not exists
+#### ✅ Step 1: Nil out dead writer in handleReaderDead
+- Added `NilWriter(rid)` and `GetConn(rid)` methods to `client.Client`
+- In `handleReaderDead`: after setting `deadReplicas[deadReplica]=true`, acquires `writerMu[deadReplica]` and calls `NilWriter(deadReplica)` to nil writer + close TCP connection
 - This makes `sendProposeSafe`'s `GetWriter(rep)` return nil → skip immediately, no blocking
-- Also prevents `writerMu[0]` deadlock since no thread tries to write
+- Also unblocks any goroutine stuck on `writerMu[deadReplica].Lock()` → `Flush()` since closing the connection makes Flush fail immediately
 
-#### ⬜ Step 2: Add write timeout as safety net
-- In `sendProposeSafe`: wrap `w.Flush()` with a short timeout (e.g., 100ms)
-- Or set `SetWriteDeadline` on the underlying TCP connection when connecting to replicas
-- This prevents any future blocking on slow/dead connections even if `deadReplicas` isn't set yet
+#### ✅ Step 2: Add write timeout as safety net
+- In `sendProposeSafe`, `resendPropose`, `sendMsgSafe`: set 500ms `SetWriteDeadline` before Flush
+- Re-check `GetWriter(rep)` after acquiring `writerMu` (race window guard)
+- On Flush error: mark replica dead, nil writer, skip — prevents future blocking
+- Clear deadline on success
+- 5 new tests: NilWriter bounds, handleReaderDead nils writer, sendProposeSafe skips nil/dead, write deadline timeout
 
 #### ⬜ Step 3: Verify follower forwarding after heartbeat arrives
 - After Step 1 fix, followers should receive heartbeat from new leader within 1s

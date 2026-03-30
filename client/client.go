@@ -248,6 +248,29 @@ func (c *Client) GetWriter(rid int32) *bufio.Writer {
 	return c.writers[rid]
 }
 
+// NilWriter nils out the writer for the given replica and closes the underlying
+// TCP connection. After this call, GetWriter(rid) returns nil so any send path
+// that checks the writer will skip this replica immediately.
+// This prevents blocking on Flush() to a dead peer's broken TCP connection.
+func (c *Client) NilWriter(rid int32) {
+	if int(rid) < len(c.writers) {
+		c.writers[rid] = nil
+	}
+	if int(rid) < len(c.servers) && c.servers[rid] != nil {
+		c.servers[rid].Close()
+		c.servers[rid] = nil
+	}
+}
+
+// GetConn returns the underlying net.Conn for the given replica.
+// Used to set write deadlines as a safety net against blocking writes.
+func (c *Client) GetConn(rid int32) net.Conn {
+	if int(rid) < len(c.servers) {
+		return c.servers[rid]
+	}
+	return nil
+}
+
 func (c *Client) SendScan(key, count int64) int32 {
 	c.seqnum++
 	p := defs.Propose{
