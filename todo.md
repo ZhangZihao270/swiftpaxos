@@ -9448,7 +9448,8 @@ grep "TPUT" results/exp2.3-test/client*.log | tail -20
 - ✅ Log recovery: slot sync completes in <1s (Phase 128.6)
 - ✅ New leader accepts proposals after recovery (status=NORMAL, lastCmdSlot correct)
 - ✅ Client pipeline flush works (128.7) — flush triggered, pipeline unblocked
-- ✅ **Throughput still 0**: fixed — per-peer write locks eliminate head-of-line blocking (Phase 128.8 Step 1). Pending lab verification.
+- ✅ Sender head-of-line blocking fixed (128.8) — fire-and-forget per-peer sends, no more wg.Wait()
+- ⬜ **Throughput still 0 after recovery**: all server-side fixes verified (election, slot sync, heartbeat, forwarding). Client pipeline flush triggers correctly. But HybridLoop stops sending new commands after flush. Need to debug: does fake reply injection corrupt HybridLoop state? Does HybridLoop exit early after fake replies?
 
 ### Phase 128.7: Client Pipeline Recovery After Failover
 
