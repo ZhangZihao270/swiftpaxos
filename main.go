@@ -245,7 +245,7 @@ func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads i
 		// Always use HybridLoop for curpht to get consistent output format
 		// HybridLoop handles all-strong workloads (weakRatio=0) correctly
 		weakWrites := c.WeakWrites
-		if weakWrites == 0 && c.WeakRatio > 0 {
+		if weakWrites == 0 && c.WeakRatio > 0 && c.ScanRatio == 0 {
 			// Default weakWrites to 50 if weak commands are enabled but no ratio specified
 			weakWrites = 50
 		}
@@ -271,7 +271,7 @@ func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads i
 		}
 		// Always use HybridLoop for curpho to get consistent output format
 		weakWrites := c.WeakWrites
-		if weakWrites == 0 && c.WeakRatio > 0 {
+		if weakWrites == 0 && c.WeakRatio > 0 && c.ScanRatio == 0 {
 			weakWrites = 50
 		}
 		hbc := client.NewHybridBufferClient(b, c.WeakRatio, weakWrites, c.ReplyTimeout)
@@ -291,7 +291,7 @@ func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads i
 	} else if p == "raftht" {
 		rafthtCl := raftht.NewClient(b)
 		weakWrites := c.WeakWrites
-		if weakWrites == 0 && c.WeakRatio > 0 {
+		if weakWrites == 0 && c.WeakRatio > 0 && c.ScanRatio == 0 {
 			weakWrites = 50
 		}
 		hbc := client.NewHybridBufferClient(b, c.WeakRatio, weakWrites, c.ReplyTimeout)
@@ -327,7 +327,7 @@ func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads i
 	} else if p == "mongotunable" {
 		mtCl := mongotunable.NewClient(b)
 		weakWrites := c.WeakWrites
-		if weakWrites == 0 && c.WeakRatio > 0 {
+		if weakWrites == 0 && c.WeakRatio > 0 && c.ScanRatio == 0 {
 			weakWrites = 50
 		}
 		hbc := client.NewHybridBufferClient(b, c.WeakRatio, weakWrites, c.ReplyTimeout)
@@ -339,7 +339,7 @@ func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads i
 	} else if p == "pileus" {
 		plCl := pileus.NewClient(b)
 		weakWrites := c.WeakWrites
-		if weakWrites == 0 && c.WeakRatio > 0 {
+		if weakWrites == 0 && c.WeakRatio > 0 && c.ScanRatio == 0 {
 			weakWrites = 50
 		}
 		hbc := client.NewHybridBufferClient(b, c.WeakRatio, weakWrites, c.ReplyTimeout)
@@ -351,7 +351,7 @@ func runSingleClient(c *config.Config, threadIdx int, verbose bool, numThreads i
 	} else if p == "pileusht" {
 		phtCl := pileusht.NewClient(b)
 		weakWrites := c.WeakWrites
-		if weakWrites == 0 && c.WeakRatio > 0 {
+		if weakWrites == 0 && c.WeakRatio > 0 && c.ScanRatio == 0 {
 			weakWrites = 50
 		}
 		hbc := client.NewHybridBufferClient(b, c.WeakRatio, weakWrites, c.ReplyTimeout)

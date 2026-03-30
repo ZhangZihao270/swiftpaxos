@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"sort"
+
 	"strconv"
 	"sync"
 )
@@ -118,18 +118,12 @@ func (c *Command) Execute(st *State) Value {
 
 	case SCAN:
 		count := binary.LittleEndian.Uint64(c.V)
-		upper := c.K + Key(count)
-		// Collect matching keys, sort for deterministic order
-		keys := make([]Key, 0)
-		for k := range st.Store {
-			if k >= c.K && k <= upper {
-				keys = append(keys, k)
+		// Direct point lookups for keys in range [K, K+count] — O(count) instead of O(store_size)
+		found := make([]Value, 0)
+		for i := Key(0); i <= Key(count); i++ {
+			if val, ok := st.Store[c.K+i]; ok {
+				found = append(found, val)
 			}
-		}
-		sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
-		found := make([]Value, 0, len(keys))
-		for _, k := range keys {
-			found = append(found, st.Store[k])
 		}
 		return concat(found)
 	}
@@ -154,17 +148,12 @@ func (c *Command) ComputeResult(st *State) Value {
 
 	case SCAN:
 		count := binary.LittleEndian.Uint64(c.V)
-		upper := c.K + Key(count)
-		keys := make([]Key, 0)
-		for k := range st.Store {
-			if k >= c.K && k <= upper {
-				keys = append(keys, k)
+		// Direct point lookups for keys in range [K, K+count] — O(count) instead of O(store_size)
+		found := make([]Value, 0)
+		for i := Key(0); i <= Key(count); i++ {
+			if val, ok := st.Store[c.K+i]; ok {
+				found = append(found, val)
 			}
-		}
-		sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
-		found := make([]Value, 0, len(keys))
-		for _, k := range keys {
-			found = append(found, st.Store[k])
 		}
 		return concat(found)
 

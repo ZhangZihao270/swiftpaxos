@@ -1182,8 +1182,8 @@ func TestExpTaoConfigFile(t *testing.T) {
 	if c.Protocol != "curpho" {
 		t.Errorf("Protocol = %s, want curpho", c.Protocol)
 	}
-	if c.Writes != 1 {
-		t.Errorf("Writes = %d, want 1", c.Writes)
+	if c.Writes != 20 {
+		t.Errorf("Writes = %d, want 20", c.Writes)
 	}
 	if c.WeakRatio != 95 {
 		t.Errorf("WeakRatio = %d, want 95", c.WeakRatio)

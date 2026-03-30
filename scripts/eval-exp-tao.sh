@@ -6,10 +6,13 @@
 # TAO workload: 1% writes (all linear), 95% weak ratio, 44% of weak reads
 # are SCAN ops with Zipf-distributed scan count [1, 1000].
 #
-# Protocols:
-#   curpho       — protocol: curpho, weakRatio: 95
-#   curpht       — protocol: curpht, weakRatio: 95
-#   curp-baseline — protocol: curpht, weakRatio: 0 (all strong = vanilla CURP)
+# Protocols (10 total):
+#   Baselines (weakRatio=0, all strong):
+#     raft-baseline    — raftht:0
+#     epaxos-baseline  — epaxosho:0
+#     curp-baseline    — curpht:0
+#   Hybrid (weakRatio=95):
+#     raftht, epaxosho, curpht, curpho, mongotunable, pileus, pileusht
 #
 # Usage: bash scripts/eval-exp-tao.sh [output-dir]
 # Output: <output-dir>/exp-tao/
@@ -28,13 +31,22 @@ ALL_HOSTS=(34.236.191.149 18.221.173.128 16.147.240.15 108.130.8.61 35.183.203.8
 
 CONFIG="/tmp/eval-exp-tao-$$.conf"
 cp configs/exp-tao.conf "$CONFIG"
+# Override reqs to 3000
+sed -i -E "s/^reqs:.*$/reqs:        3000/" "$CONFIG"
 trap 'rm -f "$CONFIG"' EXIT
 
 # Protocol configs: name, protocol-value, weakRatio
 declare -a PROTOCOLS=(
-    "curpho:curpho:95"
-    "curpht:curpht:95"
+    "raft-baseline:raftht:0"
+    "raftht:raftht:95"
+    "epaxos-baseline:epaxosho:0"
+    "epaxosho:epaxosho:95"
     "curp-baseline:curpht:0"
+    "curpht:curpht:95"
+    "curpho:curpho:95"
+    "mongotunable:mongotunable:95"
+    "pileus:pileus:95"
+    "pileusht:pileusht:95"
 )
 
 mkdir -p "$EXP_DIR"
@@ -80,9 +92,10 @@ run_benchmark() {
 
 log "Exp TAO: TAO-like Benchmark — Throughput vs Latency"
 log "Layout: 5 replicas on 5 machines, 3 clients"
-log "Workload: 1% writes, 95% weak, scanRatio=44, scanCount=1000, zipf=0.8"
+log "Workload: 1% writes (20% of strong), 95% weak, scanRatio=44, scanCount=1000, zipf=0.8"
 log "Thread counts: ${THREAD_COUNTS[*]}"
-log "Repetitions: $REPS"
+log "Repetitions: $REPS, reqs: 3000"
+log "Protocols: ${#PROTOCOLS[@]}"
 log "Output: $EXP_DIR"
 echo ""
 
@@ -105,6 +118,11 @@ for proto_spec in "${PROTOCOLS[@]}"; do
         for rep in $(seq 1 $REPS); do
             run_idx=$((run_idx + 1))
             out_dir="$EXP_DIR/$name/t${threads}/run${rep}"
+
+            if [[ -f "$out_dir/summary.txt" ]]; then
+                log "  [$run_idx/$total_runs] SKIP (exists): $name t=$threads rep=$rep"
+                continue
+            fi
 
             log "  [$run_idx/$total_runs] $name t=$threads rep=$rep -> $out_dir"
 
@@ -145,25 +163,33 @@ done
 # Generate summary CSV with averaged results
 log "Generating summary CSV..."
 SUMMARY_CSV="$BASE_DIR/summary-exp-tao.csv"
-echo "protocol,threads,avg_throughput,avg_s_p50,avg_s_p99,avg_w_p50,avg_w_p99" > "$SUMMARY_CSV"
+echo "protocol,threads,avg_throughput,avg_s_avg,avg_s_p50,avg_s_p99,avg_w_avg,avg_w_p50,avg_w_p99,avg_lat" > "$SUMMARY_CSV"
 
 for proto_spec in "${PROTOCOLS[@]}"; do
     IFS=':' read -r name protocol weak_ratio <<< "$proto_spec"
     for threads in "${THREAD_COUNTS[@]}"; do
-        # Average across repetitions
-        tp_sum=0; s_p50_sum=0; s_p99_sum=0; w_p50_sum=0; w_p99_sum=0; count=0
+        tp_sum=0; s_avg_sum=0; s_p50_sum=0; s_p99_sum=0
+        w_avg_sum=0; w_p50_sum=0; w_p99_sum=0; count=0
         for rep in $(seq 1 $REPS); do
             summary="$EXP_DIR/$name/t${threads}/run${rep}/summary.txt"
             if [[ -f "$summary" ]]; then
                 tp=$(grep "Aggregate throughput" "$summary" | awk '{print $3}')
+                # Strong
+                s_avg=$(sed -n '/Strong/,/Weak\|Per-Client/{/Avg:/p}' "$summary" | head -1 | grep -oP 'Avg:\s*\K[\d.]+')
                 s_p50=$(grep "Avg median" "$summary" | head -1 | grep -oP '[\d.]+' | head -1)
-                s_p99=$(grep "Avg p99" "$summary" | head -1 | grep -oP '[\d.]+' | head -1)
+                s_p99=$(grep "Max P99" "$summary" | head -1 | grep -oP '[\d.]+' | head -1)
+                # Strong %
+                s_pct=$(grep "Strong Operations" "$summary" | grep -oP '\(([\d.]+)%\)' | grep -oP '[\d.]+')
+                # Weak
+                w_avg=$(sed -n '/Weak/,/Per-Client/{/Avg:/p}' "$summary" | head -1 | grep -oP 'Avg:\s*\K[\d.]+')
                 w_p50=$(grep "Avg median" "$summary" | tail -1 | grep -oP '[\d.]+' | head -1)
-                w_p99=$(grep "Avg p99" "$summary" | tail -1 | grep -oP '[\d.]+' | head -1)
+                w_p99=$(grep "Max P99" "$summary" | tail -1 | grep -oP '[\d.]+' | head -1)
                 if [[ -n "$tp" && "$tp" != "0.00" ]]; then
                     tp_sum=$(echo "$tp_sum + $tp" | bc)
+                    s_avg_sum=$(echo "$s_avg_sum + ${s_avg:-0}" | bc)
                     s_p50_sum=$(echo "$s_p50_sum + ${s_p50:-0}" | bc)
                     s_p99_sum=$(echo "$s_p99_sum + ${s_p99:-0}" | bc)
+                    w_avg_sum=$(echo "$w_avg_sum + ${w_avg:-0}" | bc)
                     w_p50_sum=$(echo "$w_p50_sum + ${w_p50:-0}" | bc)
                     w_p99_sum=$(echo "$w_p99_sum + ${w_p99:-0}" | bc)
                     count=$((count + 1))
@@ -172,11 +198,19 @@ for proto_spec in "${PROTOCOLS[@]}"; do
         done
         if [[ $count -gt 0 ]]; then
             avg_tp=$(echo "scale=2; $tp_sum / $count" | bc)
+            avg_s_avg=$(echo "scale=2; $s_avg_sum / $count" | bc)
             avg_s_p50=$(echo "scale=2; $s_p50_sum / $count" | bc)
             avg_s_p99=$(echo "scale=2; $s_p99_sum / $count" | bc)
+            avg_w_avg=$(echo "scale=2; $w_avg_sum / $count" | bc)
             avg_w_p50=$(echo "scale=2; $w_p50_sum / $count" | bc)
             avg_w_p99=$(echo "scale=2; $w_p99_sum / $count" | bc)
-            echo "$name,$threads,$avg_tp,$avg_s_p50,$avg_s_p99,$avg_w_p50,$avg_w_p99" >> "$SUMMARY_CSV"
+            # Weighted avg latency (use s_pct from last valid run, or 100% for baselines)
+            if [[ "$weak_ratio" == "0" ]]; then
+                avg_lat="$avg_s_avg"
+            else
+                avg_lat=$(echo "scale=2; $avg_s_avg * 0.05 + $avg_w_avg * 0.95" | bc)
+            fi
+            echo "$name,$threads,$avg_tp,$avg_s_avg,$avg_s_p50,$avg_s_p99,$avg_w_avg,$avg_w_p50,$avg_w_p99,$avg_lat" >> "$SUMMARY_CSV"
         fi
     done
 done

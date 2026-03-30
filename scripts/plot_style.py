@@ -24,32 +24,39 @@ WONG = {
 }
 
 # Protocol colors — distinct even for colorblind viewers
+# TAO figure has 10 protocols, so each needs a unique color+marker combo
 PROTOCOL_COLORS = {
-    'raftht':        WONG['red'],
-    'raft':          WONG['orange'],
-    'curpho':        WONG['blue'],
-    'curpht':        WONG['green'],
-    'curp-baseline': WONG['purple'],
-    'epaxos':        '#2D5F8A',   # deep teal blue
-    # Exp 1.1 extra protocols (don't appear in the same figure as curp/epaxos)
-    'mongotunable':  WONG['black'],
-    'pileus':        WONG['purple'],
-    'pileusht':      WONG['cyan'],
-    # Exp 2.1
-    'epaxosho':      '#C44E52',   # muted crimson
+    # Raft family
+    'raft':            WONG['orange'],
+    'raft-baseline':   WONG['orange'],
+    'raftht':          WONG['red'],
+    # EPaxos family
+    'epaxos':          '#7A6CB5',   # muted purple
+    'epaxos-baseline': '#7A6CB5',   # muted purple
+    'epaxosho':        '#C44E52',   # muted crimson
+    # CURP family
+    'curp-baseline':   '#888888',   # gray
+    'curpht':          WONG['green'],
+    'curpho':          WONG['blue'],
+    # Exp 1.1 extra protocols
+    'mongotunable':    WONG['black'],
+    'pileus':          WONG['cyan'],
+    'pileusht':        '#8B4513',   # saddle brown
 }
 
 PROTOCOL_MARKERS = {
-    'raftht':        's',
-    'raft':          '^',
-    'curpho':        'o',
-    'curpht':        'D',
-    'curp-baseline': 'v',
-    'epaxos':        'P',
-    'mongotunable':  '*',
-    'pileus':        'P',
-    'pileusht':      'D',
-    'epaxosho':      'o',
+    'raft':              '^',
+    'raft-baseline':     '^',
+    'raftht':            's',
+    'epaxos':            'P',
+    'epaxos-baseline':   'P',
+    'epaxosho':          'h',
+    'curp-baseline':     'v',
+    'curpht':            'D',
+    'curpho':            'o',
+    'mongotunable':      '*',
+    'pileus':            'X',
+    'pileusht':          'd',
 }
 
 PROTOCOL_LABELS = {
@@ -57,12 +64,14 @@ PROTOCOL_LABELS = {
     'raft':          'Raft',
     'curpho':        'CURP-HO',
     'curpht':        'CURP-HT',
-    'curp-baseline': 'CURP (baseline)',
+    'curp-baseline': 'Vanilla CURP',
     'epaxos':        'EPaxos',
     'mongotunable':  'MongoDB',
     'pileus':        'Pileus',
     'pileusht':      'Pileus-HT',
     'epaxosho':      'EPaxos-HO',
+    'raft-baseline':   'Vanilla Raft',
+    'epaxos-baseline': 'Vanilla EPaxos',
 }
 
 def load_csv_optional(path):

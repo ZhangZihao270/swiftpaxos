@@ -202,8 +202,23 @@ func (c *Client) SendWeakRead(key int64) int32 {
 }
 
 func (c *Client) SendWeakScan(key int64, count int64) int32 {
-	// TODO: implement proper weak scan in Phase 126 Step 3
-	return c.SendWeakRead(key)
+	seqnum := c.GetNextSeqnum()
+	minIdx := atomic.LoadInt32(&c.lastWriteSlot)
+	wr := &raftht.MWeakRead{
+		CommandId: seqnum,
+		ClientId:  c.ClientId,
+		Key:       state.Key(key),
+		MinIndex:  minIdx,
+		Op:        uint8(state.SCAN),
+		Count:     count,
+	}
+	c.mu.Lock()
+	c.weakPending[seqnum] = struct{}{}
+	c.weakPendingKeys[seqnum] = key
+	c.mu.Unlock()
+	closest := int32(c.ClosestId)
+	c.SendMsg(closest, c.cs.WeakReadRPC, wr)
+	return seqnum
 }
 
 func (c *Client) SupportsWeak() bool { return true }

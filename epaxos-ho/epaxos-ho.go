@@ -498,13 +498,29 @@ func (r *Replica) handlePropose(propose *defs.GPropose) {
 		}
 	}
 
-	// Create separate instances for causal and strong (matching Orca design).
-	// This ensures causal instances follow 1-RTT path and strong instances
-	// follow PreAccept consensus path independently.
-	if len(causalProposals) > 0 {
+	// Short-circuit causal reads: serve directly from local state without consensus.
+	// Only causal writes need EPaxos replication.
+	var causalWriteCmds []state.Command
+	var causalWriteProposals []*defs.GPropose
+	for i, cmd := range causalCmds {
+		if cmd.Op == state.GET || cmd.Op == state.SCAN {
+			// Causal read: execute locally and reply immediately
+			val := cmd.ComputeResult(r.State)
+			p := causalProposals[i]
+			r.ReplyProposeTS(&defs.ProposeReplyTS{
+				OK: defs.TRUE, CommandId: p.CommandId, Value: val, Timestamp: 0,
+			}, p.Reply, p.Mutex)
+		} else {
+			causalWriteCmds = append(causalWriteCmds, cmd)
+			causalWriteProposals = append(causalWriteProposals, causalProposals[i])
+		}
+	}
+
+	// Create separate instances for causal writes and strong commands.
+	if len(causalWriteProposals) > 0 {
 		instNo := r.crtInstance[r.Id]
 		r.crtInstance[r.Id]++
-		r.startCausalCommit(r.Id, instNo, 0, causalProposals, causalCmds)
+		r.startCausalCommit(r.Id, instNo, 0, causalWriteProposals, causalWriteCmds)
 	}
 	if len(strongProposals) > 0 {
 		instNo := r.crtInstance[r.Id]
