@@ -9447,7 +9447,7 @@ grep "TPUT" results/exp2.3-test/client*.log | tail -20
 - ✅ Election succeeds (1-2s) — fixed with ID-based jitter
 - ✅ Log recovery: slot sync completes in <1s (Phase 128.6)
 - ✅ New leader accepts proposals after recovery (status=NORMAL, lastCmdSlot correct)
-- ⬜ **Throughput still 0**: client pipeline blocked after failover (see Phase 128.7 below)
+- ✅ **Throughput still 0**: client pipeline blocked after failover — fixed in Phase 128.7 Steps 1-2 (pipeline flush). Pending lab verification.
 
 ### Phase 128.7: Client Pipeline Recovery After Failover
 
@@ -9480,12 +9480,12 @@ The client `HybridLoop` uses pipelining (pendings=15): each thread can have up t
 - Also added nil guards for `resendPropose`/`sendMsgSafe` and `LeaderId` update
 - 9 unit tests: strong/weak/mixed pending, already-delivered skip, no-op, real reply dedup
 
-#### ⬜ Step 3: Handle client0 on dead machine
+#### ✅ Step 3: Handle client0 on dead machine
 - Client0 (130.245.173.101) is co-located with killed replica0 — it will never recover
-- For experiment: either (a) don't co-locate client with killable replica, or (b) ignore client0 in throughput measurement
+- Solution: ignore client0 in throughput measurement (client1+client2 should resume)
 - Not a code fix — just experiment design
 
-#### ⬜ Step 4: Test and verify
+#### ⬜ Step 4: Test and verify (lab only)
 - Kill-leader on lab: throughput should drop for ~2s then recover to ~70% (2 of 3 clients)
 - Check per-client TPUT: client0=0 (dead), client1+client2 should resume
 - Verify no data corruption: commands after recovery should complete correctly
@@ -9514,6 +9514,6 @@ The client `HybridLoop` uses pipelining (pendings=15): each thread can have up t
 - 10 unit tests: serialization, slot sync start, handler, stale term, 3/5 replicas, higher term step-down, self lastCommitted
 - Updated old TestStartLogRecovery and TestRecoveryFullFlow to use slot sync
 - ✅ Kill-leader test on lab: slot sync completes in <1s (verified 2026-03-30)
-- ⬜ Throughput recovery blocked by client pipeline issue (see Phase 128.7)
+- ✅ Throughput recovery: pipeline flush implemented in Phase 128.7 Steps 1-2. Pending lab verification.
 
 **Expected timeline**: kill → 1-1.5s election → 0.1s slot sync → NORMAL → throughput resumes (pending 128.7)
