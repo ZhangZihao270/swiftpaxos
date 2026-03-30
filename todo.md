@@ -9450,7 +9450,8 @@ grep "TPUT" results/exp2.3-test/client*.log | tail -20
 - ✅ Client pipeline flush works (128.7) — flush triggered, pipeline unblocked
 - ✅ Sender head-of-line blocking fixed (128.8) — fire-and-forget per-peer sends, no more wg.Wait()
 - ✅ Proposals buffered during RECOVERING (128.9) — buffer + replay after recovery
-- ⬜ **Throughput still 0 in lab test** (see Phase 128.10 below)
+- ✅ Dead writer nil'd + write deadline (128.10) — sendProposeSafe no longer blocks
+- ⬜ **Throughput still 0**: election succeeds (term 4, 2s), slot sync completes, client flush+refill works, MSync retries. But new commands get NO reply from new leader. Likely: new leader processes proposals but `SendToClient` fails (no client writer registered on new leader, or reply goes to wrong reader). Need Phase 128.11 debug.
 
 ### Phase 128.10: Client sendProposeSafe Blocks on Dead Writer
 
