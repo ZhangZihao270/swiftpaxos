@@ -64,12 +64,12 @@ def plot_throughput(ax, rows):
         label  = PROTOCOL_LABELS[proto]
 
         ax.plot(data['skew'], [t / 1000 for t in data['throughput']],
-                color=color, marker=marker, label=label, zorder=3)
+                color=color, marker=marker, markersize=11, label=label, zorder=3)
 
     ax.set_xlabel('Zipf Skew')
     ax.set_ylabel('Throughput\n(Kops/sec)')
-    
-    ax.legend(loc='lower left', fontsize=10)
+
+    ax.legend(loc='lower left')
     ax.set_xlim(-0.05, 1.04)
     ax.set_xticks([0, 0.25, 0.5, 0.75, 0.99])
     ax.set_ylim(bottom=0)
@@ -77,26 +77,31 @@ def plot_throughput(ax, rows):
 
 def plot_latency_broken(fig, gs_slot, lat_data):
     """Right subplot: broken y-axis p50 — strong (top) and weak (bottom)."""
-    inner = gs_slot.subgridspec(2, 1, height_ratios=[3, 1], hspace=0.12)
+    inner = gs_slot.subgridspec(2, 1, height_ratios=[2.5, 1], hspace=0.12)
     ax_top = fig.add_subplot(inner[0])
     ax_bot = fig.add_subplot(inner[1])
+
+    # Distinct markers per protocol and metric
+    p50_markers = {'epaxos': 'o', 'epaxosho': 'D'}
+    p99_markers = {'epaxos': 's', 'epaxosho': '^'}
 
     # --- Top: strong p50 + p99 ---
     for proto in PROTOCOLS:
         d = lat_data[proto]
         color  = PROTOCOL_COLORS[proto]
-        marker = PROTOCOL_MARKERS[proto]
         label  = PROTOCOL_LABELS[proto]
 
-        ax_top.plot(d['skew'], d['s_p50'], color=color, marker=marker,
+        ax_top.plot(d['skew'], d['s_p50'], color=color, marker=p50_markers[proto],
+                    markersize=11, linewidth=2.5,
                     label=f'{label} linear (p50)', zorder=3)
-        ax_top.plot(d['skew'], d['s_p99'], color=color, marker=marker,
-                    markersize=5, linestyle='--', alpha=0.7,
+        ax_top.plot(d['skew'], d['s_p99'], color=color, marker=p99_markers[proto],
+                    markersize=10, linewidth=2, linestyle='--', alpha=0.7,
+                    fillstyle='none', markeredgewidth=2,
                     label=f'{label} linear (p99)', zorder=2)
 
     ax_top.set_ylabel('Latency (ms)', y=0.3)
-    
-    ax_top.legend(loc='upper left', fontsize=9, ncol=2)
+
+    ax_top.legend_.remove() if ax_top.get_legend() else None
     ax_top.set_xlim(-0.05, 1.04)
     ax_top.set_xticks([0, 0.25, 0.5, 0.75, 0.99])
     # Auto-scale based on data range
@@ -120,16 +125,18 @@ def plot_latency_broken(fig, gs_slot, lat_data):
         label  = PROTOCOL_LABELS[proto]
 
         if proto in HYBRID_PROTOS and d['w_p50'][0] is not None:
-            ax_bot.plot(d['skew'], d['w_p50'], color=color, marker=marker,
+            causal_color = '#009E73'  # green, distinct from red linear
+            ax_bot.plot(d['skew'], d['w_p50'], color=causal_color, marker=p50_markers[proto],
+                        markersize=11, linewidth=2.5,
                         label=f'{label} causal (p50)', zorder=3)
-            ax_bot.plot(d['skew'], d['w_p99'], color=color, marker=marker,
-                        markersize=5, linestyle='--', alpha=0.7,
+            ax_bot.plot(d['skew'], d['w_p99'], color=causal_color, marker=p99_markers[proto],
+                        markersize=10, linewidth=2, linestyle='--', alpha=0.7,
+                        fillstyle='none', markeredgewidth=2,
                         label=f'{label} causal (p99)', zorder=2)
 
     ax_bot.set_xlabel('Zipf Skew')
     ax_bot.set_ylabel('')
-    ax_bot.legend_.remove() if hasattr(ax_bot, 'legend_') and ax_bot.legend_ else None
-    ax_bot.legend(loc='upper center', fontsize=9, ncol=2, bbox_to_anchor=(0.5, 1.3))
+    ax_bot.legend_.remove() if ax_bot.get_legend() else None
     ax_bot.set_xlim(-0.05, 1.04)
     ax_bot.set_xticks([0, 0.25, 0.5, 0.75, 0.99])
     all_w = [v for proto in PROTOCOLS
@@ -149,6 +156,13 @@ def plot_latency_broken(fig, gs_slot, lat_data):
     ax_top.spines['bottom'].set_visible(False)
     ax_bot.spines['top'].set_visible(False)
 
+    # Collect all handles and place a single 2-column legend inside top panel (upper left)
+    h1, l1 = ax_top.get_legend_handles_labels()
+    h2, l2 = ax_bot.get_legend_handles_labels()
+    # Interleave: linear p50/p99 then causal p50/p99 — 2 columns x 3 rows
+    ax_top.legend(h1 + h2, l1 + l2, loc='upper left',
+                  fontsize=12, ncol=2, framealpha=0.9)
+
 
 def main():
     base = base_dir()
@@ -160,8 +174,8 @@ def main():
     lat_data = collect_latencies(rows)
 
     import matplotlib.gridspec as gridspec
-    fig = plt.figure(figsize=(12, 3))
-    gs = gridspec.GridSpec(1, 2, figure=fig, wspace=0.2)
+    fig = plt.figure(figsize=(14, 4.5))
+    gs = gridspec.GridSpec(1, 2, figure=fig, wspace=0.25, width_ratios=[1, 2])
 
     # Left: throughput
     ax_tput = fig.add_subplot(gs[0])
@@ -170,11 +184,11 @@ def main():
     # Right: broken y-axis latency
     plot_latency_broken(fig, gs[1], lat_data)
 
-    ax_tput.text(0.5, -0.38, '(a)', transform=ax_tput.transAxes,
-                 fontsize=14, fontweight='bold', ha='center')
-    fig.text(0.73, -0.03, '(b)', fontsize=14, fontweight='bold', ha='center')
+    ax_tput.text(0.5, -0.38, '(a) Throughput vs Contention', transform=ax_tput.transAxes,
+                 fontsize=22, fontweight='bold', ha='center')
+    fig.text(0.73, -0.01, '(b) Latency vs Contention', fontsize=22, fontweight='bold', ha='center')
 
-    plt.subplots_adjust(bottom=0.22)
+    plt.subplots_adjust(bottom=0.2)
     save_figure(fig, out_dir, 'exp2.2-conflict-sweep')
 
 

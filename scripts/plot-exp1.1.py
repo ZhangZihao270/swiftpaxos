@@ -48,11 +48,11 @@ PROTO_DIR = {
 # TODO: after re-running with merged script, all will be in the same dir.
 # For now, pileusht was run separately.
 RESULT_DIRS = {
-    'raft':         'eval-exp1.1-20260321',
-    'raftht':       'eval-exp1.1-20260321',
-    'mongotunable': 'eval-exp1.1-20260321',
-    'pileus':       'eval-exp1.1-20260321',
-    'pileusht':     'eval-exp1.1-20260321',
+    'raft':         'eval-exp1.1-20260331b',
+    'raftht':       'eval-exp1.1-20260331b',
+    'mongotunable': 'eval-exp1.1-20260331b',
+    'pileus':       'eval-exp1.1-20260331b',
+    'pileusht':     'eval-exp1.1-20260331b',
 }
 
 
@@ -88,15 +88,21 @@ def plot_tput_lat(ax, rows, wg, wg_label):
         x, y = clean_pairs(throughput, avg_lat)
         if x:
             zo = 10 if proto == 'raftht' else 3
-            ax.plot(x, y, color=color, marker=marker, markersize=8, linewidth=2.5, label=label, zorder=zo)
+            lw = 3.5 if proto == 'raftht' else 2.5
+            ax.plot(x, y, color=color, marker=marker, markersize=10, linewidth=lw, label=label, zorder=zo)
 
     ax.set_xlabel('Throughput (Kops/sec)')
     ax.set_ylabel('Avg Latency (ms)')
-    ax.set_title(f'Throughput vs Latency ({wg_label})', fontsize=13)
-    ax.legend(loc='upper left', fontsize=10, ncol=1)
+    ax.set_title(f'Write Ratio {wg}%', fontsize=22)
+    if wg == 5:
+        ax.legend(loc='upper left', ncol=1, bbox_to_anchor=(-0.05, 1.0))
+    else:
+        ax.legend(loc='upper left', ncol=1)
     ax.set_xlim(left=0)
     ax.set_ylim(bottom=0)
     ax.xaxis.set_major_formatter(ticker.FuncFormatter(kops_formatter))
+    ax.xaxis.set_major_locator(ticker.MaxNLocator(nbins=5))
+    ax.yaxis.set_major_locator(ticker.MaxNLocator(nbins=5))
 
 
 def plot_cdf(ax, base, wg, wg_label):
@@ -125,11 +131,11 @@ def plot_cdf(ax, base, wg, wg_label):
 
     ax.set_xlabel('Latency (ms)')
     ax.set_ylabel('CDF')
-    ax.set_title(f'Latency CDF, 96 clients ({wg_label})', fontsize=13)
-    ax.legend(loc='lower right', fontsize=10, ncol=1)
+    ax.set_title(f'Write Ratio {wg}%', fontsize=22)
+    ax.legend(loc='lower right', ncol=1)
     ax.set_ylim(0, 1.02)
-    ax.set_xlim(left=0, right=300)
-    ax.set_xticks([0, 50, 100, 150, 200, 250, 300])
+    ax.set_xlim(left=0, right=250)
+    ax.set_xticks([0, 50, 100, 150, 200, 250])
 
 
 def main():
@@ -141,16 +147,17 @@ def main():
     setup_style()
     rows = load_csv(csv_path)
 
-    fig, axes = plt.subplots(1, 4, figsize=(24, 4))
+    fig, axes = plt.subplots(1, 4, figsize=(24, 4.2))
 
-    labels = ['(a)', '(b)', '(c)', '(d)']
     for col_idx, (wg, wg_label) in enumerate(WRITE_GROUPS):
         plot_tput_lat(axes[col_idx * 2], rows, wg, wg_label)
         plot_cdf(axes[col_idx * 2 + 1], base, wg, wg_label)
 
+    subcaptions = ['(a) Throughput vs Latency', '(b) Latency CDF',
+                   '(c) Throughput vs Latency', '(d) Latency CDF']
     for i, ax in enumerate(axes):
-        ax.text(0.5, -0.28, labels[i], transform=ax.transAxes,
-                fontsize=14, fontweight='bold', ha='center')
+        ax.text(0.5, -0.42, subcaptions[i], transform=ax.transAxes,
+                fontsize=22, fontweight='bold', ha='center')
 
     plt.tight_layout(w_pad=1.5)
     plt.subplots_adjust(bottom=0.18)

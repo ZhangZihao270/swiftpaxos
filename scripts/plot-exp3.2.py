@@ -52,20 +52,20 @@ def plot_latency(ax, rows):
         label  = PROTOCOL_LABELS[proto]
 
         # p50 — solid
-        ax.plot(d['wr'], d['s_p50'], color=color, marker=marker, markersize=8, linewidth=2.5,
+        ax.plot(d['wr'], d['s_p50'], color=color, marker=marker, markersize=11, linewidth=2.5,
                 label=f'{label} (p50)', zorder=3)
         # p99 — dashed
         ax.plot(d['wr'], d['s_p95'], color=color, marker=marker,
-                markersize=6, linewidth=2, linestyle='--', alpha=0.7,
+                markersize=10, linewidth=2, linestyle='--', alpha=0.7,
                 label=f'{label} (p99)', zorder=2)
 
     ax.set_xlabel('Causal Operation Ratio (%)')
     ax.set_ylabel('Linear Latency\n(ms)')
-    
+
     ax.set_xticks([0, 25, 50, 75, 99])
-    ax.legend(loc='upper left', fontsize=10, ncol=1)
+    ax.legend(loc='upper left', ncol=1)
     ax.set_xlim(-5, 105)
-    ax.set_ylim(top=120)
+    ax.set_ylim(0, 150)
 
 
 def plot_throughput(ax, rows):
@@ -78,13 +78,13 @@ def plot_throughput(ax, rows):
 
         ax.plot(d['wr'],
                 [t / 1000 if t else None for t in d['throughput']],
-                color=color, marker=marker, markersize=8, linewidth=2.5, label=label, zorder=3)
+                color=color, marker=marker, markersize=11, linewidth=2.5, label=label, zorder=3)
 
     ax.set_xlabel('Causal Operation Ratio (%)')
     ax.set_ylabel('Throughput\n(Kops/sec)')
-    
+
     ax.set_xticks([0, 25, 50, 75, 99])
-    ax.legend(loc='upper left', fontsize=10)
+    ax.legend(loc='upper left')
     ax.set_xlim(-5, 105)
     ax.set_ylim(bottom=0)
 
@@ -97,16 +97,17 @@ def main():
     setup_style()
     rows = load_csv(csv_path)
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 3))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 4.5))
     plot_throughput(ax1, rows)
     plot_latency(ax2, rows)
 
-    ax1.text(0.5, -0.40, '(a)', transform=ax1.transAxes,
-             fontsize=14, fontweight='bold', ha='center')
-    ax2.text(0.5, -0.40, '(b)', transform=ax2.transAxes,
-             fontsize=14, fontweight='bold', ha='center')
+    ax1.text(0.5, -0.38, '(a) Throughput vs Causal Ratio', transform=ax1.transAxes,
+             fontsize=22, fontweight='bold', ha='center')
+    ax2.text(0.5, -0.38, '(b) Linear Latency vs Causal Ratio', transform=ax2.transAxes,
+             fontsize=22, fontweight='bold', ha='center')
 
     plt.tight_layout(w_pad=3)
+    plt.subplots_adjust(bottom=0.25)
     plt.subplots_adjust(bottom=0.28)
     save_figure(fig, out_dir, 'exp3.2-t-property')
 

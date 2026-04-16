@@ -64,14 +64,15 @@ PROTOCOL_LABELS = {
     'raft':          'Raft',
     'curpho':        'CURP-HO',
     'curpht':        'CURP-HT',
-    'curp-baseline': 'Vanilla CURP',
     'epaxos':        'EPaxos',
     'mongotunable':  'MongoDB',
     'pileus':        'Pileus',
     'pileusht':      'Pileus-HT',
     'epaxosho':      'EPaxos-HO',
-    'raft-baseline':   'Vanilla Raft',
-    'epaxos-baseline': 'Vanilla EPaxos',
+    'raft-baseline':   'Raft',
+    'epaxos-baseline': 'EPaxos',
+    'curp-baseline':   'CURP',
+    'vanilla curp':    'CURP',
 }
 
 def load_csv_optional(path):
@@ -83,12 +84,12 @@ def load_csv_optional(path):
 def setup_style():
     plt.rcParams.update({
         'font.family': 'serif',
-        'font.size': 15,
-        'axes.labelsize': 17,
-        'axes.titlesize': 17,
-        'legend.fontsize': 13,
-        'xtick.labelsize': 15,
-        'ytick.labelsize': 15,
+        'font.size': 19,
+        'axes.labelsize': 26,
+        'axes.titlesize': 22,
+        'legend.fontsize': 17,
+        'xtick.labelsize': 22,
+        'ytick.labelsize': 22,
         'figure.dpi': 300,
         'savefig.dpi': 300,
         'savefig.bbox': 'tight',
