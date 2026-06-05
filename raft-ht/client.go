@@ -220,6 +220,17 @@ func (c *Client) handleWeakReply(rep *MWeakReply) {
 }
 
 // handleWeakReadReply handles weak read reply from nearest replica.
+//
+// Cache merge for read-your-writes:
+//   The nearest replica may lag behind the leader, so its reply value may be
+//   stale relative to writes this client has already performed. The client
+//   maintains a local cache of {key → (value, version)} where version is the
+//   log slot assigned by the leader. If the cache entry is newer than the
+//   replica's reply, we return the cached value instead — guaranteeing
+//   read-your-writes without any server-side wait.
+//
+// Note: applies to single-key GETs only. SCAN cache semantics are out of
+// scope for this merge (cache stores per-key values, not scan results).
 func (c *Client) handleWeakReadReply(rep *MWeakReadReply) {
 	c.mu.Lock()
 	if _, exists := c.delivered[rep.CmdId.SeqNum]; exists {
@@ -227,15 +238,24 @@ func (c *Client) handleWeakReadReply(rep *MWeakReadReply) {
 		return
 	}
 
-	c.val = rep.Rep
-
-	// Update local cache from weak read
-	if key, hasKey := c.weakPendingKeys[rep.CmdId.SeqNum]; hasKey {
-		c.localCache[key] = cacheEntry{value: c.val, version: rep.Version}
-		if rep.Version > c.maxVersion {
-			c.maxVersion = rep.Version
+	key, hasKey := c.weakPendingKeys[rep.CmdId.SeqNum]
+	if hasKey {
+		// Cache merge: if cached version is strictly newer than reply, use cache.
+		cached, hasCached := c.localCache[key]
+		if hasCached && cached.version > rep.Version {
+			c.val = cached.value
+			// Do NOT overwrite the cache with the stale reply.
+		} else {
+			c.val = rep.Rep
+			c.localCache[key] = cacheEntry{value: rep.Rep, version: rep.Version}
+			if rep.Version > c.maxVersion {
+				c.maxVersion = rep.Version
+			}
 		}
 		delete(c.weakPendingKeys, rep.CmdId.SeqNum)
+	} else {
+		// Defensive: no key tracked (shouldn't happen).
+		c.val = rep.Rep
 	}
 
 	c.delivered[rep.CmdId.SeqNum] = struct{}{}
