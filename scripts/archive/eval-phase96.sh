@@ -72,7 +72,7 @@ ensure_clean() {
 run_benchmark() {
     local out_dir="$1" config="$2"
     mkdir -p "$out_dir"
-    timeout 300 ./run-multi-client.sh -d -c "$config" -t "$FIXED_THREADS" -o "$out_dir" \
+    timeout 300 scripts/run-multi-client.sh -d -c "$config" -t "$FIXED_THREADS" -o "$out_dir" \
         > "$out_dir/run-output.txt" 2>&1 || true
     ensure_clean
     if [[ -f "$out_dir/summary.txt" ]]; then

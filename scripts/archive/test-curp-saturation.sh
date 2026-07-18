@@ -55,7 +55,7 @@ for threads in "${THREAD_COUNTS[@]}"; do
     log "threads=$threads (total=$total, effective=$eff) -> $out_dir"
 
     mkdir -p "$out_dir"
-    timeout 300 ./run-multi-client.sh -d -c "$CONFIG" -t "$threads" -o "$out_dir" \
+    timeout 300 scripts/run-multi-client.sh -d -c "$CONFIG" -t "$threads" -o "$out_dir" \
         > "$out_dir/run-output.txt" 2>&1 || true
     ensure_clean
 

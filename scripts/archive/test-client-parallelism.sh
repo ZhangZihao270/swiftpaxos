@@ -67,7 +67,7 @@ run_test() {
     for i in $(seq 1 $ITERATIONS); do
         echo "  Iteration $i/$ITERATIONS..." | tee -a "$RESULT_FILE"
 
-        OUTPUT=$(timeout 120 ./run-multi-client.sh -c multi-client.conf 2>&1)
+        OUTPUT=$(timeout 120 scripts/run-multi-client.sh -c multi-client.conf 2>&1)
 
         # Extract metrics
         THROUGHPUT=$(echo "$OUTPUT" | grep -oP 'Aggregate throughput:\s+\K[0-9.]+' | tail -1)

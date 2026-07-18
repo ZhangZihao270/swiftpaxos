@@ -7,7 +7,7 @@
 #   - Each server runs one client process with multiple clones (threads)
 #   - Results from all servers are collected and merged
 #
-# Usage: ./run-multi-client.sh [options]
+# Usage: scripts/run-multi-client.sh [options]
 #
 # Options:
 #   -c, --config FILE       Config file (default: local.conf)

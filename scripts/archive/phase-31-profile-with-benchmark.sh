@@ -29,7 +29,7 @@ cp multi-client.conf multi-client.conf.profiling-backup
 sed -i "s/^reqs:.*/reqs:        $REQS_PER_CLIENT/" multi-client.conf
 
 # Start benchmark in background
-timeout $((BENCHMARK_DURATION + 30)) ./run-multi-client.sh -c multi-client.conf > "$OUTPUT_DIR/benchmark-output.log" 2>&1 &
+timeout $((BENCHMARK_DURATION + 30)) scripts/run-multi-client.sh -c multi-client.conf > "$OUTPUT_DIR/benchmark-output.log" 2>&1 &
 BENCHMARK_PID=$!
 
 echo "Benchmark started (PID: $BENCHMARK_PID)"

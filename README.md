@@ -1,167 +1,186 @@
-SwiftPaxos: Fast Geo-Replicated State Machines
-==========
-[![Go Report Card](https://goreportcard.com/badge/github.com/imdea-software/swiftpaxos)](https://goreportcard.com/report/github.com/imdea-software/swiftpaxos)
+Hybrid-Consistency State-Machine Replication
+============================================
 
-This repository contains the prototype implementation of SwiftPaxos, a new state-machine replication protocol for geo-distributed systems.
-SwiftPaxos is a _faster Paxos without compromises_.
-In the best case, it executes a state-machine command in two message delays (one round-trip), and three otherwise.
-SwiftPaxos was [presented](https://www.usenix.org/conference/nsdi24/presentation/ryabinin) at the 21st USENIX Symposium on Networked Systems Design and Implementation ([NSDI '24](https://www.usenix.org/conference/nsdi24)).
+This repository is a research prototype for **hybrid-consistency** state-machine
+replication: protocols that let a single system serve both *strong* (linearizable)
+and *weak* (causal) commands, so applications pay the coordination cost of strong
+consistency only for the operations that require it.
 
-Installation
-------------
+It contains a family of hybrid protocols (CURP-HT/HO, EPaxos-HO, Raft-HT,
+Pileus/Pileus-HT, MongoDB-Tunable), plus the vanilla consensus protocols (CURP,
+EPaxos, Raft) they are compared against.
 
-    git clone https://github.com/imdea-software/swiftpaxos.git
-    cd swiftpaxos
-    go install github.com/imdea-software/swiftpaxos
+> **Provenance.** This project is built on top of
+> [SwiftPaxos](https://github.com/imdea-software/swiftpaxos) (NSDI '24), whose code
+> base in turn derives from [Egalitarian Paxos](https://github.com/otrack/epaxos).
+> The Go module path is still `github.com/imdea-software/swiftpaxos`, and the
+> original SwiftPaxos participant/config/master machinery is reused as the harness
+> for all protocols here. Our contribution is the set of hybrid-consistency
+> protocols and the benchmark/evaluation tooling around them.
+
+Hybrid consistency in one paragraph
+-----------------------------------
+
+A history is *hybrid-consistent* when there exist two orderings over the operations:
+a partial causal order `≺_P` over **all** operations, and a total linearizable order
+`≺_T` over a subset `O_T` that contains **every strong operation** (weak operations
+are pulled into `O_T` only when a strong op reads from them). Weak commands commit
+fast on the causal path; strong commands go through full consensus and respect
+real-time order. See `docs/` and the design notes for the full formal model and the
+per-protocol implementation conditions.
 
 Implemented protocols
 ---------------------
 
-|  Protocol               | Comments                                          |
-|-------------------------|---------------------------------------------------|
-| SwiftPaxos              | See our NSDI'24 [paper](https://www.usenix.org/conference/nsdi24/presentation/ryabinin) for the full details.|
-| Paxos                   | The classic Paxos protocol.                       |
-| N<sup>2</sup>Paxos      | All-to-all variant of Paxos.                      |
-| CURP                    | CURP implemented over N<sup>2</sup>Paxos.         |
-| CURP-HT                 | Hybrid consistency CURP with strong/weak commands.|
-| Fast Paxos              | Fast Paxos with uncoordinated collision recovery. |
-| EPaxos                  | A [corrected][epaxos_correct] version of EPaxos.  |
+Selected with the `protocol:` field in the config (or the `-protocol` flag). Each
+protocol lives in its own package.
 
-This software is based on the [Egalitarian Paxos](https://github.com/otrack/epaxos) code base, as well as the corrections made [here](https://github.com/otrack/epaxos).
+### Hybrid-consistency protocols (this project)
 
-Usage
------
-#### participants
-There are three types of participants: *master*, *servers* and *clients*. 
-The servers and clients implement the protocol logic. 
-The master maintains the configuration of the system.
+| `protocol` value | Directory     | Description                                                                 |
+|------------------|---------------|-----------------------------------------------------------------------------|
+| `curpht`         | `curp-ht/`    | **CURP-HT** — CURP with Hybrid Transparency |
+| `curpho`         | `curp-ho/`    | **CURP-HO** — Hybrid-Optimal CURP|
+| `epaxosho`       | `epaxos-ho/`  | **EPaxos-HO** — leaderless Hybrid-Optimal EPaxos |
+| `raftht`         | `raft-ht/`    | **Raft-HT** — Raft with Hybrid Transparency              |
+| `pileus`         | `pileus/`     | **Pileus** — Weak-read only   |
+| `pileusht`       | `pileusht/`   | **Pileus-HT** — Pileus with fast weak writes.                               |
+| `mongotunable`   | `mongotunable/` | **MongoDB-Tunable** — tunable read/write concern over Raft-HT.             |
 
-#### deployment configuration
-To setup a run, the participants read deployment configuration file. 
-See [aws.conf][config] for an example of configuration file for AWS EC2.
+Each protocol package follows the same layout: `<name>.go` (replica logic),
+`client.go`, `defs.go` (message types + marshalling), and where relevant
+`batcher.go`, `timer.go`, `exec.go`.
 
-#### launching a participant
+Code structure
+--------------
 
-Master:
-    
-    swiftpaxos -run master -config conf.conf
-
-Server:
-
-    swiftpaxos -run server -config conf.conf -alias server_name
-
-Client:
-
-    swiftpaxos -run client -config conf.conf -alias client_name
-
-#### command line options
-
-    -alias alias
-        An alias of this participant
-    -config file
-        Deployment config file (required)
-    -latency file
-        Latency config file
-    -log file
-        Path to the log file
-    -protocol protocol
-        Protocol to run. Overwrites protocol field of the config file
-    -quorum file
-        Quorum config file
-    -run participant
-        Run a participant
-
-See [quorum.conf][quorum] and [latency.conf][latency] for an example of quorum and latency configuration files.
-
-Hybrid Consistency Benchmark (CURP-HT)
---------------------------------------
-
-CURP-HT supports hybrid consistency workloads with both strong (linearizable) and weak (causal) commands.
-To run a hybrid benchmark, use the `curpht` protocol and configure the following parameters:
-
-| Parameter   | Description                                              | Default |
-|-------------|----------------------------------------------------------|---------|
-| weakRatio   | Percentage of commands using weak consistency (0-100)    | 0       |
-| weakWrites  | Percentage of weak commands that are writes (0-100)      | 50      |
-
-Example configuration:
 ```
-protocol curpht
-reqs 10000
-writes 100
-weakRatio 50
-weakWrites 50
+main.go            Client entry point + protocol → client dispatch
+run.go             Replica entry point + protocol → replica dispatch
+config/            Deployment config parsing
+replica/           Base replica (replica.New) + MsgSet (mset.go) shared by all protocols
+client/            Base client (BufferClient); hybrid clients wrap HybridBufferClient
+master/            Master: holds/serves the cluster configuration
+rpc/               RPC registration
+state/             Key-value state machine executed by replicas
+dlog/  hook/       Logging and hooks
+
+<protocol dirs>    One package per protocol (see tables above)
+
+configs/           Base config files for the evaluation experiments (exp1.1 … exp-tao)
+scripts/           Experiment driver scripts (eval-*.sh) + plotting (plot-*.py)
+evaluation/        Result data, analysis notes, and generated plots
+docs/              Protocol flows, verification notes, and phase-by-phase design docs
+results/           Raw benchmark output
+tla/               TLA+ specifications
 ```
 
-This configuration runs 50% strong writes and 50% weak commands (half writes, half reads).
+The two dispatch points are the source of truth for which protocols exist:
+`run.go` wires each `protocol:` value to a replica, and `main.go` wires it to a client.
 
-Example workload configurations:
+Building
+--------
 
-| Workload     | weakRatio | writes | weakWrites | Description                    |
-|--------------|-----------|--------|------------|--------------------------------|
-| All Strong   | 0         | 100    | -          | Traditional benchmark (default)|
-| All Weak     | 100       | -      | 50         | Weak consistency only          |
-| Hybrid 50/50 | 50        | 100    | 50         | Half strong, half weak         |
-| Weak Reads   | 80        | 100    | 0          | Strong writes, weak reads      |
+Requires Go 1.20+.
 
-The benchmark outputs per-consistency-level metrics:
-- Latency statistics (median, P99, P99.9) for strong and weak operations
-- Throughput breakdown by consistency level
-- Total operations and duration
-
-Multi-threaded Client
----------------------
-
-Each client process can run multiple client threads for higher throughput:
-
-| Parameter      | Description                                           | Default |
-|----------------|-------------------------------------------------------|---------|
-| clientThreads  | Number of client threads per process                  | 0       |
-
-When `clientThreads` is 0, the `clones` parameter is used (backward compatible).
-When `clientThreads` > 0, it overrides `clones` for thread count.
-
-Example:
-```
-clientThreads 4  // Each client process runs 4 threads
+```bash
+git clone <this-repo>
+cd swiftpaxos
+go build -o swiftpaxos .
 ```
 
-Zipf Key Distribution
----------------------
+Running
+-------
 
-By default, clients use unique keys (one per client). For realistic workloads where some keys are accessed more frequently ("hot keys"), you can enable Zipf distribution:
+There are three participant roles: a **master** (holds the cluster configuration),
+**servers/replicas** (run the protocol), and **clients** (issue the workload). Every
+participant reads the same deployment config file and identifies itself with an alias.
 
-| Parameter  | Description                                              | Default |
-|------------|----------------------------------------------------------|---------|
-| keySpace   | Total number of unique keys (must be > 0 to enable)      | 0       |
-| zipfSkew   | Zipf skewness parameter (0 = uniform, >1 = skewed)       | 0       |
+```bash
+# Master
+./swiftpaxos -run master -config local-5r.conf
 
-When `keySpace` > 0, keys are selected from `[0, keySpace)` instead of using unique per-client keys.
+# Each replica (alias must match a name under "-- Replicas --")
+./swiftpaxos -run server -config local-5r.conf -alias replica0
 
-When `zipfSkew` > 0, keys follow a Zipf distribution where lower-numbered keys are accessed more frequently.
-Go's rand.Zipf requires s > 1, so values ≤ 1 are automatically clamped to 1.01.
-
-Typical `zipfSkew` values:
-- 0 or very small: Uniform distribution
-- 1.01-1.2: Mild skew
-- 1.5: Moderate skew
-- 2.0+: High skew (few keys get most accesses)
-
-Example:
-```
-keySpace 10000    // 10,000 unique keys
-zipfSkew 0.99     // Zipf distribution (will be clamped to 1.01)
+# Each client (alias must match a name under "-- Clients --")
+./swiftpaxos -run client -config local-5r.conf -alias client0
 ```
 
-Flint
------
+Common flags:
 
-To have an idea on how different replication protocols would compare, we wrote a tool named [Flint][flint]. 
-Flint takes as input a set of AWS regions.
-It computes the expected latencies and estimates how the protocols perform in such a deployment.
+| Flag           | Meaning                                                      |
+|----------------|-------------------------------------------------------------|
+| `-run`         | `master` \| `server` \| `client`                            |
+| `-config`      | Deployment config file (**required**)                       |
+| `-alias`       | This participant's name (must appear in the config)         |
+| `-protocol`    | Override the config's `protocol:` field                     |
+| `-log`         | Path to the log file                                        |
+| `-latency`     | Latency config file                                         |
+| `-quorum`      | Quorum config file                                          |
 
-[config]: aws.conf
-[epaxos_correct]: https://github.com/otrack/on-epaxos-correctness
-[quorum]: quorum.conf
-[latency]: latency.conf
-[flint]: https://github.com/vonaka/flint
+For local single-machine runs there are helper scripts (`scripts/run-local.sh`,
+`scripts/run-local-multi.sh`) and ready-made configs (`local-5r.conf`,
+`eval-local.conf`). Run them from the repo root, e.g. `bash scripts/run-local.sh`.
+All shell scripts (runners, benchmarks, and per-experiment drivers) live under
+`scripts/`.
+
+Configuration
+-------------
+
+A config file lists the replicas, clients, and master (with IPs), then a set of
+key/value parameters. Example (`local-5r.conf`):
+
+```
+-- Replicas --
+replica0 127.0.1.1
+...
+-- Clients --
+client0 127.0.1.6
+-- Master --
+master0 127.0.1.1
+masterPort: 7287
+
+protocol: curpht
+
+// Replica settings
+noop:    false
+thrifty: false
+fast:    true
+
+// Client / workload settings
+reqs:        5000     // requests per client thread
+writes:      10       // % of strong ops that are writes
+commandSize: 100      // command payload bytes
+conflicts:   0        // % conflicting commands
+
+// Hybrid workload
+weakRatio:   50       // % of commands issued as weak (causal); 0 = pure strong baseline
+weakWrites:  10       // % of weak commands that are writes (rest are reads)
+```
+
+### Key workload parameters
+
+| Parameter        | Meaning                                                                 | Default |
+|------------------|-------------------------------------------------------------------------|---------|
+| `weakRatio`      | Percentage of commands issued as weak/causal (0–100). `0` = strong-only baseline. | 0 |
+| `weakWrites`     | Percentage of weak commands that are writes (rest reads).               | 50      |
+| `writes`         | Percentage of strong commands that are writes.                          | —       |
+| `reqs`           | Requests per client thread.                                             | —       |
+| `commandSize`    | Command payload size in bytes.                                          | 100     |
+| `conflicts`      | Percentage of conflicting commands (for leaderless protocols).          | 0       |
+| `clientThreads`  | Client threads per process (overrides `clones` when > 0).               | 0       |
+| `pipeline`/`pendings` | Enable client pipelining and its depth.                            | —       |
+| `keySpace`       | Number of unique keys (> 0 enables a shared key space).                 | 0       |
+| `zipfSkew`       | Zipf skew for key selection (values ≤ 1 clamp to 1.01; 0 = uniform).    | 0       |
+| `networkDelay`   | Simulated one-way network delay in ms (RTT = 2×).                       | 0       |
+| `batchDelayUs`   | Server-side batching delay (µs).                                        | —       |
+| `maxDescRoutines`| Descriptor-processing goroutine pool size.                             | —       |
+
+The benchmark reports latency (median / P99 / P99.9) and throughput broken down
+**separately for strong and weak operations**, plus totals.
+
+License
+-------
+
+See [LICENSE](LICENSE). SwiftPaxos and EPaxos retain their original licenses.

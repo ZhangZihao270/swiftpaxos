@@ -44,7 +44,7 @@ for i in $(seq 1 $ITERATIONS); do
 
     # Run benchmark
     cd "$PROJECT_ROOT"
-    OUTPUT=$(timeout 180 ./run-multi-client.sh -c "$CONFIG" 2>&1 || true)
+    OUTPUT=$(timeout 180 scripts/run-multi-client.sh -c "$CONFIG" 2>&1 || true)
 
     # Extract metrics (from run-multi-client.sh merged output)
     THROUGHPUT=$(echo "$OUTPUT" | grep -oP 'Aggregate throughput:\s+\K[0-9.]+' | tail -1)

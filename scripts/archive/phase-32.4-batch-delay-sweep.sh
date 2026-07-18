@@ -62,7 +62,7 @@ for delay in "${DELAYS[@]}"; do
         # Run benchmark and save to temp file
         cd "$PROJECT_ROOT"
         TEMP_OUTPUT="/tmp/curpht-batch-test-${delay}-${i}.txt"
-        timeout 180 ./run-multi-client.sh -c "$CONFIG_TEMP" > "$TEMP_OUTPUT" 2>&1 || true
+        timeout 180 scripts/run-multi-client.sh -c "$CONFIG_TEMP" > "$TEMP_OUTPUT" 2>&1 || true
 
         # Extract metrics from temp file
         THROUGHPUT=$(grep "Aggregate throughput:" "$TEMP_OUTPUT" | grep -oP '[0-9]+\.[0-9]+' | head -1)

@@ -88,7 +88,7 @@ KILL_PID=$!
 
 # Run the benchmark (blocks until all clients finish or timeout)
 log "Starting benchmark via run-multi-client.sh..."
-timeout 600 ./run-multi-client.sh -d -c "$CONFIG" -t "$THREADS" -o "$BASE_DIR" \
+timeout 600 scripts/run-multi-client.sh -d -c "$CONFIG" -t "$THREADS" -o "$BASE_DIR" \
     --startup-delay "$STARTUP_DELAY" \
     > "$BASE_DIR/run-output.txt" 2>&1 || true
 

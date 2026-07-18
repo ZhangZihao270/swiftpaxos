@@ -64,7 +64,7 @@ for i in $(seq 1 $ITERATIONS); do
 
     # Run benchmark
     cd "$PROJECT_ROOT"
-    OUTPUT=$(timeout 180 ./run-multi-client.sh -c multi-client.conf 2>&1)
+    OUTPUT=$(timeout 180 scripts/run-multi-client.sh -c multi-client.conf 2>&1)
 
     # Restore original config
     mv "$PROJECT_ROOT/multi-client.conf.bak" "$PROJECT_ROOT/multi-client.conf"

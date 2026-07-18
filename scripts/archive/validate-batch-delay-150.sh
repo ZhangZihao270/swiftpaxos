@@ -49,7 +49,7 @@ echo "" | tee -a "$RESULT_FILE"
 for i in $(seq 1 $ITERATIONS); do
     echo "Iteration $i/$ITERATIONS..." | tee -a "$RESULT_FILE"
 
-    OUTPUT=$(timeout 120 ./run-multi-client.sh -c multi-client.conf 2>&1)
+    OUTPUT=$(timeout 120 scripts/run-multi-client.sh -c multi-client.conf 2>&1)
 
     THROUGHPUT=$(echo "$OUTPUT" | grep -oP 'Aggregate throughput:\s+\K[0-9.]+' | tail -1)
     WEAK_MED=$(echo "$OUTPUT" | grep "Weak Operations:" -A 2 | grep -oP 'Avg median:\s+\K[0-9.]+' | head -1)

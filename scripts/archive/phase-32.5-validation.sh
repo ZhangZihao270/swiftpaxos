@@ -59,7 +59,7 @@ for i in $(seq 1 $ITERATIONS); do
     # Run benchmark
     cd "$PROJECT_ROOT"
     TEMP_OUTPUT="/tmp/curpht-validation-${i}.txt"
-    timeout 180 ./run-multi-client.sh -c "$CONFIG_TEMP" > "$TEMP_OUTPUT" 2>&1 || true
+    timeout 180 scripts/run-multi-client.sh -c "$CONFIG_TEMP" > "$TEMP_OUTPUT" 2>&1 || true
 
     # Extract metrics
     THROUGHPUT=$(grep "Aggregate throughput:" "$TEMP_OUTPUT" | grep -oP '[0-9]+\.[0-9]+' | head -1)

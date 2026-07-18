@@ -24,7 +24,7 @@ for T in $THREADS; do
     sed -i "s/^protocol:.*$/protocol: $PROTOCOL/" "$CONFIG"
 
     # Run benchmark with timeout
-    timeout ${TIMEOUT}s ./run-multi-client.sh -c "$CONFIG" -d > /tmp/sweep-${PROTOCOL}-${T}.log 2>&1
+    timeout ${TIMEOUT}s scripts/run-multi-client.sh -c "$CONFIG" -d > /tmp/sweep-${PROTOCOL}-${T}.log 2>&1
     EXIT_CODE=$?
 
     if [[ $EXIT_CODE -eq 124 ]]; then

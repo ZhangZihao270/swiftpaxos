@@ -162,8 +162,8 @@ for threads in "${THREAD_COUNTS[@]}"; do
     RUN_DIR="$SWEEP_DIR/run-${run_idx}-t${threads}"
     mkdir -p "$RUN_DIR"
 
-    log "Running: ./run-multi-client.sh -c $CONF -d -t $threads"
-    timeout 600 ./run-multi-client.sh -c "$CONF" -d -t "$threads" > "$RUN_DIR/benchmark-output.txt" 2>&1 || {
+    log "Running: scripts/run-multi-client.sh -c $CONF -d -t $threads"
+    timeout 600 scripts/run-multi-client.sh -c "$CONF" -d -t "$threads" > "$RUN_DIR/benchmark-output.txt" 2>&1 || {
         log "WARNING: Benchmark run timed out or failed (exit=$?)"
         LATEST_RESULT=$(ls -dt results/benchmark-* 2>/dev/null | head -1)
         if [ -n "$LATEST_RESULT" ]; then

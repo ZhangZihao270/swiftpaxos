@@ -5,7 +5,7 @@
 # Starts master + N replicas + M clients on localhost, waits for all clients
 # to finish, then merges results.
 #
-# Usage: ./run-local-multi.sh [options]
+# Usage: scripts/run-local-multi.sh [options]
 #
 # Options:
 #   -c, --config FILE       Config file (default: eval-local.conf)
@@ -21,7 +21,8 @@ CONFIG="eval-local.conf"
 THREADS=""
 OUTPUT_DIR=""
 STARTUP_DELAY=15
-WORK_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Operate from the repo root (this script now lives in scripts/)
+WORK_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$WORK_DIR"
 
 # Parse arguments

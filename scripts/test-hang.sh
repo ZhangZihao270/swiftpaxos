@@ -8,7 +8,7 @@ TIMEOUT=120  # seconds
 for i in $(seq 1 $TOTAL); do
     echo "=== Run $i/$TOTAL ==="
     # Run benchmark with timeout
-    timeout $TIMEOUT ./run-multi-client.sh -c benchmark.conf -d > /tmp/bench-run-$i.log 2>&1
+    timeout $TIMEOUT scripts/run-multi-client.sh -c benchmark.conf -d > /tmp/bench-run-$i.log 2>&1
     EXIT=$?
     
     # Find the latest results directory

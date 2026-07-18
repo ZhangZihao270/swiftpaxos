@@ -35,7 +35,7 @@ for value in 100 500 1000 2000 5000 10000 20000; do
     OUTPUT_FILE="results-maxdesc-${value}.txt"
 
     # Run and capture output
-    ./run-multi-client.sh -c "$TEMP_CONF" 2>&1 | tee "$OUTPUT_FILE"
+    scripts/run-multi-client.sh -c "$TEMP_CONF" 2>&1 | tee "$OUTPUT_FILE"
 
     # Extract throughput
     THROUGHPUT=$(grep "Aggregate throughput:" "$OUTPUT_FILE" | awk '{print $3}')

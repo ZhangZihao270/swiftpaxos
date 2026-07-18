@@ -12,7 +12,7 @@ for i in $(seq 1 $N); do
     echo "=== Run $i/$N ==="
 
     # Run benchmark with timeout
-    timeout ${TIMEOUT}s ./run-multi-client.sh -c "$CONFIG" -d > /tmp/bench-run-${i}.log 2>&1
+    timeout ${TIMEOUT}s scripts/run-multi-client.sh -c "$CONFIG" -d > /tmp/bench-run-${i}.log 2>&1
     EXIT_CODE=$?
 
     if [[ $EXIT_CODE -eq 124 ]]; then
